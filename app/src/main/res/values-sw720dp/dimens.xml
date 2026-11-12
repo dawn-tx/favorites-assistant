@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="touch_target_min">72dp</dimen>
+    <dimen name="edge_inset">28dp</dimen>
+    <dimen name="gap_xs">9dp</dimen>
+    <dimen name="gap_sm">16dp</dimen>
+    <dimen name="gap_md">24dp</dimen>
+    <dimen name="gap_lg">32dp</dimen>
+    <dimen name="column_nav">240dp</dimen>
+    <dimen name="column_detail">460dp</dimen>
+    <dimen name="panel_width">600dp</dimen>
+    <dimen name="ball_size">72dp</dimen>
+</resources>

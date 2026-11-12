@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 同步与在线播放 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 全局悬浮助手 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 平板能力声明：不要求手机，但声明支持触屏/多窗口 -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
+    <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:hardwareAccelerated="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:resizeableActivity="true"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FavoritesAssistant">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|navigation|density|fontScale|keyboard|uiMode|layoutDirection"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 第三方视频 App「分享链接」→ 直接在悬浮面板收藏，不打开主 App -->
+        <activity
+            android:name=".ui.ShareReceiverActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:screenOrientation="sensorLandscape"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".floating.FloatingAssistantService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="floating_favorites_assistant" />
+        </service>
+
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+    </application>
+
+</manifest>

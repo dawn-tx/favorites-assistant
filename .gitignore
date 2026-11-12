@@ -1,0 +1,17 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+*.keystore
+!debug.keystore
+captures/
+.externalNativeBuild/
+.cxx/
+node_modules/
+.temp/
+
+# mock 同步服务的本地数据与密钥，永远不要提交
+mock-server/data.json
+mock-server/*.pem

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Media3 的 @UnstableApi（CacheDataSource / SimpleCache / DefaultHttpDataSource 等）
+  只是二进制兼容性保证级别的差异，官方文档确认可以安全使用。
+  这里按官方推荐做工程级选择启用，避免 assembleRelease 的 lintVital 检查把它报成错误。
+  参考：https://developer.android.com/media/media3/exoplayer/troubleshooting
+-->
+<lint>
+    <issue id="UnsafeOptInUsageError">
+        <option name="opt-in" value="androidx.media3.common.util.UnstableApi" />
+    </issue>
+</lint>

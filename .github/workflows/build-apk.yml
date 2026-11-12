@@ -1,0 +1,76 @@
+name: Build APK
+
+# 云端构建：推送到 GitHub 后自动出可安装 APK（Debug + Release），产物在 Actions 页面的 Artifacts 里下载。
+# 本机不需要安装 Android SDK / Gradle / JDK。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: assembleDebug + assembleRelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17（AGP 8.6 要求）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Android SDK 34
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ] && [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null || true
+            "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          else
+            echo "runner 已自带 SDK，跳过安装"; ls "$ANDROID_HOME/platforms"
+          fi
+
+      # 仓库内不含 gradle-wrapper.jar（二进制文件），所以这里由 setup-gradle 提供 Gradle 本体
+      - name: 安装 Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: 构建 APK
+        env:
+          # 想固化后端地址/公钥就改这里；SYNC_SERVER_PUBLIC_KEY 建议放 Repository Secrets
+          SYNC_ENDPOINT: ${{ vars.SYNC_ENDPOINT }}
+          SYNC_SERVER_PUBLIC_KEY: ${{ secrets.SYNC_SERVER_PUBLIC_KEY }}
+        run: |
+          gradle --no-daemon :app:assembleDebug :app:assembleRelease
+
+      - name: 收集产物
+        run: |
+          mkdir -p artifacts
+          find app/build/outputs/apk -name '*.apk' -exec cp -v {} artifacts/ \;
+          ls -lh artifacts
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: favorites-assistant-apk
+          path: artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 30

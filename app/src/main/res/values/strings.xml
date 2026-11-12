@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">收藏助手</string>
+    <string name="assistant_channel_name">全局收藏助手</string>
+    <string name="assistant_channel_desc">常驻悬浮收藏助手，仅在您主动操作时运行，不做后台轮询。</string>
+    <string name="notification_running">悬浮收藏助手已就绪</string>
+    <string name="notification_hint">点悬浮球粘贴链接，或在视频 App 里点「分享 → 收藏助手」</string>
+    <string name="notification_action_settings">打开设置</string>
+    <string name="notification_action_stop">停止</string>
+    <string name="overlay_missing">未取得悬浮窗权限，请在系统设置里允许「收藏助手」显示在其他应用上层</string>
+    <string name="graph_missing">助手初始化失败，请重新打开主 App</string>
+    <string name="toast_synced">已保存并同步到后台</string>
+</resources>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  最小宽度 <600dp 的平板/折叠屏基线。间距按"手机推荐 8dp × 1.5"放大 50% 得到
+  （gap_xs 6 / gap_sm 12 / gap_md 18 / gap_lg 24），sw600dp、sw720dp 目录里再逐档加宽。
+  触控热区与屏距边另有 10mm / 20mm 的物理下限，运行时取两者较大值，见 core/TabletMetrics.kt。
+-->
+<resources>
+    <dimen name="touch_target_min">56dp</dimen>
+    <dimen name="edge_inset">20dp</dimen>
+    <dimen name="gap_xs">6dp</dimen>
+    <dimen name="gap_sm">12dp</dimen>
+    <dimen name="gap_md">18dp</dimen>
+    <dimen name="gap_lg">24dp</dimen>
+    <dimen name="column_nav">170dp</dimen>
+    <dimen name="column_detail">340dp</dimen>
+    <dimen name="panel_width">460dp</dimen>
+    <dimen name="ball_size">56dp</dimen>
+</resources>
