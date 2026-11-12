@@ -49,13 +49,14 @@ fun FloatingBall(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
+                val slop = viewConfiguration.touchSlop
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     dragging = false
                     accumulated = 0f
                     while (true) {
                         val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.isUp) {
+                        if (!change.pressed) {
                             if (dragging) onDragEnd() else onClick()
                             break
                         }
@@ -65,7 +66,7 @@ fun FloatingBall(
                         )
                         if (delta != Offset.Zero) {
                             accumulated += abs(delta.x) + abs(delta.y)
-                            if (!dragging && accumulated > touchSlop) dragging = true
+                            if (!dragging && accumulated > slop) dragging = true
                             if (dragging) onMove(delta.x, delta.y)
                         }
                     }

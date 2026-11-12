@@ -324,6 +324,8 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun setPasteSuggestion(value: Boolean) = viewModelScope.launch { graph.settings.setPasteSuggestion(value) }
     fun setCacheLimitMb(value: Long) = viewModelScope.launch {
         graph.settings.setCacheLimitMb(value)
+        // 改上限会重建 SimpleCache 实例，先释放播放器才不会打断正在读缓存的播放
+        graph.player.release()
         graph.media.applyLimitFromSettings()
     }
     // endregion

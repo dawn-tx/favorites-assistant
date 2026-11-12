@@ -3,6 +3,7 @@ package com.favkit.tablet.ui.main
 import android.widget.FrameLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,8 +14,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.horizontalScroll
-import androidx.compose.foundation.layout.matchParentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -81,20 +80,20 @@ fun DetailPane(
 ) {
     val favorite = state.selected
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    val paneModifier = modifier
+        .fillMaxHeight()
+        .padding(start = scale.gapSm, top = scale.gapSm)
 
-    Column(
-        modifier = modifier
-            .fillMaxHeight()
-            .padding(start = scale.gapSm, top = scale.gapSm),
-    ) {
-        if (favorite == null) {
-            EmptyHint(
-                title = "还没有选中内容",
-                subtitle = "在中间列表点一条收藏，这里会直接显示详情并可以就地播放。",
-            )
-            return@Column
-        }
+    if (favorite == null) {
+        EmptyHint(
+            title = "还没有选中内容",
+            subtitle = "在中间列表点一条收藏，这里会直接显示详情并可以就地播放。",
+            modifier = paneModifier,
+        )
+        return
+    }
 
+    Column(modifier = paneModifier) {
         PlayerStage(
             player = state.player,
             graph = graph,
@@ -116,6 +115,7 @@ fun DetailPane(
             viewModel = viewModel,
             scale = scale,
             onRequestDelete = { showDeleteConfirm = true },
+            modifier = Modifier.weight(1f),
         )
     }
 
@@ -142,6 +142,7 @@ private fun DetailEditor(
     viewModel: MainViewModel,
     scale: TabletScale,
     onRequestDelete: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var titleDraft by remember(favorite.id) { mutableStateOf(favorite.title) }
     var noteDraft by remember(favorite.id) { mutableStateOf(favorite.note) }
@@ -153,9 +154,8 @@ private fun DetailEditor(
     val knownDuration = favorite.durationMs > 0L
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .weight(1f)
             .verticalScroll(rememberScrollState())
             .padding(bottom = scale.gapLg),
         verticalArrangement = Arrangement.spacedBy(scale.gapSm),

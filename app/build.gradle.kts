@@ -100,10 +100,11 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
-    // 播放器 + 离线缓存（media3-datasource / media3-database 由 exoplayer 传递引入，这里显式声明）
+    // 播放器 + 离线缓存（MediaCache 直接使用 datasource 里的 CacheDataSource / SimpleCache，故显式声明）
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
     implementation("androidx.media3:media3-ui:$media3Version")
+    implementation("androidx.media3:media3-datasource:$media3Version")
     implementation("androidx.media3:media3-database:$media3Version")
 
     testImplementation("junit:junit:4.13.2")

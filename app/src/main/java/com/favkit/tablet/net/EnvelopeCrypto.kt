@@ -6,12 +6,12 @@ import android.util.Base64
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.interfaces.RSAPublicKey
+import java.security.spec.MGF1ParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.MGF1ParameterSpec
 import javax.crypto.spec.OAEPParameterSpec
 import javax.crypto.spec.PSource
 import javax.crypto.spec.SecretKeySpec
@@ -47,7 +47,7 @@ class EnvelopeCrypto(private val app: android.app.Application, private val setti
         rsa.init(
             Cipher.ENCRYPT_MODE,
             parsePublicKey(pem),
-            OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpec.DEFAULT),
+            OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT),
         )
         return Envelope(
             alg = ALG_SERVER,

@@ -1,13 +1,15 @@
 package com.favkit.tablet.core
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
-import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.favkit.tablet.R
 import com.favkit.tablet.floating.FloatingAssistantService
 import com.favkit.tablet.ui.MainActivity
@@ -40,7 +42,6 @@ object Notifications {
             .setContentTitle(context.getString(R.string.notification_running))
             .setContentText(text)
             .setOngoing(true)
-            .setSilent(true)
             .setContentIntent(activityIntent(context))
             .addAction(
                 0,
@@ -53,6 +54,14 @@ object Notifications {
                 serviceIntent(context, FloatingAssistantService.ACTION_STOP),
             )
             .build()
+
+    /** Android 13+ 前台服务通知需要 POST_NOTIFICATIONS，未授权时先申请再启动助手 */
+    fun canPostNotifications(context: Context): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
 
     private fun activityIntent(context: Context): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {

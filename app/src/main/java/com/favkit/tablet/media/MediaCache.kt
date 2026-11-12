@@ -2,10 +2,10 @@ package com.favkit.tablet.media
 
 import android.content.Context
 import android.net.Uri
-import androidx.media3.datasource.CacheDataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.database.StandaloneDatabaseProvider
@@ -40,7 +40,8 @@ class MediaCache(context: Context, private val settings: AppSettings) {
             .setReadTimeoutMs(20_000)
     }
 
-    private var cache: SimpleCache = newCache()
+    private var limitBytes = DEFAULT_LIMIT
+    private var cache: SimpleCache = newCache(limitBytes)
     private var cachedFactory: CacheDataSource.Factory = newFactory(cache)
 
     init {
@@ -48,9 +49,9 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         scope.launch { applyLimitFromSettings() }
     }
 
-    private fun newCache(): SimpleCache = SimpleCache(
+    private fun newCache(maxBytes: Long): SimpleCache = SimpleCache(
         cacheDir,
-        LeastRecentlyUsedCacheEvictor(DEFAULT_LIMIT),
+        LeastRecentlyUsedCacheEvictor(maxBytes),
         StandaloneDatabaseProvider(appContext),
     )
 
@@ -65,11 +66,22 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         .setMediaSourceFactory(mediaSourceFactory())
         .build()
 
-    fun totalCachedBytes(): Long = runCatching { cache.cacheBytes }.getOrDefault(0L)
+    fun totalCachedBytes(): Long = runCatching { cache.cachedBytes }.getOrDefault(0L)
 
+    /**
+     * media3 的容量上限只能在建缓存时通过 evictor 定下，没有运行中改容量的接口，
+     * 所以设置里改上限要连同缓存与工厂一起重建；数值没变时直接返回，
+     * 调用方（MainViewModel.setCacheLimitMb）会先释放播放器再走到这里。
+     */
     suspend fun applyLimitFromSettings() {
         val bytes = settings.current().cacheLimitMb * MB
-        withContext(Dispatchers.IO) { runCatching { cache.setMaxCacheBytes(bytes) } }
+        if (bytes == limitBytes) return
+        withContext(Dispatchers.IO) {
+            runCatching { cache.release() }
+            limitBytes = bytes
+            cache = newCache(bytes)
+            cachedFactory = newFactory(cache)
+        }
     }
 
     /**
@@ -79,9 +91,9 @@ class MediaCache(context: Context, private val settings: AppSettings) {
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         runCatching { cache.release() }
         runCatching { cacheDir.deleteRecursively() }
-        cache = newCache()
+        limitBytes = settings.current().cacheLimitMb * MB
+        cache = newCache(limitBytes)
         cachedFactory = newFactory(cache)
-        applyLimitFromSettings()
     }
 
     /**
@@ -94,15 +106,15 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         isCancelled: () -> Boolean,
     ): Long {
         val spec = dataSpecFor(url)
-        val dataSource = cachedFactory.createDataSource(spec)
+        val source = cachedFactory.createDataSource(spec)
         var written = 0L
         withContext(Dispatchers.IO) {
             try {
-                val input = dataSource.open(spec)
+                source.open(spec)
                 val buffer = ByteArray(READ_CHUNK_BYTES)
                 var lastReport = 0L
                 while (!isCancelled()) {
-                    val read = input.read(buffer, 0, buffer.size)
+                    val read = source.read(buffer, 0, buffer.size)
                     if (read <= 0) break
                     written += read
                     if (written - lastReport >= REPORT_EVERY) {
@@ -113,7 +125,7 @@ class MediaCache(context: Context, private val settings: AppSettings) {
             } catch (end: Exception) {
                 // 读到结尾、被取消或上游报错都从这里出来，已落盘的字节仍在缓存里
             } finally {
-                runCatching { dataSource.close() }
+                runCatching { source.close() }
             }
         }
         onProgress(written)

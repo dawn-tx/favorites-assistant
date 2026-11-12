@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
@@ -66,11 +65,11 @@ class MainActivity : ComponentActivity() {
         observeRotationPreference()
         setContent {
             FavoritesTheme {
-                val settings by appGraph.settings.snapshot.collectAsStateWithLifecycle()
+                val uiState by mainModel.state.collectAsStateWithLifecycle()
                 MainScreen(
                     viewModel = mainModel,
                     assistantAvailable = Settings.canDrawOverlays(this),
-                    assistantEnabledByUser = settings.assistantEnabled,
+                    assistantEnabledByUser = uiState.settings?.assistantEnabled ?: true,
                     onEnableAssistant = { requestAssistant() },
                 )
             }
@@ -118,9 +117,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestAssistant() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            !Notifications.canPostNotifications(this)
-        ) {
+        if (!Notifications.canPostNotifications(this)) {
             notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             return
         }

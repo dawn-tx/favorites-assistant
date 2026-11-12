@@ -100,7 +100,7 @@ docs/                          使用说明、架构与性能验证
 | 悬浮球拖拽 + 贴边半隐 | `TYPE_APPLICATION_OVERLAY` 窗口 + `ValueAnimator` 吸附，位置持久化 |
 | 复制即弹轻提示 | Android 10 起非焦点 App 禁止后台读剪贴板 → 采用悬浮球手动粘贴 + 系统分享接收（面板内已说明，见 `docs/使用说明.md`） |
 | 面板四段结构（只读链接 / 手写备注 / 横滚标签 + 内联新建标签 / 保存同步·关闭） | `FloatingPanelScreen` |
-| 手写笔直接书写 | `StylusNoteField`：AndroidView 承载真实 `EditText` + API 34 `setStylusHandwritingEnabled(true)` |
+| 手写笔直接书写 | `StylusNoteField`：AndroidView 承载真实 `EditText`，复用 Android 14+ 对可编辑文本框默认开启的手写笔直写；更早系统用手写输入法，无需额外权限 |
 | 加密上报 url+备注+标签+来源+时间戳 | `EnvelopeCrypto`（AES-256-GCM 会话密钥，RSA-OAEP-256 包裹；无公钥时走设备 Keystore） |
 | 2 秒轻提示 + 自动收起 + 回到原 App | Toast `LENGTH_SHORT`，面板窗口关闭，不启动任何 Activity |
 | 断网静默重试 3 次后进队列自动补传 | `SyncWorker` + `WorkManager` 网络约束与线性退避 + `pending_ops` 队列表 |

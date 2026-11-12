@@ -1,6 +1,5 @@
 package com.favkit.tablet.floating
 
-import android.os.Build
 import android.view.Gravity
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
@@ -19,9 +18,9 @@ import androidx.core.widget.addTextChangedListener
 /**
  * 手写笔友好的备注输入区。
  *
- * 刻意使用 AndroidView + 真实 EditText 而不是 Compose 文本框：
- * `View.setStylusHandwritingEnabled(true)` 是 Android 14 的框架公开 API，开启后手写笔
- * 落在输入区即可直接书写、无需切换输入法，也不依赖实验性 Compose 手写扩展。
+ * 刻意使用 AndroidView + 真实 EditText 而不是 Compose 文本框：Android 14+ 对可编辑文本框
+ * 默认开启手写笔直写（笔落在输入区即书写，不需要切换输入法），更早的平板用手写输入法同样
+ * 能直接写；不依赖任何实验性 Compose 手写扩展，也没有需要额外申请的权限。
  */
 @Composable
 fun StylusNoteField(
@@ -44,15 +43,11 @@ fun StylusNoteField(
             val density = context.resources.displayMetrics.density
             val pad = (14f * density).toInt()
             EditText(context).apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    setStylusHandwritingEnabled(true)
-                }
                 inputType = EditorInfo.TYPE_CLASS_TEXT or
                     EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE or
                     EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES
                 imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
                 gravity = Gravity.TOP or Gravity.START
-                minLines = this@StylusNoteField.minLines
                 setLines(minLines)
                 maxLines = minLines + 3
                 textSize = 17f

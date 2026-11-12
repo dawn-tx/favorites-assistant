@@ -68,10 +68,10 @@ object TabletMetrics {
         val context = LocalContext.current
         val config = LocalConfiguration.current
         return remember(context, config) {
-            val touchMin = max(mmToDp(context, TOUCH_TARGET_MM), dimenDp(context, R.dimen.touch_target_min))
+            val touchMin = maxOf(mmToDp(context, TOUCH_TARGET_MM), dimenDp(context, R.dimen.touch_target_min))
             TabletScale(
                 touchMin = touchMin,
-                edgeInset = max(mmToDp(context, EDGE_INSET_MM), dimenDp(context, R.dimen.edge_inset)),
+                edgeInset = maxOf(mmToDp(context, EDGE_INSET_MM), dimenDp(context, R.dimen.edge_inset)),
                 gapXs = dimenDp(context, R.dimen.gap_xs),
                 gapSm = dimenDp(context, R.dimen.gap_sm),
                 gapMd = dimenDp(context, R.dimen.gap_md),
