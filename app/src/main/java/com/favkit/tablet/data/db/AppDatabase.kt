@@ -8,7 +8,9 @@ import androidx.room.RoomDatabase
 @Database(
     entities = [FavoriteRow::class, TagRow::class, FavoriteTagRow::class, PendingOpRow::class],
     version = 1,
-    exportSchema = true,
+    // 不导出 schema：调试期迁移靠 RoomInspector 看运行时版本即可。导出会让 debug/release 两个
+    // KSP 任务写同一个目录，云端并行构建里会留下半截空文件，Room 读它直接报 "Empty schema file"。
+    exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
 
