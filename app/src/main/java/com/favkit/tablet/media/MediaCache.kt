@@ -66,7 +66,10 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         .setMediaSourceFactory(mediaSourceFactory())
         .build()
 
-    fun totalCachedBytes(): Long = runCatching { cache.cachedBytes }.getOrDefault(0L)
+    /** media3 的 Cache 只有按 key 查 span 的接口，没有总量 getter，所以逐个 key 汇总 */
+    fun totalCachedBytes(): Long = runCatching {
+        cache.keys.sumOf { key -> cache.getCachedSpans(key).sumOf { span -> span.length } }
+    }.getOrDefault(0L)
 
     /**
      * media3 的容量上限只能在建缓存时通过 evictor 定下，没有运行中改容量的接口，
@@ -106,7 +109,7 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         isCancelled: () -> Boolean,
     ): Long {
         val spec = dataSpecFor(url)
-        val source = cachedFactory.createDataSource(spec)
+        val source = cachedFactory.createDataSource()
         var written = 0L
         withContext(Dispatchers.IO) {
             try {
