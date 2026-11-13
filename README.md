@@ -85,7 +85,7 @@ app/src/main/java/com/favkit/tablet/
 
 mock-server/                   本地 mock 同步服务（明文协议 + 确定性假视频解析）
 .github/workflows/             云端构建 APK
-docs/                          使用说明、架构与性能验证
+docs/                          使用说明、架构与性能验证、同步后台接口说明
 ```
 
 ## 五、需求对照
