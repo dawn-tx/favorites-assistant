@@ -21,6 +21,7 @@ data class FavoriteRow(
     val sourceApp: String,
     val favoriteAt: Long,
     val lastPositionMs: Long = 0L,
+    /** 协议透传字段：App 已不做归档分类，一律写 INBOX；留着是为了不改表、不影响老数据 */
     val bucket: String,
     val badge: String = SyncBadge.LOCAL_ONLY.name,
     val locallyCached: Boolean = false,

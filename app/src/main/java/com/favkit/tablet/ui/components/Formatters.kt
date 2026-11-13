@@ -31,3 +31,9 @@ fun formatBytes(bytes: Long): String = when {
 private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA)
 
 fun formatDate(ms: Long): String = if (ms <= 0L) "—" else DATE_FORMAT.format(Date(ms))
+
+/** 播放器选择器与设置页「默认倍速」共用同一组档位，两边显示才能对得上 */
+val PLAYBACK_SPEEDS = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
+
+fun formatSpeed(speed: Float): String =
+    if (speed % 1f == 0f) "${speed.toInt()}x" else "${speed}x"

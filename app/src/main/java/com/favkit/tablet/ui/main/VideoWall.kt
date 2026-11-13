@@ -39,7 +39,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.favkit.tablet.core.TabletScale
-import com.favkit.tablet.data.ArchiveBucket
 import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.ui.components.ConfirmDialog
 import com.favkit.tablet.ui.components.FavColors
@@ -64,7 +63,6 @@ fun VideoWall(
     modifier: Modifier = Modifier,
 ) {
     var deleteConfirm by rememberSaveable { mutableStateOf(false) }
-    var moveOpen by rememberSaveable { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxSize()) {
         if (showFilterBar) {
@@ -75,12 +73,10 @@ fun VideoWall(
                 state = state,
                 viewModel = viewModel,
                 scale = scale,
-                moveOpen = moveOpen,
-                onToggleMove = { moveOpen = !moveOpen },
                 onRequestDelete = { deleteConfirm = true },
             )
         } else {
-            WallHeader(state = state, scale = scale)
+            WallHeader(state = state, viewModel = viewModel, scale = scale)
         }
 
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -147,18 +143,13 @@ fun VideoWall(
     }
 }
 
-/** 窄屏顶部筛选条：分类 + 仅未同步 + 标签，横向滚动，全部热区 >= touchMin */
+/** 窄屏顶部筛选条：仅未同步 + 标签，横向滚动，全部热区 >= touchMin */
 @Composable
 private fun FilterBar(
     viewModel: MainViewModel,
     state: MainUiState,
     scale: TabletScale,
 ) {
-    val filterActive = state.filter.bucket != null ||
-        state.filter.onlyUnsynced ||
-        state.filter.tagIds.isNotEmpty() ||
-        state.filter.query.isNotBlank()
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -169,20 +160,10 @@ private fun FilterBar(
     ) {
         TabletTagChip(
             label = "全部",
-            selected = state.filter.bucket == null,
-            onClick = { viewModel.setBucket(null) },
+            selected = !state.filter.active,
+            onClick = viewModel::clearFilters,
             minHeight = scale.touchMin,
         )
-        ArchiveBucket.entries.forEach { bucket ->
-            TabletTagChip(
-                label = bucket.label(),
-                selected = state.filter.bucket == bucket,
-                onClick = {
-                    viewModel.setBucket(if (state.filter.bucket == bucket) null else bucket)
-                },
-                minHeight = scale.touchMin,
-            )
-        }
         TabletTagChip(
             label = "仅未同步",
             selected = state.filter.onlyUnsynced,
@@ -191,13 +172,13 @@ private fun FilterBar(
         )
         state.tags.forEach { tag ->
             TabletTagChip(
-                label = tag.name,
+                label = if (tag.usageCount > 0) "${tag.name} · ${tag.usageCount}" else tag.name,
                 selected = tag.id in state.filter.tagIds,
                 onClick = { viewModel.toggleTagFilter(tag.id) },
                 minHeight = scale.touchMin,
             )
         }
-        if (filterActive) {
+        if (state.filter.active) {
             TextButton(
                 onClick = viewModel::clearFilters,
                 modifier = Modifier.heightIn(min = scale.touchMin),
@@ -209,7 +190,7 @@ private fun FilterBar(
 }
 
 @Composable
-private fun WallHeader(state: MainUiState, scale: TabletScale) {
+private fun WallHeader(state: MainUiState, viewModel: MainViewModel, scale: TabletScale) {
     val pending = state.items.count {
         it.video == null || it.video?.status == ResolveStatus.PENDING
     }
@@ -223,9 +204,10 @@ private fun WallHeader(state: MainUiState, scale: TabletScale) {
         horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
     ) {
         Text(
-            text = "共 ${state.items.size} 条",
+            text = if (state.filter.active) "筛选出 ${state.items.size} 条" else "共 ${state.items.size} 条",
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
         )
         if (state.resolving) {
             StatusPill("正在取解析结果", FavColors.accent)
@@ -233,7 +215,14 @@ private fun WallHeader(state: MainUiState, scale: TabletScale) {
         if (pending > 0) StatusPill("待解析 $pending", FavColors.warn)
         if (failed > 0) StatusPill("解析失败 $failed", FavColors.fail)
         Spacer(Modifier.weight(1f))
-        if (state.items.isNotEmpty()) {
+        if (state.filter.active) {
+            TextButton(
+                onClick = viewModel::clearFilters,
+                modifier = Modifier.heightIn(min = scale.touchMin),
+            ) {
+                Text("清除筛选")
+            }
+        } else if (state.items.isNotEmpty()) {
             Text(
                 text = "点卡片播放 · 长按多选",
                 style = MaterialTheme.typography.labelMedium,
@@ -245,14 +234,12 @@ private fun WallHeader(state: MainUiState, scale: TabletScale) {
     }
 }
 
-/** 多选状态下的批量条：全选 / 移动归档 / 删除 / 取消 */
+/** 多选状态下的批量条：全选 / 删除 / 退出 */
 @Composable
 private fun SelectionBar(
     state: MainUiState,
     viewModel: MainViewModel,
     scale: TabletScale,
-    moveOpen: Boolean,
-    onToggleMove: () -> Unit,
     onRequestDelete: () -> Unit,
 ) {
     Surface(
@@ -298,30 +285,10 @@ private fun SelectionBar(
                     Text(if (state.allChecked) "取消全选" else "全选")
                 }
                 TextButton(
-                    onClick = onToggleMove,
-                    modifier = Modifier.heightIn(min = scale.touchMin),
-                ) {
-                    Text("移动到…")
-                }
-                TextButton(
                     onClick = onRequestDelete,
                     modifier = Modifier.heightIn(min = scale.touchMin),
                 ) {
                     Text("删除", color = MaterialTheme.colorScheme.error)
-                }
-                if (moveOpen) {
-                    ArchiveBucket.entries.forEach { bucket ->
-                        OutlinedButton(
-                            onClick = {
-                                state.checked.forEach { id -> viewModel.moveTo(id, bucket) }
-                                viewModel.clearChecks()
-                                onToggleMove()
-                            },
-                            modifier = Modifier.heightIn(min = scale.touchMin),
-                        ) {
-                            Text(bucket.label())
-                        }
-                    }
                 }
             }
         }
@@ -330,7 +297,7 @@ private fun SelectionBar(
 
 /**
  * 空列表分两种：筛选筛空了，还是本地库真的空。
- * 后者直接给两条可用的入口（回填 / 快捷收藏），而不是一句"暂无数据"。
+ * 筛空时必须说清「被什么条件筛掉的」，否则用户以为收藏没了 —— 只写"暂无数据"最容易误导。
  */
 @Composable
 private fun EmptyWall(
@@ -339,10 +306,9 @@ private fun EmptyWall(
     scale: TabletScale,
     modifier: Modifier = Modifier,
 ) {
-    val filterActive = state.filter.bucket != null ||
-        state.filter.onlyUnsynced ||
-        state.filter.tagIds.isNotEmpty() ||
-        state.filter.query.isNotBlank()
+    val selectedTags = state.tags.filter { it.id in state.filter.tagIds }
+    val selectedNames = selectedTags.map { it.name }
+    val unusedNames = selectedTags.filter { it.usageCount == 0 }.map { it.name }
 
     Column(
         modifier = modifier
@@ -351,10 +317,21 @@ private fun EmptyWall(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(scale.gapSm),
     ) {
-        if (filterActive) {
-            Text("当前筛选下没有视频", style = MaterialTheme.typography.titleMedium)
+        if (state.filter.active) {
+            Text("当前筛选条件下没有视频", style = MaterialTheme.typography.titleMedium)
             Text(
-                "换个分类、去掉标签筛选，或清空搜索词。",
+                text = when {
+                    unusedNames.isNotEmpty() ->
+                        "标签「${unusedNames.joinToString("」「")}」还没有关联任何收藏，" +
+                            "先去详情页给条目打上标签，或取消这些标签的筛选。"
+
+                    selectedNames.isNotEmpty() ->
+                        "选中的标签「${selectedNames.joinToString("」「")}」下没有同时满足其它条件的收藏。"
+
+                    state.filter.query.isNotBlank() -> "没有匹配「${state.filter.query}」的标题、作者、备注或链接。"
+
+                    else -> "「仅看未同步」筛选下没有待传条目 —— 说明都已经同步完成了。"
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

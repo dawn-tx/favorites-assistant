@@ -1,8 +1,5 @@
 package com.favkit.tablet.data
 
-/** 分类归档桶：待看 / 已归档 / 精选 */
-enum class ArchiveBucket { INBOX, ARCHIVED, STARRED }
-
 /** 条目的同步状态，列表与详情用它渲染小圆点 */
 enum class SyncBadge { SYNCED, QUEUED, FAILED, LOCAL_ONLY }
 
@@ -40,7 +37,7 @@ data class VideoInfo(
 }
 
 /**
- * 一条收藏：只包含用户产生的数据（链接、备注、标签、归档、收藏时间）与本地播放进度。
+ * 一条收藏：只包含用户产生的数据（链接、备注、标签、收藏时间）与本地播放进度。
  * 视频展示信息在 [video] 里，未解析出来时为 null。
  */
 data class Favorite(
@@ -50,7 +47,6 @@ data class Favorite(
     val sourceApp: String,
     val favoriteAt: Long,
     val lastPositionMs: Long,
-    val bucket: ArchiveBucket,
     val badge: SyncBadge,
     val locallyCached: Boolean,
     val tags: List<Tag> = emptyList(),
@@ -69,12 +65,12 @@ data class Favorite(
 
 data class FavoriteFilter(
     val tagIds: List<Long> = emptyList(),
-    val bucket: ArchiveBucket? = null,
     val query: String = "",
     val onlyUnsynced: Boolean = false,
 ) {
+    val active: Boolean get() = tagIds.isNotEmpty() || query.isNotBlank() || onlyUnsynced
+
     fun matches(favorite: Favorite): Boolean {
-        if (bucket != null && favorite.bucket != bucket) return false
         if (onlyUnsynced && favorite.badge == SyncBadge.SYNCED) return false
         if (tagIds.isNotEmpty() && favorite.tags.none { it.id in tagIds }) return false
         if (query.isNotBlank()) {

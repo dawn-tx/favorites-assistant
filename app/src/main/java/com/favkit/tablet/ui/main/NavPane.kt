@@ -37,7 +37,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
-import com.favkit.tablet.data.ArchiveBucket
 import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.SectionTitle
 import com.favkit.tablet.ui.components.StatusPill
@@ -58,10 +57,7 @@ fun NavPane(
 ) {
     var showTagManager by remember { mutableStateOf(false) }
     var newTagName by remember { mutableStateOf("") }
-    val filterActive = state.filter.bucket != null ||
-        state.filter.onlyUnsynced ||
-        state.filter.tagIds.isNotEmpty() ||
-        state.filter.query.isNotBlank()
+    val filterActive = state.filter.active
 
     Column(
         modifier = modifier
@@ -78,21 +74,12 @@ fun NavPane(
 
         NavRow(
             label = "全部收藏",
-            selected = state.filter.bucket == null && !state.filter.onlyUnsynced,
+            selected = !state.filter.onlyUnsynced && state.filter.tagIds.isEmpty(),
             scale = scale,
             onClick = {
-                viewModel.setBucket(null)
-                viewModel.showUnsyncedOnly(false)
+                viewModel.clearFilters()
             },
         )
-        ArchiveBucket.entries.forEach { bucket ->
-            NavRow(
-                label = bucket.label(),
-                selected = state.filter.bucket == bucket,
-                scale = scale,
-                onClick = { viewModel.setBucket(bucket) },
-            )
-        }
 
         Spacer(Modifier.height(scale.gapSm))
 

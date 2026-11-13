@@ -22,13 +22,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -51,7 +53,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.PlayerView
 import com.favkit.tablet.R
 import com.favkit.tablet.core.TabletScale
-import com.favkit.tablet.data.ArchiveBucket
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.di.AppGraph
@@ -60,6 +61,7 @@ import com.favkit.tablet.ui.components.ConfirmDialog
 import com.favkit.tablet.ui.components.EmptyHint
 import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.InfoRow
+import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
 import com.favkit.tablet.ui.components.ResolveStatusPill
 import com.favkit.tablet.ui.components.SectionTitle
 import com.favkit.tablet.ui.components.StatusPill
@@ -70,11 +72,10 @@ import com.favkit.tablet.ui.components.VideoCover
 import com.favkit.tablet.ui.components.formatBytes
 import com.favkit.tablet.ui.components.formatClock
 import com.favkit.tablet.ui.components.formatDate
+import com.favkit.tablet.ui.components.formatSpeed
 import com.favkit.tablet.ui.components.syncBadgeLabel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-
-private val SPEED_PRESETS = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
 
 /**
  * 详情面板：宽屏是常驻右栏，竖屏是全屏页（由 MainScreen 按 state.detailOpen 切换）。
@@ -460,32 +461,6 @@ private fun DetailEditor(
             }
         }
 
-        SectionTitle("归档")
-        Row(horizontalArrangement = Arrangement.spacedBy(scale.gapXs)) {
-            ArchiveBucket.entries.forEach { bucket ->
-                val active = favorite.bucket == bucket
-                if (active) {
-                    Button(
-                        onClick = { viewModel.moveTo(favorite.id, bucket) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = scale.touchMin),
-                    ) {
-                        Text(bucket.label())
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = { viewModel.moveTo(favorite.id, bucket) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = scale.touchMin),
-                    ) {
-                        Text(bucket.label())
-                    }
-                }
-            }
-        }
-
         SectionTitle("离线缓存")
         when {
             prefetchBytes != null -> {
@@ -573,6 +548,9 @@ private fun DetailEditor(
 /**
  * 播放器画面 + 平板化控制条。右栏内嵌时是 16:9，全屏时铺满整屏；
  * 两种形态复用同一个 ExoPlayer 实例与同一个 AndroidView，切换不打断播放。
+ *
+ * 全屏时点画面只切换控制条显隐（播放中 3.5s 自动收起），退出全屏交给按钮和返回键 ——
+ * 之前整块画面都绑在「退出全屏」上，用户想唤出进度条却掉出了全屏。
  */
 @Composable
 fun PlayerStage(
@@ -585,11 +563,15 @@ fun PlayerStage(
     onToggleFullscreen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Box(
-        modifier = modifier
-            .background(Color(0xFF06080C))
-            .let { if (fullscreen) it.clickable(onClick = onToggleFullscreen) else it },
-    ) {
+    var controlsVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(controlsVisible, fullscreen, player.isPlaying) {
+        if (fullscreen && controlsVisible && player.isPlaying) {
+            delay(CONTROLS_AUTO_HIDE_MS)
+            controlsVisible = false
+        }
+    }
+
+    Box(modifier = modifier.background(Color(0xFF06080C))) {
         if (player.itemId == null) {
             Text(
                 text = "点击「加载并播放」开始观看",
@@ -622,15 +604,27 @@ fun PlayerStage(
                 modifier = Modifier.matchParentSize(),
             )
 
-            PlayerControls(
-                player = player,
-                fullscreen = fullscreen,
-                onTogglePlay = onTogglePlay,
-                onSeek = onSeek,
-                onSpeed = onSpeed,
-                onToggleFullscreen = onToggleFullscreen,
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
+            if (fullscreen) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clickable(onClickLabel = if (controlsVisible) "隐藏控制条" else "显示控制条") {
+                            controlsVisible = !controlsVisible
+                        },
+                )
+            }
+
+            if (!fullscreen || controlsVisible) {
+                PlayerControls(
+                    player = player,
+                    fullscreen = fullscreen,
+                    onTogglePlay = onTogglePlay,
+                    onSeek = onSeek,
+                    onSpeed = onSpeed,
+                    onToggleFullscreen = onToggleFullscreen,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
 
             if (player.isBuffering) {
                 CircularProgressIndicator(
@@ -644,6 +638,8 @@ fun PlayerStage(
         }
     }
 }
+
+private const val CONTROLS_AUTO_HIDE_MS = 3_500L
 
 @Composable
 private fun PlayerControls(
@@ -713,18 +709,46 @@ private fun PlayerControls(
                 maxLines = 1,
             )
             Spacer(Modifier.weight(1f))
-            SPEED_PRESETS.forEach { speed ->
-                val active = kotlin.math.abs(player.speed - speed) < 0.01f
+            // 倍速收进一个选择器：五个档位平铺在控制条上，窄屏会挤掉进度条，也容易误触
+            Box {
+                var speedMenuOpen by remember { mutableStateOf(false) }
+                val offNormal = kotlin.math.abs(player.speed - 1f) > 0.01f
                 Text(
-                    text = formatSpeed(speed),
+                    text = formatSpeed(player.speed),
                     style = MaterialTheme.typography.labelLarge,
-                    color = if (active) Color(0xFF8AB4F8) else Color(0xCCFFFFFF),
+                    color = if (offNormal) Color(0xFF8AB4F8) else Color.White,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (offNormal) Color(0x338AB4F8) else Color(0x33FFFFFF))
                         .heightIn(min = if (fullscreen) 40.dp else 34.dp)
-                        .padding(horizontal = if (fullscreen) 14.dp else 8.dp)
-                        .clickable { onSpeed(speed) },
+                        .padding(horizontal = if (fullscreen) 16.dp else 10.dp)
+                        .clickable(onClickLabel = "选择倍速") { speedMenuOpen = true },
                 )
+                DropdownMenu(
+                    expanded = speedMenuOpen,
+                    onDismissRequest = { speedMenuOpen = false },
+                ) {
+                    PLAYBACK_SPEEDS.forEach { speed ->
+                        val active = kotlin.math.abs(player.speed - speed) < 0.01f
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = formatSpeed(speed),
+                                    color = if (active) Color(0xFF8AB4F8) else Color.Unspecified,
+                                )
+                            },
+                            trailingIcon = if (active) {
+                                { Icon(Icons.Filled.Check, contentDescription = null) }
+                            } else {
+                                null
+                            },
+                            onClick = {
+                                onSpeed(speed)
+                                speedMenuOpen = false
+                            },
+                        )
+                    }
+                }
             }
             Icon(
                 painter = painterResource(if (fullscreen) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen),
@@ -737,5 +761,3 @@ private fun PlayerControls(
         }
     }
 }
-
-private fun formatSpeed(speed: Float): String = if (speed == 1f) "1x" else "${speed}x"

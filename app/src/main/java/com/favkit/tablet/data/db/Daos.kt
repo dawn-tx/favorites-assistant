@@ -17,6 +17,9 @@ interface FavoritesDao {
     @Query("SELECT * FROM favorites WHERE id = :id")
     suspend fun byId(id: String): FavoriteRow?
 
+    @Query("SELECT * FROM favorites WHERE id IN (:ids) AND deletedAt IS NULL")
+    suspend fun byIds(ids: List<String>): List<FavoriteRow>
+
     @Query("SELECT * FROM favorites WHERE url = :url AND deletedAt IS NULL ORDER BY favoriteAt DESC LIMIT 1")
     suspend fun byUrl(url: String): FavoriteRow?
 
@@ -25,9 +28,6 @@ interface FavoritesDao {
 
     @Query("UPDATE favorites SET note = :note, badge = :badge, updatedAt = :now WHERE id = :id")
     suspend fun updateNote(id: String, note: String, badge: String, now: Long)
-
-    @Query("UPDATE favorites SET bucket = :bucket, badge = :badge, updatedAt = :now WHERE id = :id")
-    suspend fun updateBucket(id: String, bucket: String, badge: String, now: Long)
 
     @Query("UPDATE favorites SET badge = :badge WHERE id = :id")
     suspend fun updateBadge(id: String, badge: String)
@@ -114,6 +114,9 @@ interface FavoriteTagDao {
 
     @Query("SELECT tagId FROM favorite_tags WHERE favoriteId = :favoriteId")
     suspend fun tagIdsFor(favoriteId: String): List<Long>
+
+    @Query("SELECT favoriteId FROM favorite_tags WHERE tagId = :tagId")
+    suspend fun favoriteIdsForTag(tagId: Long): List<String>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(rows: List<FavoriteTagRow>)

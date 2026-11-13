@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.favkit.tablet.data.ArchiveBucket
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.FavoriteFilter
 import com.favkit.tablet.data.ResolveStatus
@@ -97,6 +96,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             }
         }
         viewModelScope.launch { graph.tags.observeTags().collect { v -> _state.update { it.copy(tags = v) } } }
+        // 筛选条件本身也要回写 state：items 由 combine 过滤，但 UI 的选中态、搜索框文字、
+        // 「清除筛选」按钮都读 state.filter，不同步就会出现「筛了却看不见筛了什么」。
+        viewModelScope.launch { filterFlow.collect { v -> _state.update { it.copy(filter = v) } } }
         viewModelScope.launch { detailOpenFlow.collect { v -> _state.update { it.copy(detailOpen = v) } } }
         viewModelScope.launch { checkedFlow.collect { v -> _state.update { it.copy(checked = v) } } }
         viewModelScope.launch { fullscreenFlow.collect { v -> _state.update { it.copy(fullscreen = v) } } }
@@ -119,8 +121,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     // region 筛选与导航
     fun setQuery(query: String) = filterFlow.update { it.copy(query = query) }
-
-    fun setBucket(bucket: ArchiveBucket?) = filterFlow.update { it.copy(bucket = bucket) }
 
     fun toggleTagFilter(tagId: Long) = filterFlow.update {
         it.copy(tagIds = if (tagId in it.tagIds) it.tagIds - tagId else it.tagIds + tagId)
@@ -147,7 +147,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     /** 标签本身变更后，受影响条目的标签快照要重新排队，否则云端停留在旧标签名 */
     fun renameTag(id: Long, name: String) {
         viewModelScope.launch {
-            val affected = _state.value.items.filter { favorite -> favorite.tags.any { it.id == id } }
+            val affected = graph.favorites.favoritesWithTag(id)
             runCatching { graph.tags.rename(id, name) }
                 .onFailure { messageFlow.value = "重命名失败：${it.message}" }
             resync(affected)
@@ -156,8 +156,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     fun deleteTag(id: Long) {
         viewModelScope.launch {
-            val affected = _state.value.items.filter { favorite -> favorite.tags.any { it.id == id } }
+            val affected = graph.favorites.favoritesWithTag(id)
             graph.tags.delete(id)
+            // 删掉的标签若正被用作筛选，必须一并撤掉，否则条件筛出 0 条、界面上又看不出来
             filterFlow.update { it.copy(tagIds = it.tagIds - id) }
             resync(affected)
         }
@@ -332,14 +333,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
-    fun moveTo(id: String, bucket: ArchiveBucket) {
-        viewModelScope.launch {
-            val updated = graph.favorites.setBucket(id, bucket)
-            updated?.let { graph.sync.queueUpsert(it) }
-            messageFlow.value = "已归档到「${bucket.label()}」"
-        }
-    }
-
     fun retrySync() {
         graph.sync.retryFailed()
         graph.sync.flush()
@@ -449,10 +442,4 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             initializer { MainViewModel(graph) }
         }
     }
-}
-
-fun ArchiveBucket.label(): String = when (this) {
-    ArchiveBucket.INBOX -> "待看"
-    ArchiveBucket.ARCHIVED -> "已归档"
-    ArchiveBucket.STARRED -> "精选"
 }

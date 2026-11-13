@@ -38,17 +38,17 @@ import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.floating.FloatingAssistantService
 import com.favkit.tablet.ui.components.Cardish
 import com.favkit.tablet.ui.components.FavColors
+import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
 import com.favkit.tablet.ui.components.SectionTitle
 import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.formatBytes
+import com.favkit.tablet.ui.components.formatSpeed
 import com.favkit.tablet.ui.components.rememberDialogWidth
 import com.favkit.tablet.ui.main.MainUiState
 import com.favkit.tablet.ui.main.MainViewModel
-import java.util.Locale
 
 private val CACHE_LIMITS_MB = listOf(128L, 256L, 512L, 1024L, 2048L)
 private val UPLOAD_INTERVAL_PRESETS = listOf(0L, 1_000L, 3_000L, 10_000L, 30_000L)
-private val SPEED_PRESETS = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
 
 /** 后台 setUploadIntervalMs 会再夹一次，这里先按同一个范围挡掉脏输入 */
 private const val MAX_UPLOAD_INTERVAL_MS = 600_000L
@@ -310,7 +310,7 @@ fun SettingsSheet(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
                         ) {
-                            SPEED_PRESETS.forEach { speed ->
+                            PLAYBACK_SPEEDS.forEach { speed ->
                                 ChoiceButton(
                                     label = formatSpeed(speed),
                                     selected = kotlin.math.abs(settings.defaultPlaybackSpeed - speed) < 0.01f,
@@ -432,5 +432,3 @@ private fun InfoLine(label: String, value: String) {
         }
     }
 }
-
-private fun formatSpeed(speed: Float): String = String.format(Locale.CHINA, "%.2fx", speed)

@@ -60,6 +60,18 @@ class FavoritesRepository(
     }
 
     /**
+     * 带某个标签的全部收藏。标签改名/删除后要重新排队的是「所有」受影响条目，
+     * 不能只看列表当前可见的那批 —— 筛选状态下漏掉的部分会永远停在旧标签名。
+     */
+    suspend fun favoritesWithTag(tagId: Long): List<Favorite> {
+        val ids = refDao.favoriteIdsForTag(tagId)
+        if (ids.isEmpty()) return emptyList()
+        return favoritesDao.byIds(ids).map {
+            it.toDomain(tagsOf(it.id), videosDao.byFavorite(it.id)?.toDomain())
+        }
+    }
+
+    /**
      * 悬浮面板「保存同步」落库：链接 + 备注 + 标签 + 来源 App + 收藏时间戳。
      * 此时还没有任何视频信息，标题由后台解析后回填。
      */
@@ -77,7 +89,7 @@ class FavoritesRepository(
             note = note.trim(),
             sourceApp = sourceApp.ifBlank { "未知来源" },
             favoriteAt = now,
-            bucket = ArchiveBucket.INBOX.name,
+            bucket = "INBOX",
             badge = SyncBadge.QUEUED.name,
         )
         favoritesDao.upsert(row)
@@ -95,11 +107,6 @@ class FavoritesRepository(
         refDao.clearFor(id)
         if (tagIds.isNotEmpty()) refDao.insertAll(tagIds.map { FavoriteTagRow(id, it) })
         favoritesDao.updateBadge(id, SyncBadge.QUEUED.name)
-    }
-
-    suspend fun setBucket(id: String, bucket: ArchiveBucket): Favorite? {
-        favoritesDao.updateBucket(id, bucket.name, SyncBadge.QUEUED.name, System.currentTimeMillis())
-        return byId(id)
     }
 
     suspend fun markDeleted(ids: List<String>): List<String> {
@@ -178,7 +185,6 @@ class FavoritesRepository(
         sourceApp = sourceApp,
         favoriteAt = favoriteAt,
         lastPositionMs = lastPositionMs,
-        bucket = runCatching { ArchiveBucket.valueOf(bucket) }.getOrDefault(ArchiveBucket.INBOX),
         badge = runCatching { SyncBadge.valueOf(badge) }.getOrDefault(SyncBadge.LOCAL_ONLY),
         locallyCached = locallyCached,
         tags = tags,

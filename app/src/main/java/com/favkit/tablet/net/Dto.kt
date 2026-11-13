@@ -1,6 +1,5 @@
 package com.favkit.tablet.net
 
-import com.favkit.tablet.data.ArchiveBucket
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.OpType
 import com.favkit.tablet.data.ResolveStatus
@@ -20,7 +19,8 @@ data class FavoriteDto(
     val tags: List<String> = emptyList(),
     @SerialName("source_app") val sourceApp: String = "",
     @SerialName("favorite_at") val favoriteAt: Long = 0L,
-    val bucket: String = ArchiveBucket.INBOX.name,
+    /** App 已不做归档分类，但后台字段保留：一律上传 INBOX，服务端与老数据都不受影响 */
+    val bucket: String = "INBOX",
     @SerialName("last_position_ms") val lastPositionMs: Long = 0L,
 )
 
@@ -115,7 +115,6 @@ fun Favorite.toDto(tagNames: List<String>) = FavoriteDto(
     tags = tagNames,
     sourceApp = sourceApp,
     favoriteAt = favoriteAt,
-    bucket = bucket.name,
     lastPositionMs = lastPositionMs,
 )
 
