@@ -14,8 +14,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
@@ -54,8 +54,10 @@ import java.util.Locale
 /**
  * 中栏：收藏列表。
  *
- * 滚动位置走 rememberSaveable 的 LazyListState，加上 Activity 本身由 configChanges 承接旋转，
- * 因此转屏、进出分屏、切换深浅色都不会把列表弹回顶部；搜索词与勾选同样保留。
+ * 滚动位置走 rememberLazyListState（内部用 LazyListState.Saver 存 Int 对），加上 Activity 本身由
+ * configChanges 承接旋转，因此转屏、进出分屏、切换深浅色都不会把列表弹回顶部；搜索词与勾选同样保留。
+ * 注意：不能写成 rememberSaveable { LazyListState() } —— foundation 1.7 的 LazyListState 没有实现
+ * Saveable，自动 Saver 会把对象本身交给 Bundle，运行时直接抛 IllegalArgumentException。
  */
 @Composable
 fun ListPane(
@@ -64,7 +66,7 @@ fun ListPane(
     scale: TabletScale,
     modifier: Modifier = Modifier,
 ) {
-    val listState = rememberSaveable { LazyListState() }
+    val listState = rememberLazyListState()
     var showBatchConfirm by rememberSaveable { mutableStateOf(false) }
     val showBatchDialog = showBatchConfirm && state.checked.isNotEmpty()
 

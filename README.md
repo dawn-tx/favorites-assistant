@@ -91,7 +91,7 @@ docs/                          使用说明、架构与性能验证
 | 需求 | 落点 |
 | --- | --- |
 | Android 10+ | `minSdk = 29` |
-| 默认强制横屏、旋转不丢状态 | `sensorLandscape` + `configChanges`（Activity 不重建）+ 进程级草稿 `FloatingDraftStore` + `rememberSaveable` 列表状态 |
+| 默认强制横屏、旋转不丢状态 | `sensorLandscape` + `configChanges`（Activity 不重建）+ 进程级草稿 `FloatingDraftStore` + `rememberLazyListState` 列表滚动位置 |
 | 触控目标 ≥10mm、边缘控件距屏 ≥20mm | `TabletMetrics` 用 `xdpi/ydpi` 真实物理 DPI 换算，并与 `sw600dp/sw720dp` 三档 dimens 基线取大 |
 | 间距比手机 +50% | `values/dimens.xml` 以 8dp × 1.5 为 `gap_sm` 基线，sw600/sw720 逐档加宽 |
 | 禁止手机竖屏单列 | 三栏布局在 600dp 以下也保持三列（仅收窄列宽），三档基线见 `values` / `values-sw600dp` / `values-sw720dp` |
