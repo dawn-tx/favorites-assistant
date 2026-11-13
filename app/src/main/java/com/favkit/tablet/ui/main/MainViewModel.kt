@@ -50,7 +50,7 @@ data class MainUiState(
     val quickCollect: Boolean = false,
     val message: String? = null,
 ) {
-    val selectionActive: Boolean get() checked.isNotEmpty()
+    val selectionActive: Boolean get() = checked.isNotEmpty()
     val allChecked: Boolean get() = items.isNotEmpty() && checked.size == items.size
     val unresolvedCount: Int get() = items.count { it.video?.status != ResolveStatus.READY }
 }
