@@ -58,7 +58,24 @@ jobs:
           # 想固化后端地址就改这里（Repository variables 里建 SYNC_ENDPOINT）；留空则用 gradle.properties 的默认值
           SYNC_ENDPOINT: ${{ vars.SYNC_ENDPOINT }}
         run: |
-          gradle --no-daemon :app:assembleDebug :app:assembleRelease
+          set -o pipefail
+          gradle --no-daemon --console=plain :app:assembleDebug :app:assembleRelease 2>&1 | tee /tmp/build.log
+
+      # 构建日志只有登录才能下载；失败时把关键报错原样写成 annotation，本地拿 API 就能读到
+      - name: 失败时导出报错摘要
+        if: failure()
+        run: |
+          grep -E '^(e: |w: |error: |> Task .*(FAILED|>)|FAILURE: |Caused by: |\* What went wrong|Could not (find|resolve)|.*symbol: |.*location: )' /tmp/build.log \
+            | sed 's/[[:space:]]\+$//' | awk '!seen[$0]++' | head -n 100 > /tmp/errs.txt
+          echo "::notice::报错摘要 $(wc -l < /tmp/errs.txt) 行"
+          lines=$(wc -l < /tmp/errs.txt)
+          for ((start = 1; start <= lines; start += 20)); do
+            chunk=$(sed -n "${start},$((start + 19))p" /tmp/errs.txt)
+            [ -z "$chunk" ] && continue
+            msg=$(printf '%s\n' "$chunk" | sed 's/%/%25/g' | awk '{ printf "%s%%0A", $0 }')
+            echo "::error file=build.log,line=${start}::${msg}"
+          done
+          exit 1
 
       - name: 收集产物
         run: |
