@@ -8,6 +8,8 @@ name: Build APK
 # 其余推送（纯文档、改说明、只动 mock-server 与 docs/）都只跑几步判定就结束，不装 SDK、不编译、不传产物。
 # 改了 app/ 或 gradle 相关文件却忘了 bump 触发器时，会给出 warning 提醒，而不是静默出个旧包。
 # 想彻底省掉一次 run，也可以在提交信息里写 [skip ci]。
+# 反过来提醒一句：这个字面量只要出现在 message 任何位置，GitHub 就连 run 都不创建，
+# 讲解这条规则的提交千万别带上它（c519da1 就是这样，触发器改了却没出包）。
 
 on:
   push:

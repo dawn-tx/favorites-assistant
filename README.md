@@ -26,7 +26,8 @@ Kotlin 2.0.21 / Jetpack Compose（Material3）/ Room / WorkManager / Media3，�
 - 只有该文件内容变化，或在 Actions 页面手动 **Run workflow**，流水线才会装 SDK、编译、上传产物；
 - 纯文档/说明的提交只跑一个「判断是否需要构建」的步骤就结束（十几秒），不占构建时间；
 - 改了 `app/` 或 gradle 相关文件却忘了 bump，流水线给出 warning 提醒，而不是静默跳过（避免产物落后于代码）；
-- 一次都不想跑，就在提交信息里写 `[skip ci]`（GitHub 原生行为，连运行记录都不创建）。
+- 一次都不想跑，就在提交信息里写 `[skip ci]`（GitHub 原生行为，连运行记录都不创建）；反过来说，
+  **这个字面量出现在 message 任何位置都会吃掉 run**，讲解它的提交也别带上，否则触发器改了也不出包。
 
 > 仓库内不含 `gradlew` / `gradle-wrapper.jar`（二进制文件无法随源码生成）。
 > 本机若想用 Gradle Wrapper，用任意 Gradle 8.9 执行一次 `gradle wrapper --gradle-version 8.9`，

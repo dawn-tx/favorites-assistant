@@ -4,8 +4,11 @@
 #   * 只有本文件发生变化，或在 Actions 页面手动 Run workflow，才会真正构建出 APK。
 #   * 纯文档/说明的提交不出包；改了 app/ 或 gradle 相关文件却忘了 bump，构建会跳过并给出警告。
 #   * 只想彻底跳过一次推送，也可以在提交信息里写 [skip ci]（GitHub 原生，连 run 都不会创建）。
+#     慎用：只要 message 任意位置出现这个字面量就不建 run，光是讲解它都不要把字面量写进 message
+#     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 1
+build: 2
 code: 3305cec
-note: 首次接入触发器，对应 selectionActive 语法修复 + Room 2.6.1 fallbackToDestructiveMigration 那次改动
+note: 第一次带触发器的推送被 message 里的 skip 字面量吃掉，没建 run；这次重新 bump 走通「构建」分支，
+      验证 gate 判定 + 全量 if 守卫确实能出 APK（app/ 代码自 3305cec 起没变过，产物仍是那套代码）。
