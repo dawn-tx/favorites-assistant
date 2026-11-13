@@ -32,7 +32,9 @@ abstract class AppDatabase : RoomDatabase() {
                 .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
                 // v2 把「收藏」与「后台解析的视频信息」拆成两张表，字段不兼容；
                 // 本轮明确按清库处理，旧包升级后本地收藏需要重新添加。
-                .fallbackToDestructiveMigration(dropAllTables = true)
+                // Room 2.6.1 只有无参重载（dropAllTables 是 2.7 才有的），无参版本本身就是
+                // 「没有迁移路径就整库重建」，效果一样。
+                .fallbackToDestructiveMigration()
                 .build()
     }
 }
