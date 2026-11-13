@@ -1,0 +1,11 @@
+# 构建触发器：需要云端重新出 APK 时，把下面的 build 数字 +1（改这个文件就行），和代码一起提交。
+#
+# 规则（与 .github/workflows/build-apk.yml 一致）：
+#   * 只有本文件发生变化，或在 Actions 页面手动 Run workflow，才会真正构建出 APK。
+#   * 纯文档/说明的提交不出包；改了 app/ 或 gradle 相关文件却忘了 bump，构建会跳过并给出警告。
+#   * 只想彻底跳过一次推送，也可以在提交信息里写 [skip ci]（GitHub 原生，连 run 都不会创建）。
+#
+# code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
+build: 1
+code: 3305cec
+note: 首次接入触发器，对应 selectionActive 语法修复 + Room 2.6.1 fallbackToDestructiveMigration 那次改动

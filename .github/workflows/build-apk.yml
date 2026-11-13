@@ -1,13 +1,23 @@
 name: Build APK
 
-# 云端构建：推送到 GitHub 后自动出可安装 APK（Debug + Release），产物在 Actions 页面的 Artifacts 里下载。
-# 本机不需要安装 Android SDK / Gradle / JDK。
+# 云端构建：产物（Debug + Release APK）在 Actions 页面的 Artifacts 里下载，本机不需要装 Android SDK / Gradle / JDK。
+#
+# 什么时候才真正出包 —— 由 .github/BUILD_TRIGGER 控制：
+#   1. 该文件内容变化（需要重新构建就把里面的 build 数字 +1，和代码一起提交）；
+#   2. 或在 Actions 页面手动 Run workflow。
+# 其余推送（纯文档、改说明、只动 mock-server 与 docs/）都只跑几步判定就结束，不装 SDK、不编译、不传产物。
+# 改了 app/ 或 gradle 相关文件却忘了 bump 触发器时，会给出 warning 提醒，而不是静默出个旧包。
+# 想彻底省掉一次 run，也可以在提交信息里写 [skip ci]。
 
 on:
   push:
     branches: [main, master]
-  pull_request:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: 这次为什么要重新构建（只写进日志，便于回溯）
+        required: false
+        default: 手动重跑
 
 concurrency:
   group: apk-${{ github.ref }}
@@ -25,14 +35,71 @@ jobs:
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
+        with:
+          # 判定要 diff 推送区间，需要完整历史（仓库很小，全量拉取代价可忽略）
+          fetch-depth: 0
+
+      - name: 判断是否需要构建
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          DISPATCH_NOTE: ${{ github.event.inputs.reason }}
+        run: |
+          set -uo pipefail
+          TRIGGER=.github/BUILD_TRIGGER
+          build=0
+          reason=""
+          base=""
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            build=1
+            reason="手动 Run workflow（${DISPATCH_NOTE:-未填写原因}）"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          fi
+
+          if [ "$build" = "0" ]; then
+            if [ -n "$base" ]; then
+              files=$(git diff --name-only "$base" "$SHA")
+              echo "推送区间 ${base:0:7}..${SHA:0:7} 的改动文件："
+            else
+              files=$(git diff-tree --no-commit-id --name-only -r "$SHA")
+              echo "本次提交 ${SHA:0:7} 的改动文件（无可用推送区间，可能是首推或 force push）："
+            fi
+            printf '%s\n' "$files" | sed 's/^/  - /'
+
+            if printf '%s\n' "$files" | grep -qxF "$TRIGGER"; then
+              build=1
+              reason="$TRIGGER 已更新"
+            elif printf '%s\n' "$files" | grep -qE '^(app/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradle/|\.github/workflows/)'; then
+              reason="改了源码/构建脚本但 $TRIGGER 没 bump → 跳过构建"
+              echo "::warning::$reason。需要出 APK 请把 $TRIGGER 里的 build 数字 +1 后重推，或在 Actions 里手动 Run workflow。"
+            else
+              reason="改动不涉及构建（文档、mock、说明）→ 跳过"
+            fi
+          fi
+
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          if [ "$build" = "1" ]; then
+            echo "## 将构建 APK：$reason" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## 跳过构建：$reason" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "是否需要构建=$build  原因=$reason"
 
       - name: 安装 JDK 17（AGP 8.6 要求）
+        if: steps.gate.outputs.build == '1'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: 准备 Android SDK 34
+        if: steps.gate.outputs.build == '1'
         run: |
           set -euo pipefail
           SDKMANAGER="$(command -v sdkmanager || true)"
@@ -48,12 +115,14 @@ jobs:
 
       # 仓库内不含 gradle-wrapper.jar（二进制文件），所以这里由 setup-gradle 提供 Gradle 本体
       - name: 安装 Gradle 8.9
+        if: steps.gate.outputs.build == '1'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - name: 构建 APK
+        if: steps.gate.outputs.build == '1'
         env:
           # 想固化后端地址就改这里（Repository variables 里建 SYNC_ENDPOINT）；留空则用 gradle.properties 的默认值
           SYNC_ENDPOINT: ${{ vars.SYNC_ENDPOINT }}
@@ -63,7 +132,7 @@ jobs:
 
       # 构建日志只有登录才能下载；失败时把关键报错原样写成 annotation，本地拿 API 就能读到
       - name: 失败时导出报错摘要
-        if: failure()
+        if: steps.gate.outputs.build == '1' && failure()
         run: |
           grep -E '^(e: |w: |error: |> Task .*(FAILED|>)|FAILURE: |Caused by: |\* What went wrong|Could not (find|resolve)|.*symbol: |.*location: )' /tmp/build.log \
             | sed 's/[[:space:]]\+$//' | awk '!seen[$0]++' | head -n 100 > /tmp/errs.txt
@@ -78,12 +147,14 @@ jobs:
           exit 1
 
       - name: 收集产物
+        if: steps.gate.outputs.build == '1'
         run: |
           mkdir -p artifacts
           find app/build/outputs/apk -name '*.apk' -exec cp -v {} artifacts/ \;
           ls -lh artifacts
 
       - name: 上传 APK
+        if: steps.gate.outputs.build == '1'
         uses: actions/upload-artifact@v4
         with:
           name: favorites-assistant-apk
