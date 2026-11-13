@@ -51,12 +51,6 @@ object VideoLinkDetector {
         HOST_LABELS.forEach { (key, label) -> if (host == key || host.endsWith(".$key")) return label }
         return host
     }
-
-    fun guessTitle(url: String): String {
-        val host = hostOf(url) ?: return url.take(40)
-        val tail = runCatching { java.net.URI(url).path?.trimEnd('/')?.substringAfterLast('/') }.getOrNull()
-        return if (tail.isNullOrBlank()) sourceLabel(url) else "${sourceLabel(url)} · ${tail.take(28)}"
-    }
 }
 
 data class ClipReading(val text: String?, val restricted: Boolean)

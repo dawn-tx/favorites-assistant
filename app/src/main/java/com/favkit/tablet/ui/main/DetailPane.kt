@@ -11,18 +11,21 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -41,6 +44,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.PlayerView
@@ -48,27 +53,34 @@ import com.favkit.tablet.R
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.data.ArchiveBucket
 import com.favkit.tablet.data.Favorite
-import com.favkit.tablet.data.SyncBadge
+import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.di.AppGraph
 import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.ui.components.ConfirmDialog
 import com.favkit.tablet.ui.components.EmptyHint
+import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.InfoRow
+import com.favkit.tablet.ui.components.ResolveStatusPill
 import com.favkit.tablet.ui.components.SectionTitle
 import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.SyncDot
 import com.favkit.tablet.ui.components.TabletTagChip
 import com.favkit.tablet.ui.components.TabletTextField
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.favkit.tablet.ui.components.VideoCover
+import com.favkit.tablet.ui.components.formatBytes
+import com.favkit.tablet.ui.components.formatClock
+import com.favkit.tablet.ui.components.formatDate
+import com.favkit.tablet.ui.components.syncBadgeLabel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 private val SPEED_PRESETS = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
 
 /**
- * 右栏：选中条目的详情预览，内置播放器直接嵌在详情面板里播放，
- * 支持倍速、拖动进度、全屏；全屏时同一个 PlayerStage 铺满整屏，播放不中断。
+ * 详情面板：宽屏是常驻右栏，竖屏是全屏页（由 MainScreen 按 state.detailOpen 切换）。
+ *
+ * 播放器只在后台给出可播地址（video.playable）且播放器已对准本条时挂载；
+ * 否则显示解析态占位，避免出现一个点不动的黑框。
  */
 @Composable
 fun DetailPane(
@@ -76,50 +88,60 @@ fun DetailPane(
     state: MainUiState,
     graph: AppGraph,
     scale: TabletScale,
+    fullScreen: Boolean,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val favorite = state.selected
     var showDeleteConfirm by remember { mutableStateOf(false) }
-    val paneModifier = modifier
-        .fillMaxHeight()
-        .padding(start = scale.gapSm, top = scale.gapSm)
 
-    if (favorite == null) {
-        EmptyHint(
-            title = "还没有选中内容",
-            subtitle = "在中间列表点一条收藏，这里会直接显示详情并可以就地播放。",
-            modifier = paneModifier,
-        )
-        return
+    // 只在详情可见时驱动播放进度（tick 内部按 6 次节流落盘），离开组合自动取消
+    LaunchedEffect(favorite?.id) {
+        if (favorite == null) return@LaunchedEffect
+        while (isActive) {
+            viewModel.tick()
+            delay(500)
+        }
     }
 
-    Column(modifier = paneModifier) {
-        PlayerStage(
-            player = state.player,
-            graph = graph,
-            fullscreen = false,
-            onTogglePlay = viewModel::togglePlay,
-            onSeek = viewModel::seekTo,
-            onSpeed = viewModel::setSpeed,
-            onToggleFullscreen = { viewModel.setFullscreen(true) },
-            onTick = viewModel::tick,
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(18.dp)),
-        )
-
-        DetailEditor(
+    Column(modifier = modifier.fillMaxHeight()) {
+        DetailHeader(
             favorite = favorite,
-            state = state,
-            viewModel = viewModel,
             scale = scale,
-            onRequestDelete = { showDeleteConfirm = true },
-            modifier = Modifier.weight(1f),
+            fullScreen = fullScreen,
+            onBack = onBack,
         )
+
+        if (favorite == null) {
+            EmptyHint(
+                title = "还没有选中视频",
+                subtitle = "点一张卡片看详情；后台解析出播放地址后可以直接在这里播放。",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(scale.gapMd),
+            )
+        } else {
+            PlayerSection(
+                favorite = favorite,
+                state = state,
+                graph = graph,
+                viewModel = viewModel,
+                scale = scale,
+            )
+            DetailEditor(
+                favorite = favorite,
+                state = state,
+                viewModel = viewModel,
+                scale = scale,
+                onRequestDelete = { showDeleteConfirm = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            )
+        }
     }
 
-    if (showDeleteConfirm) {
+    if (showDeleteConfirm && favorite != null) {
         ConfirmDialog(
             title = "删除这条收藏？",
             message = favorite.url,
@@ -136,6 +158,177 @@ fun DetailPane(
 }
 
 @Composable
+private fun DetailHeader(
+    favorite: Favorite?,
+    scale: TabletScale,
+    fullScreen: Boolean,
+    onBack: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = scale.gapXs, vertical = scale.gapXs),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+    ) {
+        if (fullScreen) {
+            IconButton(onClick = onBack, modifier = Modifier.size(scale.touchMin)) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "返回视频墙")
+            }
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = favorite?.displayTitle ?: "详情",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = favorite?.hostLabel ?: "选中一条收藏后显示视频信息与播放器",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (favorite != null) {
+            ResolveStatusPill(favorite.video)
+        }
+    }
+}
+
+@Composable
+private fun PlayerSection(
+    favorite: Favorite,
+    state: MainUiState,
+    graph: AppGraph,
+    viewModel: MainViewModel,
+    scale: TabletScale,
+) {
+    val stageModifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = scale.gapXs)
+        .aspectRatio(16f / 9f)
+        .clip(RoundedCornerShape(20.dp))
+
+    val ready = favorite.video?.playable == true
+    val aligned = state.player.itemId == favorite.id
+
+    if (ready && aligned) {
+        PlayerStage(
+            player = state.player,
+            graph = graph,
+            fullscreen = false,
+            onTogglePlay = viewModel::togglePlay,
+            onSeek = viewModel::seekTo,
+            onSpeed = viewModel::setSpeed,
+            onToggleFullscreen = { viewModel.setFullscreen(true) },
+            modifier = stageModifier,
+        )
+    } else {
+        StagePlaceholder(
+            favorite = favorite,
+            state = state,
+            viewModel = viewModel,
+            scale = scale,
+            modifier = stageModifier,
+        )
+    }
+}
+
+/** 解析中 / 解析失败 / 已解析但还没装进播放器时的占位舞台 */
+@Composable
+private fun StagePlaceholder(
+    favorite: Favorite,
+    state: MainUiState,
+    viewModel: MainViewModel,
+    scale: TabletScale,
+    modifier: Modifier = Modifier,
+) {
+    val video = favorite.video
+    val playable = video?.playable == true
+    val failed = video?.status == ResolveStatus.FAILED
+
+    Box(modifier = modifier.background(Color(0xFF06080C))) {
+        VideoCover(
+            coverUrl = video?.coverUrl.orEmpty(),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            Box(modifier = Modifier.matchParentSize().background(Color(0x99000000)))
+        }
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(scale.gapSm),
+            verticalArrangement = Arrangement.spacedBy(scale.gapXs),
+        ) {
+            Text(
+                text = when {
+                    playable -> "后台已解析出可播放地址"
+                    failed -> "解析失败"
+                    else -> "后台正在解析这条链接"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = when {
+                    playable -> "点击右侧按钮装载播放器，会从上次看到的位置继续。"
+                    failed -> video?.error.orEmpty().ifBlank { "后台没能解析这条链接，可以重试一次。" }
+                    else -> "封面、标题、时长与播放地址都由后台返回，解析完成后这里就能直接播放。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFD7DBE0),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+            ) {
+                Button(
+                    onClick = {
+                        if (playable) {
+                            viewModel.openDetail(favorite.id)
+                        } else {
+                            viewModel.resolveNow(favorite.id)
+                        }
+                    },
+                    enabled = !(state.resolving && !playable),
+                    modifier = Modifier.heightIn(min = scale.touchMin),
+                ) {
+                    Text(if (playable) "加载并播放" else "重新解析")
+                }
+                Text(
+                    text = favorite.url,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF9AA0A6),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        if (state.resolving && !playable) {
+            CircularProgressIndicator(
+                color = Color(0xFFFDD663),
+                strokeWidth = 2.dp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(scale.gapSm)
+                    .size(24.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun DetailEditor(
     favorite: Favorite,
     state: MainUiState,
@@ -144,44 +337,66 @@ private fun DetailEditor(
     onRequestDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var titleDraft by remember(favorite.id) { mutableStateOf(favorite.title) }
     var noteDraft by remember(favorite.id) { mutableStateOf(favorite.note) }
     var tagSelection by remember(favorite.id) { mutableStateOf(favorite.tags.map { it.id }.toSet()) }
 
-    val textDirty = titleDraft != favorite.title || noteDraft != favorite.note
+    val video = favorite.video
+    val noteDirty = noteDraft.trim() != favorite.note
     val tagsDirty = tagSelection != favorite.tags.map { it.id }.toSet()
     val prefetchBytes = state.prefetch[favorite.id]
-    val knownDuration = favorite.durationMs > 0L
+    val watched = favorite.lastPositionMs
+    val durationMs = favorite.durationMs
+    val progress = if (durationMs > 0L && watched > 0L) {
+        (watched.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
 
     Column(
         modifier = modifier
-            .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(bottom = scale.gapLg),
-        verticalArrangement = Arrangement.spacedBy(scale.gapSm),
+            .padding(horizontal = scale.gapXs, vertical = scale.gapXs),
+        verticalArrangement = Arrangement.spacedBy(scale.gapXs),
     ) {
-        Spacer(Modifier.height(scale.gapXs))
+        SectionTitle("视频信息")
+        InfoRow("标题", video?.title?.takeIf { it.isNotBlank() } ?: "等待后台解析")
+        InfoRow("作者", video?.author?.takeIf { it.isNotBlank() } ?: "—")
+        InfoRow("站点", video?.site?.takeIf { it.isNotBlank() } ?: favorite.hostLabel)
+        InfoRow("清晰度", video?.quality?.takeIf { it.isNotBlank() } ?: "—")
+        InfoRow("时长", if (durationMs > 0L) formatClock(durationMs) else "—")
+        InfoRow("解析时间", formatDate(video?.resolvedAt ?: 0L))
+        if (video?.status == ResolveStatus.FAILED && video?.error.orEmpty().isNotBlank()) {
+            Text(
+                text = video?.error.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (video?.isMockSource == true) {
+            StatusPill("演示源：后台返回的示例视频数据", FavColors.warn)
+        }
+        if (state.player.error != null) {
+            Text(
+                text = state.player.error.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
 
-        TabletTextField(
-            value = titleDraft,
-            onValueChange = { titleDraft = it },
-            label = "标题",
-            minHeight = scale.touchMin,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        SectionTitle("备注")
         TabletTextField(
             value = noteDraft,
             onValueChange = { noteDraft = it },
-            label = "备注",
+            label = "只对自己可见的备注",
             minHeight = scale.touchMin * 2f,
             singleLine = false,
+            supporting = "手写笔可直接落在本行，转屏不会丢草稿",
             modifier = Modifier.fillMaxWidth(),
-            supporting = "手写笔可直接落在本行，横竖屏切换不会丢内容",
         )
         Row(horizontalArrangement = Arrangement.spacedBy(scale.gapXs)) {
             Button(
-                onClick = { viewModel.saveNote(favorite.id, titleDraft, noteDraft) },
-                enabled = textDirty,
+                onClick = { viewModel.saveNote(favorite.id, noteDraft) },
+                enabled = noteDirty,
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = scale.touchMin),
@@ -189,11 +404,8 @@ private fun DetailEditor(
                 Text("保存备注")
             }
             TextButton(
-                onClick = {
-                    titleDraft = favorite.title
-                    noteDraft = favorite.note
-                },
-                enabled = textDirty,
+                onClick = { noteDraft = favorite.note },
+                enabled = noteDirty,
                 modifier = Modifier.heightIn(min = scale.touchMin),
             ) {
                 Text("撤销")
@@ -207,13 +419,23 @@ private fun DetailEditor(
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
         ) {
+            if (state.tags.isEmpty()) {
+                Text(
+                    "标签库还是空的，去左栏新建一个。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             state.tags.forEach { tag ->
                 TabletTagChip(
                     label = tag.name,
                     selected = tag.id in tagSelection,
                     onClick = {
-                        tagSelection = if (tag.id in tagSelection) tagSelection - tag.id
-                        else tagSelection + tag.id
+                        tagSelection = if (tag.id in tagSelection) {
+                            tagSelection - tag.id
+                        } else {
+                            tagSelection + tag.id
+                        }
                     },
                     minHeight = scale.touchMin,
                 )
@@ -238,23 +460,28 @@ private fun DetailEditor(
             }
         }
 
-        SectionTitle("归档分类")
+        SectionTitle("归档")
         Row(horizontalArrangement = Arrangement.spacedBy(scale.gapXs)) {
             ArchiveBucket.entries.forEach { bucket ->
-                OutlinedButton(
-                    onClick = { viewModel.moveTo(favorite.id, bucket) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = scale.touchMin),
-                ) {
-                    Text(
-                        text = bucket.label(),
-                        color = if (favorite.bucket == bucket) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
+                val active = favorite.bucket == bucket
+                if (active) {
+                    Button(
+                        onClick = { viewModel.moveTo(favorite.id, bucket) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = scale.touchMin),
+                    ) {
+                        Text(bucket.label())
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { viewModel.moveTo(favorite.id, bucket) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = scale.touchMin),
+                    ) {
+                        Text(bucket.label())
+                    }
                 }
             }
         }
@@ -281,10 +508,11 @@ private fun DetailEditor(
                 }
             }
 
-            favorite.locallyCached -> StatusPill("已缓存，离线可直接播放", Color(0xFF1E8E3E))
+            favorite.locallyCached -> StatusPill("已缓存，离线可直接播放", FavColors.ok)
 
             else -> Button(
                 onClick = { viewModel.prefetch(favorite.id) },
+                enabled = video?.playable == true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = scale.touchMin),
@@ -294,48 +522,41 @@ private fun DetailEditor(
                     contentDescription = null,
                     modifier = Modifier.size(20.dp),
                 )
-                Spacer(Modifier.width(scale.gapXs))
+                Spacer(Modifier.size(scale.gapXs))
                 Text("缓存到本地")
             }
         }
         Text(
-            text = if (knownDuration) {
+            text = if (video?.playable == true) {
                 "缓存后无网络也能完整播放；播放器与缓存共用同一份数据，边播边存。"
             } else {
-                "尚未取到视频时长，播放一次后即可显示观看进度。"
+                "解析出播放地址后才能缓存；收藏记录本身已经存在本地，不受影响。"
             },
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         SectionTitle("信息")
         Row(verticalAlignment = Alignment.CenterVertically) {
             SyncDot(badge = favorite.badge, online = state.online)
-            Spacer(Modifier.width(scale.gapXs))
+            Spacer(Modifier.size(scale.gapXs))
             Text(
-                text = badgeLabel(favorite.badge, state.online),
-                style = MaterialTheme.typography.labelLarge,
+                text = syncBadgeLabel(favorite.badge, state.online),
+                style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        InfoRow("来源", favorite.sourceApp)
+        InfoRow("来源", favorite.sourceApp.ifBlank { "—" })
         InfoRow("链接", favorite.url)
-        InfoRow("收藏时间", TIME_FORMAT.format(Date(favorite.favoriteAt)))
+        InfoRow("收藏时间", formatDate(favorite.favoriteAt))
         InfoRow(
             "观看进度",
-            if (favorite.durationMs > 0) {
-                "${formatTime(favorite.lastPositionMs)} / ${formatTime(favorite.durationMs)}"
+            if (durationMs > 0L) {
+                "${formatClock(watched)} / ${formatClock(durationMs)}（${(progress * 100).toInt()}%）"
             } else {
                 "尚未播放"
             },
         )
-        if (state.player.error != null) {
-            Text(
-                text = state.player.error,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
 
         TextButton(
             onClick = onRequestDelete,
@@ -345,6 +566,7 @@ private fun DetailEditor(
         ) {
             Text("删除这条收藏", color = MaterialTheme.colorScheme.error)
         }
+        Spacer(Modifier.height(scale.gapSm))
     }
 }
 
@@ -361,16 +583,8 @@ fun PlayerStage(
     onSeek: (Long) -> Unit,
     onSpeed: (Float) -> Unit,
     onToggleFullscreen: () -> Unit,
-    onTick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LaunchedEffect(Unit) {
-        while (true) {
-            onTick()
-            delay(500)
-        }
-    }
-
     Box(
         modifier = modifier
             .background(Color(0xFF06080C))
@@ -378,10 +592,13 @@ fun PlayerStage(
     ) {
         if (player.itemId == null) {
             Text(
-                text = "从中间列表选择一条收藏即可播放",
+                text = "点击「加载并播放」开始观看",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFFB7BDC6),
-                modifier = Modifier.align(Alignment.Center),
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp),
             )
         } else {
             AndroidView(
@@ -461,7 +678,10 @@ private fun PlayerControls(
     ) {
         Slider(
             value = fraction,
-            onValueChange = { scrubbing = true; scrubValue = it },
+            onValueChange = {
+                scrubbing = true
+                scrubValue = it
+            },
             onValueChangeFinished = {
                 scrubbing = false
                 onSeek((scrubValue * durationMs).toLong())
@@ -487,7 +707,7 @@ private fun PlayerControls(
                     .clickable(onClick = onTogglePlay),
             )
             Text(
-                text = "${formatTime(player.positionMs)} / ${formatTime(player.durationMs)}",
+                text = "${formatClock(player.positionMs)} / ${formatClock(player.durationMs)}",
                 style = MaterialTheme.typography.labelLarge,
                 color = Color.White,
                 maxLines = 1,
@@ -518,33 +738,4 @@ private fun PlayerControls(
     }
 }
 
-private fun badgeLabel(badge: SyncBadge, online: Boolean): String = when {
-    !online -> "离线待同步"
-    badge == SyncBadge.SYNCED -> "已同步"
-    badge == SyncBadge.QUEUED -> "等待后台上传"
-    badge == SyncBadge.FAILED -> "重试已耗尽，联网后自动补传"
-    else -> "仅本地"
-}
-
 private fun formatSpeed(speed: Float): String = if (speed == 1f) "1x" else "${speed}x"
-
-private fun formatTime(ms: Long): String {
-    if (ms <= 0L) return "00:00"
-    val totalSeconds = ms / 1000
-    val hours = totalSeconds / 3600
-    val minutes = (totalSeconds % 3600) / 60
-    val seconds = totalSeconds % 60
-    return if (hours > 0) {
-        String.format(Locale.CHINA, "%d:%02d:%02d", hours, minutes, seconds)
-    } else {
-        String.format(Locale.CHINA, "%02d:%02d", minutes, seconds)
-    }
-}
-
-private fun formatBytes(bytes: Long): String = when {
-    bytes >= 1L shl 30 -> String.format(Locale.CHINA, "%.1fGB", bytes.toDouble() / (1L shl 30))
-    bytes >= 1L shl 20 -> String.format(Locale.CHINA, "%.0fMB", bytes.toDouble() / (1L shl 20))
-    else -> "${bytes / 1024}KB"
-}
-
-private val TIME_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA)

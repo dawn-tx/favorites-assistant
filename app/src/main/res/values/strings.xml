@@ -9,5 +9,4 @@
     <string name="notification_action_stop">停止</string>
     <string name="overlay_missing">未取得悬浮窗权限，请在系统设置里允许「收藏助手」显示在其他应用上层</string>
     <string name="graph_missing">助手初始化失败，请重新打开主 App</string>
-    <string name="toast_synced">已保存并同步到后台</string>
 </resources>

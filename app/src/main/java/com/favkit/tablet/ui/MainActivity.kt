@@ -2,7 +2,6 @@ package com.favkit.tablet.ui
 
 import android.Manifest
 import android.content.Intent
-import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -12,11 +11,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
 import com.favkit.tablet.App
 import com.favkit.tablet.R
 import com.favkit.tablet.core.Notifications
@@ -24,14 +21,13 @@ import com.favkit.tablet.floating.FloatingAssistantService
 import com.favkit.tablet.ui.main.MainScreen
 import com.favkit.tablet.ui.main.MainViewModel
 import com.favkit.tablet.ui.theme.FavoritesTheme
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * 平板主入口：默认强制横屏。
+ * 平板主入口。
  *
- * 旋转、深色模式、分屏尺寸变化都由 configChanges 承接，Activity 不重建，
+ * 不锁方向：布局完全由窗口宽度自适应（见 MainScreen），横屏、竖屏、分屏、折叠屏展开都能用。
+ * 旋转、深浅色、分屏尺寸变化由 manifest 的 configChanges 承接，Activity 不重建，
  * 因此列表滚动位置、选中标签、正在输入的备注全部原生保留。
  */
 class MainActivity : ComponentActivity() {
@@ -61,8 +57,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        observeRotationPreference()
         setContent {
             FavoritesTheme {
                 val uiState by mainModel.state.collectAsStateWithLifecycle()
@@ -90,23 +84,6 @@ class MainActivity : ComponentActivity() {
             val snapshot = appGraph.settings.current()
             if (snapshot.assistantEnabled && Settings.canDrawOverlays(this@MainActivity)) {
                 FloatingAssistantService.start(this@MainActivity)
-            }
-        }
-    }
-
-    private fun observeRotationPreference() {
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                appGraph.settings.snapshot
-                    .map { it.allowFreeRotation }
-                    .distinctUntilChanged()
-                    .collect { free ->
-                        requestedOrientation = if (free) {
-                            ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-                        } else {
-                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                        }
-                    }
             }
         }
     }

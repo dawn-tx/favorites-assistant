@@ -7,7 +7,6 @@ import com.favkit.tablet.data.TagsRepository
 import com.favkit.tablet.data.db.AppDatabase
 import com.favkit.tablet.media.MediaCache
 import com.favkit.tablet.media.TabletPlayer
-import com.favkit.tablet.net.EnvelopeCrypto
 import com.favkit.tablet.net.SyncApi
 import com.favkit.tablet.sync.Connectivity
 import com.favkit.tablet.sync.SyncManager
@@ -25,8 +24,7 @@ class AppGraph private constructor(private val app: Application) {
     val media: MediaCache by lazy { MediaCache(app, settings) }
     val player: TabletPlayer by lazy { TabletPlayer(media) }
 
-    private val crypto: EnvelopeCrypto by lazy { EnvelopeCrypto(app, settings) }
-    val api: SyncApi by lazy { SyncApi(settings, crypto) }
+    val api: SyncApi by lazy { SyncApi(settings) }
     val sync: SyncManager by lazy { SyncManager(app, db) }
 
     companion object {

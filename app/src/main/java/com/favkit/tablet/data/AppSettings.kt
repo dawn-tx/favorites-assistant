@@ -18,12 +18,12 @@ private val Context.settingsStore by preferencesDataStore(name = "assistant_sett
 data class SettingsSnapshot(
     val syncEndpoint: String,
     val syncToken: String,
-    val serverPublicKeyPem: String,
     val assistantEnabled: Boolean,
-    val allowFreeRotation: Boolean,
     val pasteSuggestion: Boolean,
     val defaultPlaybackSpeed: Float,
     val cacheLimitMb: Long,
+    /** 上一条传完后，后台没给等待时间时用的间隔 */
+    val uploadIntervalMs: Long,
     val deviceId: String,
 )
 
@@ -33,12 +33,11 @@ class AppSettings(context: Context) {
     private object Keys {
         val ENDPOINT = stringPreferencesKey("sync_endpoint")
         val TOKEN = stringPreferencesKey("sync_token")
-        val SERVER_KEY = stringPreferencesKey("server_public_key")
         val ASSISTANT = booleanPreferencesKey("assistant_enabled")
-        val FREE_ROTATION = booleanPreferencesKey("allow_free_rotation")
         val PASTE_SUGGEST = booleanPreferencesKey("paste_suggestion")
         val SPEED = floatPreferencesKey("default_speed")
         val CACHE_MB = longPreferencesKey("cache_limit_mb")
+        val UPLOAD_INTERVAL = longPreferencesKey("upload_interval_ms")
         val DEVICE_ID = stringPreferencesKey("device_id")
     }
 
@@ -46,13 +45,11 @@ class AppSettings(context: Context) {
         SettingsSnapshot(
             syncEndpoint = p[Keys.ENDPOINT]?.takeIf { it.isNotBlank() } ?: BuildConfig.DEFAULT_SYNC_ENDPOINT,
             syncToken = p[Keys.TOKEN] ?: "",
-            serverPublicKeyPem = p[Keys.SERVER_KEY]?.takeIf { it.isNotBlank() }
-                ?: BuildConfig.SERVER_RSA_PUBLIC_KEY_PEM,
             assistantEnabled = p[Keys.ASSISTANT] ?: true,
-            allowFreeRotation = p[Keys.FREE_ROTATION] ?: false,
             pasteSuggestion = p[Keys.PASTE_SUGGEST] ?: true,
             defaultPlaybackSpeed = p[Keys.SPEED] ?: 1.0f,
             cacheLimitMb = p[Keys.CACHE_MB] ?: 512L,
+            uploadIntervalMs = p[Keys.UPLOAD_INTERVAL] ?: DEFAULT_UPLOAD_INTERVAL_MS,
             deviceId = p[Keys.DEVICE_ID] ?: "",
         )
     }
@@ -73,10 +70,17 @@ class AppSettings(context: Context) {
 
     suspend fun setSyncEndpoint(value: String) = update { this[Keys.ENDPOINT] = value.trim() }
     suspend fun setSyncToken(value: String) = update { this[Keys.TOKEN] = value.trim() }
-    suspend fun setServerPublicKey(value: String) = update { this[Keys.SERVER_KEY] = value.trim() }
     suspend fun setAssistantEnabled(value: Boolean) = update { this[Keys.ASSISTANT] = value }
-    suspend fun setAllowFreeRotation(value: Boolean) = update { this[Keys.FREE_ROTATION] = value }
     suspend fun setPasteSuggestion(value: Boolean) = update { this[Keys.PASTE_SUGGEST] = value }
     suspend fun setDefaultPlaybackSpeed(value: Float) = update { this[Keys.SPEED] = value }
     suspend fun setCacheLimitMb(value: Long) = update { this[Keys.CACHE_MB] = value }
+
+    /** 0 表示不限速：上一条一结束就立刻传下一条 */
+    suspend fun setUploadIntervalMs(value: Long) =
+        update { this[Keys.UPLOAD_INTERVAL] = value.coerceIn(0L, MAX_UPLOAD_INTERVAL_MS) }
+
+    companion object {
+        const val DEFAULT_UPLOAD_INTERVAL_MS = 3_000L
+        const val MAX_UPLOAD_INTERVAL_MS = 600_000L
+    }
 }

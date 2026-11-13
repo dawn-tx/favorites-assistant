@@ -38,12 +38,16 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.data.ArchiveBucket
+import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.SectionTitle
+import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.TabletTagChip
+import com.favkit.tablet.ui.components.formatBytes
+import com.favkit.tablet.ui.components.rememberDialogWidth
 
 /**
- * 左栏：分类导航 + 标签多选筛选 + 标签管理。
- * 列宽由 TabletScale 按 600dp/720dp 断点给出，窄屏也不会退化成竖屏单列。
+ * 宽屏左栏：分类 + 同步状态 + 标签筛选 + 标签库管理。
+ * 列宽由 TabletScale 按 sw600/sw720 断点给出，同时随窗口宽度收窄，保证中间视频墙至少两列。
  */
 @Composable
 fun NavPane(
@@ -66,12 +70,20 @@ fun NavPane(
             .padding(vertical = scale.gapSm, horizontal = scale.gapXs),
         verticalArrangement = Arrangement.spacedBy(scale.gapXs),
     ) {
-        SectionTitle("分类")
+        Text(
+            "浏览",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(horizontal = scale.gapXs, vertical = scale.gapXs),
+        )
+
         NavRow(
             label = "全部收藏",
             selected = state.filter.bucket == null && !state.filter.onlyUnsynced,
             scale = scale,
-            onClick = { viewModel.setBucket(null) },
+            onClick = {
+                viewModel.setBucket(null)
+                viewModel.showUnsyncedOnly(false)
+            },
         )
         ArchiveBucket.entries.forEach { bucket ->
             NavRow(
@@ -84,14 +96,31 @@ fun NavPane(
 
         Spacer(Modifier.height(scale.gapSm))
 
-        SectionTitle("同步")
+        SectionTitle("同步", modifier = Modifier.padding(horizontal = scale.gapXs))
         NavRow(
             label = "仅看未同步",
             selected = state.filter.onlyUnsynced,
-            trailing = state.unsynced.toString(),
+            trailing = if (state.unsynced > 0) state.unsynced.toString() else null,
             scale = scale,
             onClick = { viewModel.showUnsyncedOnly(!state.filter.onlyUnsynced) },
         )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!state.online) StatusPill("离线", FavColors.muted)
+            if (state.queued > 0) StatusPill("待上传 ${state.queued}", FavColors.warn)
+            if (state.unsynced > 0) StatusPill("未同步 ${state.unsynced}", FavColors.fail)
+        }
+        if (state.unsynced > 0 || state.queued > 0) {
+            TextButton(
+                onClick = viewModel::retrySync,
+                modifier = Modifier.heightIn(min = scale.touchMin),
+            ) {
+                Text("立即重试上传")
+            }
+        }
         if (filterActive) {
             TextButton(
                 onClick = viewModel::clearFilters,
@@ -103,12 +132,13 @@ fun NavPane(
 
         Spacer(Modifier.height(scale.gapSm))
 
-        SectionTitle("标签（可多选）")
+        SectionTitle("标签（可多选）", modifier = Modifier.padding(horizontal = scale.gapXs))
         if (state.tags.isEmpty()) {
             Text(
-                "标签库里还没有内容",
-                style = MaterialTheme.typography.bodyMedium,
+                "标签库里还没有内容，收藏时随手加一个即可。",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = scale.gapXs),
             )
         }
         state.tags.forEach { tag ->
@@ -120,6 +150,8 @@ fun NavPane(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+
+        Spacer(Modifier.height(scale.gapXs))
 
         OutlinedTextField(
             value = newTagName,
@@ -151,9 +183,26 @@ fun NavPane(
                     .weight(1f)
                     .heightIn(min = scale.touchMin),
             ) {
-                Text("标签管理")
+                Text("管理")
             }
         }
+
+        Spacer(Modifier.height(scale.gapSm))
+
+        if (state.items.isEmpty()) {
+            TextButton(
+                onClick = viewModel::pullFromServer,
+                modifier = Modifier.heightIn(min = scale.touchMin),
+            ) {
+                Text("从后台回填已有收藏")
+            }
+        }
+        Text(
+            text = "本地缓存占用 ${formatBytes(state.cacheBytes)}",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = scale.gapXs),
+        )
     }
 
     if (showTagManager) {
@@ -221,7 +270,7 @@ private fun TagManagerDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Surface(
-            modifier = Modifier.width(panelWidth),
+            modifier = Modifier.width(rememberDialogWidth(panelWidth)),
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
@@ -281,7 +330,10 @@ private fun TagManagerDialog(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             TextButton(
-                                onClick = { editingId = tag.id; editingText = tag.name },
+                                onClick = {
+                                    editingId = tag.id
+                                    editingText = tag.name
+                                },
                                 modifier = Modifier.heightIn(min = scale.touchMin),
                             ) {
                                 Text("改名")

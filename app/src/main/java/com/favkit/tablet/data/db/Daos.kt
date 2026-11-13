@@ -23,8 +23,8 @@ interface FavoritesDao {
     @Upsert
     suspend fun upsert(row: FavoriteRow)
 
-    @Query("UPDATE favorites SET title = :title, note = :note, badge = :badge, updatedAt = :now WHERE id = :id")
-    suspend fun updateText(id: String, title: String, note: String, badge: String, now: Long)
+    @Query("UPDATE favorites SET note = :note, badge = :badge, updatedAt = :now WHERE id = :id")
+    suspend fun updateNote(id: String, note: String, badge: String, now: Long)
 
     @Query("UPDATE favorites SET bucket = :bucket, badge = :badge, updatedAt = :now WHERE id = :id")
     suspend fun updateBucket(id: String, bucket: String, badge: String, now: Long)
@@ -38,17 +38,28 @@ interface FavoritesDao {
     @Query("DELETE FROM favorites WHERE id IN (:ids)")
     suspend fun deleteForever(ids: List<String>)
 
-    @Query("UPDATE favorites SET lastPositionMs = :positionMs, durationMs = :durationMs WHERE id = :id")
-    suspend fun saveProgress(id: String, positionMs: Long, durationMs: Long)
+    /** 播放进度属于本地数据，后台只用来校准，不覆盖本地已看得更靠前的位置 */
+    @Query("UPDATE favorites SET lastPositionMs = :positionMs WHERE id = :id")
+    suspend fun saveProgress(id: String, positionMs: Long)
 
     @Query("UPDATE favorites SET locallyCached = :cached WHERE id = :id")
     suspend fun setLocallyCached(id: String, cached: Boolean)
 
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL AND badge <> 'SYNCED'")
     fun observeUnsyncedCount(): Flow<Int>
+}
 
-    @Query("SELECT COUNT(*) FROM favorites")
-    suspend fun rowCount(): Int
+@Dao
+interface VideosDao {
+
+    @Query("SELECT * FROM video_info")
+    fun observeAll(): Flow<List<VideoInfoRow>>
+
+    @Upsert
+    suspend fun upsertAll(rows: List<VideoInfoRow>)
+
+    @Query("SELECT * FROM video_info WHERE favoriteId = :favoriteId")
+    suspend fun byFavorite(favoriteId: String): VideoInfoRow?
 }
 
 @Dao
@@ -129,8 +140,12 @@ interface PendingOpsDao {
     @Insert
     suspend fun insert(row: PendingOpRow): Long
 
-    @Query("SELECT * FROM pending_ops WHERE nextRetryAt <= :now ORDER BY createdAt ASC LIMIT :limit")
-    suspend fun due(now: Long, limit: Int): List<PendingOpRow>
+    /** 串行取下一条：只取已经到了可跑时间的最早一条 */
+    @Query("SELECT * FROM pending_ops WHERE nextRetryAt <= :now ORDER BY createdAt ASC LIMIT 1")
+    suspend fun nextDue(now: Long): PendingOpRow?
+
+    @Query("SELECT COUNT(*) FROM pending_ops WHERE nextRetryAt <= :now")
+    suspend fun dueCount(now: Long): Int
 
     @Query("SELECT COUNT(*) FROM pending_ops")
     fun observeCount(): Flow<Int>
@@ -143,6 +158,10 @@ interface PendingOpsDao {
 
     @Query("UPDATE pending_ops SET attempts = :attempts, nextRetryAt = :nextRetryAt, lastError = :lastError WHERE id = :id")
     suspend fun markRetry(id: Long, attempts: Int, nextRetryAt: Long, lastError: String)
+
+    /** 上一条传完后，把剩余条目统一排到新的可跑时间，实现「等一段时间再传下一条」 */
+    @Query("UPDATE pending_ops SET nextRetryAt = :at WHERE nextRetryAt <= :now")
+    suspend fun scheduleRemaining(now: Long, at: Long): Int
 
     @Query("DELETE FROM pending_ops WHERE id = :id")
     suspend fun delete(id: Long)

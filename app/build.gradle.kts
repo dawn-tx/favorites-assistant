@@ -11,8 +11,6 @@ plugins {
 // 允许用 -PSYNC_ENDPOINT=... 或环境变量覆盖同步地址，方便云端流水线打不同环境的包
 val syncEndpoint: String = (System.getenv("SYNC_ENDPOINT") ?: project.findProperty("SYNC_ENDPOINT") as? String)
     ?.takeIf { it.isNotBlank() } ?: "http://10.0.2.2:8787/api/v1"
-val serverPublicKey: String = (System.getenv("SYNC_SERVER_PUBLIC_KEY") ?: project.findProperty("SYNC_SERVER_PUBLIC_KEY") as? String)
-    ?.takeIf { it.isNotBlank() } ?: ""
 
 android {
     namespace = "com.favkit.tablet"
@@ -26,7 +24,6 @@ android {
         versionName = "1.0.0"
 
         buildConfigField("String", "DEFAULT_SYNC_ENDPOINT", "\"$syncEndpoint\"")
-        buildConfigField("String", "SERVER_RSA_PUBLIC_KEY_PEM", "\"${serverPublicKey.replace("\n", "\\n")}\"")
     }
 
     buildTypes {
@@ -102,6 +99,9 @@ dependencies {
     implementation("androidx.media3:media3-ui:$media3Version")
     implementation("androidx.media3:media3-datasource:$media3Version")
     implementation("androidx.media3:media3-database:$media3Version")
+
+    // 封面图：视频元数据由后台返回，封面是网络图片，需要带磁盘缓存的加载器
+    implementation("io.coil-kt:coil-compose:2.7.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

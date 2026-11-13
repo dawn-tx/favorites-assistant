@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -27,26 +28,34 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.floating.FloatingAssistantService
-import com.favkit.tablet.ui.main.MainUiState
-import com.favkit.tablet.ui.main.MainViewModel
 import com.favkit.tablet.ui.components.Cardish
+import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.SectionTitle
 import com.favkit.tablet.ui.components.StatusPill
+import com.favkit.tablet.ui.components.formatBytes
+import com.favkit.tablet.ui.components.rememberDialogWidth
+import com.favkit.tablet.ui.main.MainUiState
+import com.favkit.tablet.ui.main.MainViewModel
 import java.util.Locale
 
 private val CACHE_LIMITS_MB = listOf(128L, 256L, 512L, 1024L, 2048L)
+private val UPLOAD_INTERVAL_PRESETS = listOf(0L, 1_000L, 3_000L, 10_000L, 30_000L)
+private val SPEED_PRESETS = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
+
+/** 后台 setUploadIntervalMs 会再夹一次，这里先按同一个范围挡掉脏输入 */
+private const val MAX_UPLOAD_INTERVAL_MS = 600_000L
 
 /**
- * 设置面板：同步地址与加密公钥、悬浮助手开关、缓存上限与清理、失败重传。
- * 全部为可改配置，方便换后端环境或对接自建服务，不需要重新打包。
+ * 设置面板：同步地址与令牌、上传节奏、悬浮助手、播放与缓存。
+ * 全部可在运行期修改，换后端环境或自建服务都不需要重新打包。
  */
 @Composable
 fun SettingsSheet(
@@ -61,9 +70,11 @@ fun SettingsSheet(
     val settings = state.settings ?: return
     if (!visible) return
 
-    var endpoint by remember { mutableStateOf(settings.syncEndpoint) }
-    var token by remember { mutableStateOf(settings.syncToken) }
-    var publicKey by remember { mutableStateOf(settings.serverPublicKeyPem) }
+    var endpoint by remember(settings.syncEndpoint) { mutableStateOf(settings.syncEndpoint) }
+    var token by remember(settings.syncToken) { mutableStateOf(settings.syncToken) }
+    var intervalDraft by remember(settings.uploadIntervalMs) {
+        mutableStateOf(settings.uploadIntervalMs.toString())
+    }
     val context = LocalContext.current
     val toggleAssistant: (Boolean) -> Unit = { enabled ->
         viewModel.setAssistantEnabled(enabled)
@@ -79,14 +90,14 @@ fun SettingsSheet(
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = true),
     ) {
         Surface(
-            modifier = Modifier.width(scale.floatingPanelWidth + 60.dp),
+            modifier = Modifier.width(rememberDialogWidth(scale.floatingPanelWidth + 60.dp)),
             shape = RoundedCornerShape(28.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 10.dp,
         ) {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 720.dp)
+                    .heightIn(max = 760.dp)
                     .verticalScroll(rememberScrollState())
                     .padding(scale.gapMd),
                 verticalArrangement = Arrangement.spacedBy(scale.gapMd),
@@ -103,13 +114,15 @@ fun SettingsSheet(
                         modifier = Modifier.padding(scale.gapSm),
                         verticalArrangement = Arrangement.spacedBy(scale.gapXs),
                     ) {
-                        SectionTitle("加密同步服务")
+                        SectionTitle("同步服务")
                         OutlinedTextField(
                             value = endpoint,
                             onValueChange = { endpoint = it },
                             label = { Text("接口地址") },
                             singleLine = true,
-                            supportingText = { Text("例：http://10.0.2.2:8787/api/v1（模拟器里指向本机 mock 服务）") },
+                            supportingText = {
+                                Text("例：http://10.0.2.2:8787/api/v1（模拟器里指向本机 mock 服务）")
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = scale.touchMin),
@@ -123,26 +136,11 @@ fun SettingsSheet(
                                 .fillMaxWidth()
                                 .heightIn(min = scale.touchMin),
                         )
-                        OutlinedTextField(
-                            value = publicKey,
-                            onValueChange = { publicKey = it },
-                            label = { Text("服务端 RSA 公钥（PEM）") },
-                            minLines = 3,
-                            supportingText = {
-                                Text(
-                                    "留空则使用设备本地 Keystore 密钥加密，同样是端到端密文出网；填入公钥后改用 RSA-OAEP 包裹会话密钥。",
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = scale.touchMin * 3f),
-                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(scale.gapXs)) {
                             Button(
                                 onClick = {
                                     viewModel.setSyncEndpoint(endpoint.trim())
                                     viewModel.setSyncToken(token.trim())
-                                    viewModel.setServerPublicKey(publicKey.trim())
                                 },
                                 modifier = Modifier
                                     .weight(1f)
@@ -154,14 +152,81 @@ fun SettingsSheet(
                                 onClick = {
                                     endpoint = settings.syncEndpoint
                                     token = settings.syncToken
-                                    publicKey = settings.serverPublicKeyPem
                                 },
                                 modifier = Modifier.heightIn(min = scale.touchMin),
                             ) {
                                 Text("还原")
                             }
                         }
-                        InfoLine("设备标识", settings.deviceId)
+                        InfoLine("设备标识", settings.deviceId.ifBlank { "尚未生成" })
+                    }
+                }
+
+                Cardish(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(scale.gapSm),
+                        verticalArrangement = Arrangement.spacedBy(scale.gapXs),
+                    ) {
+                        SectionTitle("上传节奏")
+                        OutlinedTextField(
+                            value = intervalDraft,
+                            onValueChange = { input ->
+                                intervalDraft = input.filter { it.isDigit() }.take(7)
+                            },
+                            label = { Text("上传间隔（毫秒）") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            supportingText = {
+                                Text(
+                                    "上一批传完后等待多久再传下一批，范围 0–600000 毫秒（0 = 不限速）。" +
+                                        "后台可以在响应里用 next_wait_ms 临时覆盖这个间隔，这里只做兜底。",
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = scale.touchMin),
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                        ) {
+                            UPLOAD_INTERVAL_PRESETS.forEach { preset ->
+                                val active = settings.uploadIntervalMs == preset
+                                val label = if (preset == 0L) "不限速" else "${preset / 1000}s"
+                                ChoiceButton(
+                                    label = label,
+                                    selected = active,
+                                    scale = scale,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = {
+                                        viewModel.setUploadIntervalMs(preset)
+                                        intervalDraft = preset.toString()
+                                    },
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(scale.gapXs)) {
+                            Button(
+                                onClick = {
+                                    val value = intervalDraft.toLongOrNull()
+                                        ?.coerceIn(0L, MAX_UPLOAD_INTERVAL_MS)
+                                        ?: settings.uploadIntervalMs
+                                    viewModel.setUploadIntervalMs(value)
+                                    intervalDraft = value.toString()
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = scale.touchMin),
+                            ) {
+                                Text("应用间隔")
+                            }
+                            Text(
+                                text = "当前 ${settings.uploadIntervalMs} ms",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            )
+                        }
                     }
                 }
 
@@ -175,8 +240,8 @@ fun SettingsSheet(
                             horizontalArrangement = Arrangement.spacedBy(scale.gapSm),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            StatusPill("待上传 ${state.queued}", Color(0xFFF9AB00))
-                            StatusPill("未同步 ${state.unsynced}", Color(0xFFD93025))
+                            StatusPill("待上传 ${state.queued}", FavColors.warn)
+                            StatusPill("未同步 ${state.unsynced}", FavColors.fail)
                             Spacer(Modifier.weight(1f))
                             TextButton(
                                 onClick = viewModel::retrySync,
@@ -186,7 +251,7 @@ fun SettingsSheet(
                             }
                         }
                         Text(
-                            "断网时先落本地队列，联网后自动补传；单条最多静默重试 3 次，之后仍然自动跟随网络恢复，无需手动处理。",
+                            "断网时先落本地队列，联网后自动补传；只有后台确认收到的条数才算同步成功。",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -236,39 +301,42 @@ fun SettingsSheet(
                         modifier = Modifier.padding(scale.gapSm),
                         verticalArrangement = Arrangement.spacedBy(scale.gapSm),
                     ) {
-                        SectionTitle("显示与缓存")
-                        ToggleRow(
-                            label = "允许自由旋转",
-                            hint = "默认强制横屏三栏。打开后跟随传感器，但输入、选中标签和滚动位置都不会丢。",
-                            checked = settings.allowFreeRotation,
-                            scale = scale,
-                            onCheckedChange = viewModel::setAllowFreeRotation,
+                        SectionTitle("播放与缓存")
+                        Text(
+                            text = "默认倍速",
+                            style = MaterialTheme.typography.bodyLarge,
                         )
-                        InfoLine("默认倍速", String.format(Locale.CHINA, "%.2fx", settings.defaultPlaybackSpeed))
-                        InfoLine("本地缓存占用", formatBytes(state.cacheBytes))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                        ) {
+                            SPEED_PRESETS.forEach { speed ->
+                                ChoiceButton(
+                                    label = formatSpeed(speed),
+                                    selected = kotlin.math.abs(settings.defaultPlaybackSpeed - speed) < 0.01f,
+                                    scale = scale,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setSpeed(speed) },
+                                )
+                            }
+                        }
+                        InfoLine(
+                            "本地缓存占用",
+                            formatBytes(state.cacheBytes) + " / ${settings.cacheLimitMb}MB",
+                        )
                         SectionTitle("缓存上限")
-                        Row(horizontalArrangement = Arrangement.spacedBy(scale.gapXs)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                        ) {
                             CACHE_LIMITS_MB.forEach { limit ->
-                                val label = "${limit}MB"
-                                if (settings.cacheLimitMb == limit) {
-                                    Button(
-                                        onClick = { viewModel.setCacheLimitMb(limit) },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .heightIn(min = scale.touchMin),
-                                    ) {
-                                        Text(label)
-                                    }
-                                } else {
-                                    OutlinedButton(
-                                        onClick = { viewModel.setCacheLimitMb(limit) },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .heightIn(min = scale.touchMin),
-                                    ) {
-                                        Text(label)
-                                    }
-                                }
+                                ChoiceButton(
+                                    label = "${limit}MB",
+                                    selected = settings.cacheLimitMb == limit,
+                                    scale = scale,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setCacheLimitMb(limit) },
+                                )
                             }
                         }
                         OutlinedButton(
@@ -287,6 +355,31 @@ fun SettingsSheet(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ChoiceButton(
+    label: String,
+    selected: Boolean,
+    scale: TabletScale,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            modifier = modifier.heightIn(min = scale.touchMin),
+        ) {
+            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            modifier = modifier.heightIn(min = scale.touchMin),
+        ) {
+            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -340,8 +433,4 @@ private fun InfoLine(label: String, value: String) {
     }
 }
 
-private fun formatBytes(bytes: Long): String = when {
-    bytes >= 1L shl 30 -> String.format(Locale.CHINA, "%.2fGB", bytes.toDouble() / (1L shl 30))
-    bytes >= 1L shl 20 -> String.format(Locale.CHINA, "%.0fMB", bytes.toDouble() / (1L shl 20))
-    else -> "${bytes / 1024}KB"
-}
+private fun formatSpeed(speed: Float): String = String.format(Locale.CHINA, "%.2fx", speed)

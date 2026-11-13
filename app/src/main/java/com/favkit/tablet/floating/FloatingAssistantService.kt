@@ -335,12 +335,6 @@ class FloatingAssistantService : Service() {
         FloatingDraftStore.update { copy(status = PanelStatus.SAVING) }
         scope.launch {
             when (val outcome = useCase.save(draft.url, draft.note, draft.selectedTagIds, draft.newTagName)) {
-                is SaveOutcome.Synced -> {
-                    shortToast(getString(R.string.toast_synced))
-                    FloatingDraftStore.clearAfterSave()
-                    closePanel()
-                }
-
                 is SaveOutcome.Queued -> {
                     shortToast(outcome.reason)
                     FloatingDraftStore.clearAfterSave()

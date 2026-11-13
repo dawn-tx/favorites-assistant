@@ -12,6 +12,5 @@ captures/
 node_modules/
 .temp/
 
-# mock 同步服务的本地数据与密钥，永远不要提交
+# mock 同步服务的本地数据，不要提交
 mock-server/data.json
-mock-server/*.pem

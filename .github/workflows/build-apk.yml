@@ -55,9 +55,8 @@ jobs:
 
       - name: 构建 APK
         env:
-          # 想固化后端地址/公钥就改这里；SYNC_SERVER_PUBLIC_KEY 建议放 Repository Secrets
+          # 想固化后端地址就改这里（Repository variables 里建 SYNC_ENDPOINT）；留空则用 gradle.properties 的默认值
           SYNC_ENDPOINT: ${{ vars.SYNC_ENDPOINT }}
-          SYNC_SERVER_PUBLIC_KEY: ${{ secrets.SYNC_SERVER_PUBLIC_KEY }}
         run: |
           gradle --no-daemon :app:assembleDebug :app:assembleRelease
 
