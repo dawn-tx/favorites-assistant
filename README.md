@@ -18,6 +18,16 @@ Kotlin 2.0.21 / Jetpack Compose（Material3）/ Room / WorkManager / Media3，�
 云端流水线已包含 JDK 17 + Gradle 8.9 + Android SDK 34，Release 包在未配置正式签名时自动使用 debug 签名，
 保证一定能产出「可安装」的 APK（正式分发再把 `signingConfig` 换成你自己的 keystore）。
 
+### 什么时候才会重新构建
+
+推送不等于要出包，`.github/BUILD_TRIGGER` 是唯一的构建开关：
+
+- 需要新包时，把里面的 `build` 数字 +1（顺手更新 `code` 与 `note`），**和代码一起提交推送**；
+- 只有该文件内容变化，或在 Actions 页面手动 **Run workflow**，流水线才会装 SDK、编译、上传产物；
+- 纯文档/说明的提交只跑一个「判断是否需要构建」的步骤就结束（十几秒），不占构建时间；
+- 改了 `app/` 或 gradle 相关文件却忘了 bump，流水线给出 warning 提醒，而不是静默跳过（避免产物落后于代码）；
+- 一次都不想跑，就在提交信息里写 `[skip ci]`（GitHub 原生行为，连运行记录都不创建）。
+
 > 仓库内不含 `gradlew` / `gradle-wrapper.jar`（二进制文件无法随源码生成）。
 > 本机若想用 Gradle Wrapper，用任意 Gradle 8.9 执行一次 `gradle wrapper --gradle-version 8.9`，
 > 或者直接用 Android Studio 打开工程，它会提示自动补全 wrapper。
@@ -85,6 +95,7 @@ app/src/main/java/com/favkit/tablet/
 
 mock-server/                   本地 mock 同步服务（明文协议 + 确定性假视频解析）
 .github/workflows/             云端构建 APK
+.github/BUILD_TRIGGER          构建开关：改它才会重新出包
 docs/                          使用说明、架构与性能验证、同步后台接口说明
 ```
 
