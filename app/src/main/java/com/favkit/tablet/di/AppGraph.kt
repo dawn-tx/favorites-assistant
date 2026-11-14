@@ -8,6 +8,7 @@ import com.favkit.tablet.data.db.AppDatabase
 import com.favkit.tablet.media.MediaCache
 import com.favkit.tablet.media.TabletPlayer
 import com.favkit.tablet.net.SyncApi
+import com.favkit.tablet.net.SyncGate
 import com.favkit.tablet.sync.Connectivity
 import com.favkit.tablet.sync.SyncManager
 
@@ -24,7 +25,8 @@ class AppGraph private constructor(private val app: Application) {
     val media: MediaCache by lazy { MediaCache(app, settings) }
     val player: TabletPlayer by lazy { TabletPlayer(media) }
 
-    val api: SyncApi by lazy { SyncApi(settings) }
+    val gate: SyncGate by lazy { SyncGate() }
+    val api: SyncApi by lazy { SyncApi(settings, gate) }
     val sync: SyncManager by lazy { SyncManager(app, db) }
 
     companion object {

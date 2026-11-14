@@ -345,7 +345,8 @@ private fun TagStrip(
 /**
  * 面板顶部一行同步状态。球上的角标只能说「有事」，这里说清是什么事、能不能立刻动手。
  *
- * 这四个数与主界面胶囊同源同口径：都从 pending_ops 和联网回调来，待上传不含失败那批。
+ * 口径与主界面胶囊完全一致，只有三项：离线 / 待同步 / 失败。
+ * 解析结果就在上传那一次响应里回来，「待上传」和「待解析」原本是同一批数据，现在不再分两枚数同一件事。
  * 订阅只活在面板打开期间，窗口一关就自动取消，所以给常驻服务添不了成本。
  */
 @Composable
@@ -354,11 +355,12 @@ private fun SyncStatusLine(graph: AppGraph, scale: TabletScale) {
     val failed by remember(graph) { graph.sync.failedCount }.collectAsState(initial = 0)
     val unresolved by remember(graph) { graph.favorites.unresolvedCount }.collectAsState(initial = 0)
     val online by remember(graph) { graph.connectivity.onlineState() }.collectAsState(initial = true)
+    // 队列空了却还有没解析出来的，那是后台欠的结果，同样算待同步
+    val pending = if (queued > failed) queued - failed else unresolved
     val parts = listOfNotNull(
         "离线".takeIf { !online },
-        "待上传 ${(queued - failed).coerceAtLeast(0)}".takeIf { queued - failed > 0 },
+        "待同步 $pending".takeIf { pending > 0 },
         "失败 $failed".takeIf { failed > 0 },
-        "待解析 $unresolved".takeIf { unresolved > 0 },
     )
     if (parts.isEmpty()) return
     Row(

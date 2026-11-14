@@ -202,7 +202,7 @@ class FloatingAssistantService : Service() {
         ballHost = host
         ballParams = params
         host.resume()
-        halfHidden = params.x < -(size / 2) || params.x > screenWidth() - size / 2
+        halfHidden = isHalfHidden(params.x, size)
     }
 
     private fun moveBall(dx: Float, dy: Float) {
@@ -221,18 +221,20 @@ class FloatingAssistantService : Service() {
         params.x = params.x.coerceIn(-(size - strip), screenWidth() - strip)
     }
 
-    /** 松手吸附：靠近左右边缘则半隐藏，否则完全贴边停靠 */
+    /**
+     * 松手吸附：球心离边不到一颗球那么远就半隐藏成一条窄边，否则完全贴边停靠。
+     *
+     * 判据用「球心到边的距离」而不是原来的 `x < size * 0.3f`：那颗球本来就贴着边拖，
+     * 老阈值要求它整颗都探过边缘才算靠近，实际永远够不着，于是「靠边自动半隐」从来没发生过。
+     */
     private fun snapToEdge() {
         val params = ballParams ?: return
         val size = TabletMetrics.ballSizePx(this)
         val margin = edgeMarginPx()
         val strip = stripPx()
-        val toLeft = params.x + size / 2 < screenWidth() / 2
-        val nearEdge = if (toLeft) {
-            params.x < size * HALF_HIDE_RATIO
-        } else {
-            params.x + size > screenWidth() - size * HALF_HIDE_RATIO
-        }
+        val center = params.x + size / 2
+        val toLeft = center < screenWidth() / 2
+        val nearEdge = if (toLeft) center < size else screenWidth() - center < size
         val targetX = when {
             toLeft && nearEdge -> -(size - strip)
             toLeft -> margin
@@ -240,7 +242,7 @@ class FloatingAssistantService : Service() {
             else -> screenWidth() - size - margin
         }
         animateBallTo(targetX)
-        halfHidden = targetX < 0 || targetX > screenWidth() - size / 2
+        halfHidden = isHalfHidden(targetX, size)
     }
 
     private fun expandBall() {
@@ -411,11 +413,20 @@ class FloatingAssistantService : Service() {
 
     private fun defaultBallX(size: Int): Int = screenWidth() - size - edgeMarginPx()
 
-    /** 半隐藏时露出的窄边：9dp，够手指再点一次，又几乎不占第三方 App 的空间 */
-    private fun stripPx(): Int = TabletMetrics.dpToPx(this, 9f)
+    /** 屏幕上只剩一条窄边、球心已经探出去，就算半隐藏 */
+    private fun isHalfHidden(x: Int, size: Int): Boolean =
+        x < -(size / 2) || x > screenWidth() - size / 2
 
-    /** 完整停靠时距屏幕边按需求的 20mm 物理长度，不是随手写的像素 */
-    private fun edgeMarginPx(): Int = TabletMetrics.edgeInsetPx(this)
+    /** 半隐藏时露出的窄边：12dp。9dp 的时候连角标数字的一半都容不下，手指也难再点一次 */
+    private fun stripPx(): Int = TabletMetrics.dpToPx(this, 12f)
+
+    /**
+     * 完整停靠时距屏幕边只留 4dp。
+     *
+     * 需求里「边缘控件距边 20mm」说的是 App 自己界面里的按钮，悬浮球反过来是要贴边的系统级浮窗，
+     * 按 20mm 停就永远够不到半隐藏那一档了；4dp 只是别跟屏幕圆角和侧边手势带叠死。
+     */
+    private fun edgeMarginPx(): Int = TabletMetrics.dpToPx(this, 4f)
 
     private fun screenWidth(): Int = resources.displayMetrics.widthPixels
 
@@ -430,7 +441,6 @@ class FloatingAssistantService : Service() {
         private const val PREFS = "floating_ball"
         private const val KEY_X = "ball_x"
         private const val KEY_Y = "ball_y"
-        private const val HALF_HIDE_RATIO = 0.3f
         private const val SNAP_MS = 180L
 
         fun isAvailable(context: Context): Boolean = Settings.canDrawOverlays(context)

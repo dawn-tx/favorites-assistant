@@ -60,7 +60,8 @@ gradle wrapper --gradle-version 8.9          # 只需执行一次
 node mock-server/server.mjs     # 监听 0.0.0.0:8787/api/v1
 ```
 
-- 协议是纯明文 JSON（`POST /sync`、`GET /favorites`、`GET /videos`、`POST /videos/resolve`、`GET /health`、`GET /stats`），不再有信封加密和 RSA 密钥。
+- 协议是纯明文 JSON（`POST /sync`、`GET /favorites?limit=&cursor=`、`GET /videos`、`POST /videos/resolve`、`GET /health`、`GET /stats`），不再有信封加密和 RSA 密钥。
+  `GET /favorites` 按 `favorite_at` 倒序做 keyset 分页，App 侧本地表只是它的分页缓存。
 - 启动日志会列出本机所有非内部 IPv4 地址，平板照抄 `http://<电脑内网 IP>:8787/api/v1` 即可。
 - 标题、封面、时长、播放地址、`summary` 和 `media[]` 素材清单由服务端按 url 哈希确定性生成（`resolver: mock`）：
   同一链接永远同一结果，四类构成（图+视频 / 纯图集 / 多段视频 / 单个视频）按哈希均匀出现，用来真跑一遍多素材展示链路。
@@ -112,23 +113,25 @@ docs/                          使用说明、架构与性能验证、同步后�
 | 按 sw600dp/sw720dp 自适应 | 三档基线见 `values` / `values-sw600dp` / `values-sw720dp`；主界面不按宽度分栏，只有「视频墙 + 聚焦遮罩」两层，宽度只决定墙的列数与遮罩里信息栏是否并列 |
 | 常驻 ≤80MB / 冷启动 ≤2s | `AppGraph` 全 lazy、单一 `ExoPlayer` 实例复用、无第三方 DI/无启动器插件；测量步骤见 `docs/架构与性能验证.md` |
 | 后台静默同步不吃电量 | 只用 `ConnectivityManager` 回调触发，零轮询、零定时器 |
-| 悬浮球拖拽 + 贴边半隐 | `TYPE_APPLICATION_OVERLAY` 窗口 + `ValueAnimator` 吸附，位置持久化 |
-| 同步进度在悬浮球上可见 | `BallBadge`：`pending_ops` 两条 COUNT（总数 / `attempts>=3`）+ 联网回调，写触发无轮询；红=待处理失败，灰=离线攒着，黄=排队中，贴边半隐时换成整球底色 |
+| 悬浮球拖拽 + 贴边半隐 | `TYPE_APPLICATION_OVERLAY` 窗口 + `ValueAnimator` 吸附，位置持久化。贴边判定看**球心到边的距离**（小于一个球径就吸边），停靠位只留 12dp 宽的细边露在外面、离屏 4dp，够手指拨出来；半隐态点一下先展开复原，再点才开面板 |
+| 同步进度在悬浮球上可见 | `BallBadge`：`pending_ops` 两条 COUNT（总数 / `attempts>=3`）+ 联网回调，写触发无轮询；口径合并为「待同步 / 失败 / 离线」三项，数字直接画在球心替换图标（画在圆 Surface 边角上的小角标会被窗口裁掉），色调即底色，半隐时数字不显示、只留底色 |
 | 复制即弹轻提示 | Android 10 起非焦点 App 禁止后台读剪贴板 → 采用悬浮球手动粘贴 + 系统分享接收（面板内已说明，见 `docs/使用说明.md`） |
 | 面板四段结构（只读链接 / 手写备注 / 横滚标签 + 内联新建标签 / 保存同步·关闭） | `FloatingPanelScreen` |
 | 手写笔直接书写 | `StylusNoteField`：AndroidView 承载真实 `EditText`，复用 Android 14+ 对可编辑文本框默认开启的手写笔直写；更早系统用手写输入法，无需额外权限 |
 | 上报 url+备注+标签+来源+时间戳 | `SyncApi` 明文 JSON `POST /sync`；成功只认 `applied + unknown_ops == 送出条数`，对不上就重新排队，绝不静默丢数据 |
 | 一条收藏链接 ≠ 一个视频 | 收藏只存用户数据；后台解析回传 `summary`（一句话说明这链接里有什么）+ `media[]` 素材清单（图 + 多段视频），经 `video_info` 表缓存（`mediaJson` 一列存清单，不额外建表）。清单为空时退回顶层字段当单个视频，老后台不用改 |
 | 同一条链接重复分享 | `FloatingSaveUseCase` 保存前先按链接原样查库（`FavoritesRepository.byUrl`，软删除过的不算，且排在建标签之前，免得留下孤儿标签）；命中返回 `SaveOutcome.Duplicate` → 不入库、不排队，面板用 `PanelStatus.NOTICE` 中性色提示已有收藏，草稿不动。刻意不做参数归一化：B 站 `?p=` 分 P 是不同内容 |
-| 新收藏先进本地队列，按节奏逐条上传 | `SyncWorker` 每次只取 1 条，等待 `响应 next_wait_ms ?? 设置里的上传间隔（默认 3000ms）` 再传下一条 |
+| 新收藏先进本地队列，按节奏逐条上传 | `SyncGate` 是所有出站请求（上传、取解析结果、分页拉取，含失败重试）的唯一闸门：一条响应完全结束后再等 `next_wait_ms ?? 上传间隔（默认 3000ms）` 才放下一条，成功、失败、旁路一视同仁；`SyncWorker` 每次只取 1 条 |
 | 2 秒轻提示 + 自动收起 + 回到原 App | Toast `LENGTH_SHORT`，面板窗口关闭，不启动任何 Activity |
 | 断网静默重试 3 次后进队列自动补传 | `SyncWorker` + `WorkManager` 网络约束与线性退避 + `pending_ops` 队列表 |
 | 以视频列表为主的大屏（自适应横竖屏） | `MainScreen` = 整屏 `VideoWall`（列数按可用宽度取 2~5）+ 盖在墙上的 `FocusOverlay`；筛选、标签、同步状态收进顶栏 `FilterSheet` 抽屉 |
-| 后台返回内容一目了然 | `VideoCard` 按 `media[]` 真实构成变形（单图 / 等分拼格 / 首图 + 缩略条 + 「+N」），文字只留标题一行 + `summary` 两行；封面按卡片实际宽度解码，控制在 80MB 预算内 |
+| 后台返回内容一目了然 | `VideoCard` 按 `media[]` 真实构成变形（单图 / 等分拼格 / 首图 + 缩略条），标题、首段「清晰度 · 时长」、「+N」段数与同步状态色点全部收进封面底部那条渐变带上；文字区只剩 `summary` 两行 + 标签一行（最多 2 个 + 「+N」，尾部省略）；封面按卡片实际宽度解码，控制在 80MB 预算内 |
 | 看详情不丢浏览位置 | `FocusOverlay` 是墙的**兄弟节点**而不是分支：墙不退出组合，滚位与已解码封面都还在；逐段浏览用 `HorizontalPager` + 段条，段与段各自记进度；关闭后回到原位置并让那张卡闪一下边框 |
 | 内置播放器倍速、拖动、全屏 | `PlayerStage`（遮罩媒体区内嵌 16:9，可一键全屏并沉浸系统栏，复用同一个 ExoPlayer 实例；倍速走选择器，全屏点画面只切换控制条显隐） |
 | 备注编辑、标签调整、批量删除 | `FocusOverlay` 信息栏（备注、标签点一下即生效、缓存、删除）+ `VideoWall` 长按多选批量条 |
-| 全部本地缓存、离线可看 | Room 为唯一事实来源 + `SimpleCache` 边播边存 + 单条「缓存到本地」预取 |
+| 服务端为准 + 本地分页缓存 | 后台是收藏的事实来源，Room 这张表只缓存滚到过的那几页：冷启动发现空表自动取第一页、墙离底还有两屏静默补一页（`GET /favorites?limit=&cursor=` 走 keyset 游标），一次 50 条；每页同时带回 `total`（后台总数），所以墙头写「已取回 50 / 1280 条」而不是让人以为只有 50 条；写操作仍先落本地 + 排队上传，离线能翻已取回的页 |
+| 视频离线可播 | `SimpleCache` 边播边存 + 单条「缓存到本地」预取（可显示进度、随时取消，上限 128MB~2GB 五档）；条目本身、备注与标签在本地库里，离线照常翻 |
+| 顶栏那颗按钮只做一件事 | 「重试失败并立即上传」：把重试耗尽的任务重新排队并立刻跑一轮 `SyncWorker`，反馈文案区分「没有待同步的条目 / 离线 / 队列已清空但还有没解析出来的」；状态胶囊合并为「离线 / 待同步 N / 失败 N」三项，不再同时显示「待上传」与「待解析」——一次请求就完成上传并拿回解析结果，两者本就是同一批 |
 
 ## 六、已知边界（诚实说明）
 

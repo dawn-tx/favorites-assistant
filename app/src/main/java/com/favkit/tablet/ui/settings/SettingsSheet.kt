@@ -240,11 +240,11 @@ fun SettingsSheet(
                             horizontalArrangement = Arrangement.spacedBy(scale.gapSm),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            StatusPill("待上传 ${state.pendingUploads}", FavColors.warn)
-                            StatusPill("失败 ${state.failed}", FavColors.fail)
+                            if (state.pendingSync > 0) StatusPill("待同步 ${state.pendingSync}", FavColors.warn)
+                            if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
                             Spacer(Modifier.weight(1f))
                             TextButton(
-                                onClick = viewModel::retrySync,
+                                onClick = viewModel::retrySyncNow,
                                 modifier = Modifier.heightIn(min = scale.touchMin),
                             ) {
                                 Text("立即重试")

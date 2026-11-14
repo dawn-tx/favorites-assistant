@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -143,7 +144,7 @@ fun MainScreen(
                     onQuickCollect = { viewModel.startQuickCollect("") },
                     onOpenSettings = { viewModel.showSettings(true) },
                     onOpenFilters = { viewModel.showFilters(true) },
-                    onRefresh = viewModel::refreshVideos,
+                    onSync = viewModel::retrySyncNow,
                     onQueryChange = viewModel::setQuery,
                 )
             }
@@ -246,7 +247,7 @@ private fun MainTopBar(
     onQuickCollect: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenFilters: () -> Unit,
-    onRefresh: () -> Unit,
+    onSync: () -> Unit,
     onQueryChange: (String) -> Unit,
 ) {
     var searchOpen by rememberSaveable { mutableStateOf(false) }
@@ -266,8 +267,15 @@ private fun MainTopBar(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("视频收藏", style = MaterialTheme.typography.titleLarge, maxLines = 1)
+                // 本地只是后台的分页缓存：没取完时说「共 N 条」会把取回的那几页说成整库
+                val cached = state.cachedTotal
+                val ready = (cached - state.unresolvedCount).coerceAtLeast(0)
                 Text(
-                    text = "共 ${state.items.size} 条 · 已就绪 ${state.items.size - state.unresolvedCount} 条",
+                    text = when {
+                        state.cachePartial -> "后台共 ${state.remoteTotal} 条 · 已取回 $cached 条"
+                        state.remoteTotal > 0 -> "共 $cached 条 · 已就绪 $ready 条"
+                        else -> "本地 $cached 条 · 已就绪 $ready 条"
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -291,7 +299,12 @@ private fun MainTopBar(
                     },
                 )
                 FilterAction(state = state, scale = scale, onClick = onOpenFilters)
-                RefreshAction(resolving = state.resolving, scale = scale, onRefresh = onRefresh)
+                SyncAction(
+                    syncing = state.syncing || state.resolving,
+                    pendingAttention = state.failed > 0,
+                    scale = scale,
+                    onClick = onSync,
+                )
                 TabletIconButton(
                     icon = Icons.Filled.Add,
                     contentDescription = "粘贴链接收藏",
@@ -336,22 +349,18 @@ private fun FilterAction(state: MainUiState, scale: TabletScale, onClick: () -> 
     }
 }
 
-/** 状态胶囊：离线 / 待上传 / 失败 / 待解析。待上传不含失败那批，放不下由外层动作区一起横向滚 */
+/** 状态胶囊只有三种：离线 / 待同步 / 失败。放不下由外层动作区一起横向滚 */
 @Composable
 private fun StatusPillsRow(state: MainUiState, scale: TabletScale) {
-    val hasAny = !state.online ||
-        state.pendingUploads > 0 ||
-        state.failed > 0 ||
-        state.unresolvedCount > 0
+    val hasAny = !state.online || state.pendingSync > 0 || state.failed > 0
     if (!hasAny) return
     Row(
         horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (!state.online) StatusPill("离线", FavColors.muted)
-        if (state.pendingUploads > 0) StatusPill("待上传 ${state.pendingUploads}", FavColors.warn)
+        if (state.pendingSync > 0) StatusPill("待同步 ${state.pendingSync}", FavColors.warn)
         if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
-        if (state.unresolvedCount > 0) StatusPill("待解析 ${state.unresolvedCount}", FavColors.warn)
     }
 }
 
@@ -390,9 +399,20 @@ private fun SearchField(
     )
 }
 
+/**
+ * 顶栏唯一的同步入口：**重试失败的上传并立刻推动队列**。
+ *
+ * 以前这里放的是「重新拉取解析结果」，没有待解析条目就静默什么都不做，点了像坏了。
+ * 现在忙不忙看得见（转圈），有失败也看得见（图标染色）。
+ */
 @Composable
-private fun RefreshAction(resolving: Boolean, scale: TabletScale, onRefresh: () -> Unit) {
-    if (resolving) {
+private fun SyncAction(
+    syncing: Boolean,
+    pendingAttention: Boolean,
+    scale: TabletScale,
+    onClick: () -> Unit,
+) {
+    if (syncing) {
         Box(modifier = Modifier.size(scale.touchMin), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(
                 strokeWidth = 2.dp,
@@ -402,9 +422,10 @@ private fun RefreshAction(resolving: Boolean, scale: TabletScale, onRefresh: () 
     } else {
         TabletIconButton(
             icon = Icons.Filled.Refresh,
-            contentDescription = "重新拉取解析结果",
+            contentDescription = if (pendingAttention) "重试失败的上传并继续队列" else "检查并继续上传队列",
             minTouch = scale.touchMin,
-            onClick = onRefresh,
+            tint = if (pendingAttention) FavColors.fail else LocalContentColor.current,
+            onClick = onClick,
         )
     }
 }

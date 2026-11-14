@@ -85,8 +85,7 @@ fun FilterSheet(
                         verticalArrangement = Arrangement.spacedBy(scale.gapXs),
                     ) {
                         SectionTitle("同步")
-                        val hasStatus = !state.online || state.pendingUploads > 0 || state.failed > 0 ||
-                            state.unresolvedCount > 0
+                        val hasStatus = !state.online || state.pendingSync > 0 || state.failed > 0
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -95,9 +94,8 @@ fun FilterSheet(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (!state.online) StatusPill("离线", FavColors.muted)
-                            if (state.pendingUploads > 0) StatusPill("待上传 ${state.pendingUploads}", FavColors.warn)
+                            if (state.pendingSync > 0) StatusPill("待同步 ${state.pendingSync}", FavColors.warn)
                             if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
-                            if (state.unresolvedCount > 0) StatusPill("待解析 ${state.unresolvedCount}", FavColors.warn)
                         }
                         if (!hasStatus) {
                             Text(
@@ -116,7 +114,7 @@ fun FilterSheet(
                             Spacer(Modifier.weight(1f))
                             if (state.unsynced > 0 || state.queued > 0) {
                                 Button(
-                                    onClick = viewModel::retrySync,
+                                    onClick = viewModel::retrySyncNow,
                                     modifier = Modifier.heightIn(min = scale.touchMin),
                                 ) {
                                     Text("立即重试")
@@ -226,9 +224,10 @@ fun FilterSheet(
                     if (state.items.isEmpty()) {
                         TextButton(
                             onClick = viewModel::pullFromServer,
+                            enabled = !state.remoteLoading,
                             modifier = Modifier.heightIn(min = scale.touchMin),
                         ) {
-                            Text("从后台回填")
+                            Text(if (state.remoteLoading) "正在取" else "从后台加载")
                         }
                     }
                     if (state.filter.active) {

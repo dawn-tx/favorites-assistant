@@ -54,10 +54,12 @@ private val TILE_GAP = 2.dp
 /**
  * 视频墙的一张卡：把后台解析回来的内容**直接摆出来**。
  *
- * 卡片不再自我介绍（作者 · 站点 · 标签 · 同步状态文字都撤了，只留状态色点），
+ * 卡片不再自我介绍（作者 · 站点 · 同步状态文字都撤了，只留状态色点），
  * 而是按 `media[]` 的真实构成变形：单条就一整张图，纯图集就等分拼格，
  * 有视频或多素材就首图放大 + 右侧缩略条，看不下的用「+N」收尾。
- * 文字只有两行标题位：标题一行 + 后台那句 summary 两行。
+ *
+ * 标题压在封面底部那层渐变上，时长和「+N」同一条；文字区只剩说明两行 + 标签一行，
+ * 一屏能多摆一条内容。标签最多露两个，只做识别，不当按钮用。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -142,46 +144,19 @@ fun VideoCard(
                 } else {
                     (segments.size - 1 - stripTiles).coerceAtLeast(0)
                 }
-                if (hidden > 0) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(8.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xCC000000))
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
-                    ) {
-                        Text(
-                            text = "+$hidden",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                        )
-                    }
-                }
+                TitleBand(
+                    favorite = favorite,
+                    segments = segments,
+                    online = online,
+                    prefetchBytes = prefetchBytes,
+                    hidden = hidden,
+                )
             }
 
             Column(
                 modifier = Modifier.padding(horizontal = scale.gapSm, vertical = scale.gapXs + 2.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = favorite.displayTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    SyncDot(badge = favorite.badge, online = online, size = 8.dp)
-                    when {
-                        prefetchBytes != null -> TintDot(FavColors.accent)
-                        favorite.locallyCached -> TintDot(FavColors.ok)
-                    }
-                }
                 Text(
                     text = favorite.displaySummary,
                     style = MaterialTheme.typography.bodySmall,
@@ -189,10 +164,110 @@ fun VideoCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+                CardTagRow(favorite.tags.map { it.name })
             }
         }
     }
 }
+
+/**
+ * 封面底部那条：标题 + 时长 + 「+N」+ 同步与缓存色点。
+ *
+ * 标题原先在封面下面单独占一行，卡片被文字拉长；压进封面后文字区只剩说明和标签。
+ * 底下那层从透明到近黑的渐变是给白字垫底的，不然花在封面上根本读不出来。
+ */
+@Composable
+private fun BoxScope.TitleBand(
+    favorite: Favorite,
+    segments: List<MediaSegment>,
+    online: Boolean,
+    prefetchBytes: Long?,
+    hidden: Int,
+) {
+    Row(
+        modifier = Modifier
+            .align(Alignment.BottomStart)
+            .fillMaxWidth()
+            .padding(bottom = 3.dp)
+            .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xB3000000))))
+            .padding(start = 10.dp, end = 8.dp, top = 20.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = favorite.displayTitle,
+            style = MaterialTheme.typography.titleSmall,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        val duration = HeroDuration(segments.firstOrNull())
+        if (duration != null) DurationPill(duration)
+        if (hidden > 0) DurationPill("+$hidden")
+        SyncDot(badge = favorite.badge, online = online, size = 8.dp)
+        when {
+            prefetchBytes != null -> TintDot(FavColors.accent)
+            favorite.locallyCached -> TintDot(FavColors.ok)
+        }
+    }
+}
+
+/** 首段（也就是封面那张）的时长：单素材顺带标清晰度，图集没有时长就不占地方 */
+private fun HeroDuration(hero: MediaSegment?): String? {
+    if (hero == null || hero.durationMs <= 0L) return null
+    val clock = formatDuration(hero.durationMs)
+    return if (hero.quality.isNotBlank()) "${hero.quality} · $clock" else clock
+}
+
+/**
+ * 标签行：最多露两个，剩下的收进「+N」。
+ *
+ * 只做识别不当按钮用 —— 点卡片是打开遮罩层，按标签筛选在顶栏抽屉里。
+ * 最后露出的那枚拿到剩余宽度，名字再长也是自己省略，不会把「+N」挤出卡片。
+ */
+@Composable
+private fun CardTagRow(names: List<String>) {
+    if (names.isEmpty()) return
+    val shown = names.take(MAX_CARD_TAGS)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        shown.forEachIndexed { index, name ->
+            Text(
+                text = name,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .then(
+                        if (index == shown.lastIndex) {
+                            Modifier.weight(1f, fill = false)
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+            )
+        }
+        val rest = names.size - shown.size
+        if (rest > 0) {
+            Text(
+                text = "+$rest",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+private const val MAX_CARD_TAGS = 2
 
 /** 拼图区：固定 16:9，内部按素材构成换排法 */
 @Composable
@@ -208,16 +283,6 @@ private fun Mosaic(favorite: Favorite, segments: List<MediaSegment>, decodeDp: D
             val only = segments[0]
             CoverTile(only, decodeDp, scrim = true, modifier = Modifier.matchParentSize()) {
                 if (only.playable) PlayGlyph(Modifier.align(Alignment.Center))
-                if (only.durationMs > 0L) {
-                    DurationPill(
-                        text = if (only.quality.isNotBlank()) {
-                            "${only.quality} · ${formatDuration(only.durationMs)}"
-                        } else {
-                            formatDuration(only.durationMs)
-                        },
-                        modifier = Modifier.align(Alignment.BottomEnd),
-                    )
-                }
             }
         } else {
             Puzzle(segments, decodeDp, stripTiles, Modifier.matchParentSize())
@@ -260,12 +325,6 @@ private fun Puzzle(segments: List<MediaSegment>, decodeDp: Dp, stripTiles: Int, 
             Box(modifier = Modifier.weight(if (stripTiles >= 3) 2.1f else 1.6f).fillMaxHeight()) {
                 CoverTile(hero, decodeDp, scrim = true, modifier = Modifier.matchParentSize()) {
                     if (hero.playable) PlayGlyph(Modifier.align(Alignment.Center))
-                    if (hero.durationMs > 0L) {
-                        DurationPill(
-                            text = formatDuration(hero.durationMs),
-                            modifier = Modifier.align(Alignment.BottomEnd),
-                        )
-                    }
                 }
             }
             Column(
@@ -367,11 +426,11 @@ private fun PlayGlyph(modifier: Modifier = Modifier) {
     }
 }
 
+/** 封面底部条里的小黑块：时长、还有几段没露出来，都用它 */
 @Composable
 private fun DurationPill(text: String, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .padding(8.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(Color(0xCC000000))
             .padding(horizontal = 6.dp, vertical = 2.dp),

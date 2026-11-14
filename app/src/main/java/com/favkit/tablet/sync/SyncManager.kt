@@ -19,13 +19,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
 /**
  * 上传编排：
  * 1) 任何本地改动都先写 Room（离线也能立刻看到结果），再投递一条 pending_ops；
- * 2) [SyncWorker] 串行消费队列，一条传完按「后台返回的等待时间 ?? 设置里的上传间隔」再传下一条；
+ * 2) [SyncWorker] 串行消费队列；两条之间的等待由 [com.favkit.tablet.net.SyncGate] 在出站口统一把控，
+ *    失败重试与取解析结果这些旁路走同一个闸门，用户设的节奏才对得上；
  * 3) 网络类失败静默退避重试 [MAX_ATTEMPTS] 次，用尽后留在队列里，靠联网回调或下次改动自动补传；
  * 4) 后台明确拒绝（4xx 或确认条数对不上）的条目保留在队列并标 FAILED，绝不静默丢弃。
  */
@@ -38,11 +42,24 @@ class SyncManager(
     private val pendingOps = db.pendingOps()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val _running = MutableStateFlow(false)
 
     val queuedCount: Flow<Int> = pendingOps.observeCount()
 
     /** 重试耗尽/被拒绝、需要用户动手的那部分；[queuedCount] 是包含它的总数 */
     val failedCount: Flow<Int> = pendingOps.observeFailedCount()
+
+    /**
+     * 上传器此刻是否在等后台。给顶栏按钮当反馈用：以前点完没反应，
+     * 分不清「在等响应」还是「什么都没发生」。
+     *
+     * 进程内标志，由 [SyncWorker] 进出时置位 —— 不查 WorkManager，也就不引入新的 API 面。
+     */
+    val running: StateFlow<Boolean> = _running.asStateFlow()
+
+    fun markRunning(value: Boolean) {
+        _running.value = value
+    }
 
     init {
         // 联网跳变即补传。仅注册回调、不轮询，无常驻定时器。

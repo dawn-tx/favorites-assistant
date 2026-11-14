@@ -6,6 +6,7 @@ import com.favkit.tablet.data.db.FavoriteTagRow
 import com.favkit.tablet.data.db.VideoInfoRow
 import com.favkit.tablet.net.FavoriteDto
 import com.favkit.tablet.net.VideoDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -47,8 +48,17 @@ class FavoritesRepository(
             }
     }.distinctUntilChanged()
 
-    /** 全量本地收藏（Room 是唯一事实来源，离线也能完整浏览）；过滤在 UI 状态层完成 */
+    /**
+     * 界面上看到的那份列表：后台的分页缓存，按 favoriteAt 倒序，滚到底由 ViewModel 补下一页。
+     * 过滤在 UI 状态层完成；离线时它就是离线可看的全部内容。
+     */
     fun observeAll(): Flow<List<Favorite>> = allFavorites
+
+    /** 本地缓存里现有多少条：冷启动用它判断「库是空的，得先去后台取第一页」 */
+    suspend fun cachedCount(): Int = favoritesDao.cachedCount()
+
+    /** 同一个数的订阅版：计数要跟着补页与新增变动，不能只在启动时查一次 */
+    val cachedTotal: Flow<Int> = favoritesDao.observeCachedCount()
 
     suspend fun byId(id: String): Favorite? = favoritesDao.byId(id)?.let {
         it.toDomain(tagsOf(it.id), videosDao.byFavorite(it.id)?.toDomain())
@@ -144,29 +154,68 @@ class FavoritesRepository(
         if (rows.isNotEmpty()) videosDao.upsertAll(rows)
     }
 
-    /** 云端回填：按 url 去重，历史收藏不重复入库 */
-    suspend fun importRemote(favorites: List<FavoriteDto>, videos: List<VideoDto>) {
-        saveVideos(videos)
+    /**
+     * 云端分页入库：按 id/url 去重，历史收藏不重复落本地。
+     *
+     * 服务端是事实来源，本地这张表只是它的一页页缓存（滚到底再取下一页），
+     * 所以同一批数据被重复取回是常态，不是异常。
+     *
+     * **逐条 try**：后台多来一条脏数据（url 为空、字段对不上）原本会把整批入库带崩，
+     * 而这条调用链上层原本没有任何异常隔离，App 直接退出。现在一条坏数据只丢那一条，
+     * 计数如实回给界面，用户看得见「跳过了几条」。
+     */
+    suspend fun importRemote(favorites: List<FavoriteDto>, videos: List<VideoDto>): ImportReport {
+        val videosOk = runGuarded { saveVideos(videos) }.isSuccess
+        var imported = 0
+        var skipped = 0
+        var broken = 0
         for (dto in favorites) {
-            if (favoritesDao.byId(dto.id) != null) continue
-            if (favoritesDao.byUrl(dto.url) != null) continue
-            val row = FavoriteRow(
-                id = dto.id.ifBlank { UUID.randomUUID().toString() },
-                url = dto.url,
-                note = dto.note,
-                sourceApp = dto.sourceApp,
-                favoriteAt = dto.favoriteAt,
-                lastPositionMs = dto.lastPositionMs,
-                bucket = dto.bucket,
-                badge = SyncBadge.SYNCED.name,
-            )
-            favoritesDao.upsert(row)
-            if (dto.tags.isNotEmpty()) {
-                val ids = dto.tags.mapNotNull { name -> tagsDao.byName(name)?.id }
-                refDao.insertAll(ids.map { FavoriteTagRow(row.id, it) })
+            if (dto.url.isBlank()) {
+                skipped++
+                continue
+            }
+            val outcome = runGuarded {
+                if (favoritesDao.byId(dto.id) != null || favoritesDao.byUrl(dto.url) != null) {
+                    return@runGuarded false
+                }
+                val row = FavoriteRow(
+                    id = dto.id.ifBlank { UUID.randomUUID().toString() },
+                    url = dto.url,
+                    note = dto.note,
+                    sourceApp = dto.sourceApp,
+                    favoriteAt = dto.favoriteAt,
+                    lastPositionMs = dto.lastPositionMs,
+                    bucket = dto.bucket,
+                    badge = SyncBadge.SYNCED.name,
+                )
+                favoritesDao.upsert(row)
+                if (dto.tags.isNotEmpty()) {
+                    val ids = dto.tags.mapNotNull { name -> tagsDao.byName(name)?.id }.distinct()
+                    if (ids.isNotEmpty()) refDao.insertAll(ids.map { FavoriteTagRow(row.id, it) })
+                }
+                true
+            }
+            when {
+                outcome.isFailure -> broken++
+                outcome.getOrDefault(false) -> imported++
+                else -> skipped++
             }
         }
+        return ImportReport(imported, skipped, broken, videosOk)
     }
+
+    /**
+     * [runCatching] 的取消安全版：协程被取消要照常往上抛，
+     * 否则「用户切走了」会被记成一条脏数据。
+     */
+    private suspend fun <R> runGuarded(block: suspend () -> R): Result<R> =
+        try {
+            Result.success(block())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (dirty: Exception) {
+            Result.failure(dirty)
+        }
 
     private fun VideoDto.toRow() = VideoInfoRow(
         favoriteId = favoriteId,
@@ -217,3 +266,11 @@ class FavoritesRepository(
         lastSegmentIndex = lastSegmentIndex ?: 0,
     )
 }
+
+/** 一次回填的账目：入库几条、已在本地跳过几条、脏数据跳过几条、视频信息有没有落下来 */
+data class ImportReport(
+    val imported: Int,
+    val skipped: Int,
+    val broken: Int,
+    val videosSaved: Boolean,
+)

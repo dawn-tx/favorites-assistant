@@ -70,8 +70,8 @@ fun SyncDot(badge: SyncBadge, online: Boolean, modifier: Modifier = Modifier, si
 fun syncBadgeLabel(badge: SyncBadge, online: Boolean): String = when {
     !online -> "离线"
     badge == SyncBadge.SYNCED -> "已同步"
-    badge == SyncBadge.QUEUED -> "待上传"
-    badge == SyncBadge.FAILED -> "上传失败"
+    badge == SyncBadge.QUEUED -> "待同步"
+    badge == SyncBadge.FAILED -> "同步失败"
     else -> "仅本地"
 }
 

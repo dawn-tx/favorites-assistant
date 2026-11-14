@@ -3,6 +3,7 @@ package com.favkit.tablet.net
 import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.data.SettingsSnapshot
 import java.io.IOException
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,6 +23,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  */
 class SyncApi(
     private val settings: AppSettings,
+    private val gate: SyncGate,
 ) {
 
     private val json = Json {
@@ -52,17 +54,19 @@ class SyncApi(
         )
         return exchange(config, "/sync", body, ::mapSyncError) { text, code ->
             when {
-                code == 429 -> SyncOutcome.Retryable(
-                    "后台限速：HTTP 429",
-                    retryAfterMs = runCatching {
+                code == 429 -> {
+                    val retryAfter = runCatching {
                         json.decodeFromString(SyncResponse.serializer(), text).nextWaitMs
-                    }.getOrNull(),
-                )
+                    }.getOrNull()
+                    gate.noteServerWait(retryAfter)
+                    SyncOutcome.Retryable("后台限速：HTTP 429", retryAfterMs = retryAfter)
+                }
 
                 code in 400..499 -> SyncOutcome.Rejected(rejectionReason(text) ?: "后台拒绝：HTTP $code")
                 code >= 500 -> SyncOutcome.Retryable("后台繁忙：HTTP $code")
                 else -> {
                     val parsed = json.decodeFromString(SyncResponse.serializer(), text)
+                    gate.noteServerWait(parsed.nextWaitMs)
                     if (!parsed.ok) {
                         SyncOutcome.Rejected(parsed.error.ifBlank { "后台未应用任何改动（applied=0）" })
                     } else {
@@ -80,15 +84,28 @@ class SyncApi(
         }
     }
 
-    /** 换设备/清数据后回填：拉全量收藏与已解析的视频信息 */
-    suspend fun pull(): PullOutcome {
+    /**
+     * 拉一页收藏。后台按 `favorite_at` 倒序发，游标是上一页最后那条的时间戳，
+     * 所以中途新增的收藏不会被分页跨过，重复的那几条由入库时按 id 去掉。
+     */
+    suspend fun pull(cursor: String?, limit: Int): PullOutcome {
         val config = settings.current()
-        return exchange(config, "/favorites", null, { reason -> PullOutcome.Failed(reason) }) { text, code ->
+        val query = buildString {
+            append("/favorites?limit=").append(limit)
+            if (!cursor.isNullOrBlank()) {
+                append("&cursor=").append(URLEncoder.encode(cursor, "UTF-8"))
+            }
+        }
+        return exchange(config, query, null, { reason -> PullOutcome.Failed(reason) }) { text, code ->
             if (code in 400..499) {
                 PullOutcome.Failed("后台拒绝：HTTP $code")
             } else {
                 val parsed = json.decodeFromString(PullResponse.serializer(), text)
-                PullOutcome.Loaded(parsed.favorites, parsed.videos)
+                if (!parsed.ok) {
+                    PullOutcome.Failed(parsed.error.ifBlank { "后台没有返回这一页" })
+                } else {
+                    PullOutcome.Loaded(parsed.favorites, parsed.videos, parsed.nextCursor, parsed.hasMore, parsed.total)
+                }
             }
         }
     }
@@ -114,6 +131,7 @@ class SyncApi(
                 VideosOutcome(emptyList(), requested, null, parsed?.error?.ifBlank { null } ?: "后台拒绝：HTTP $code")
             } else {
                 val parsed = json.decodeFromString(VideosResponse.serializer(), text)
+                gate.noteServerWait(parsed.nextWaitMs)
                 VideosOutcome(parsed.videos, parsed.unknownIds, parsed.nextWaitMs, null)
             }
         }
@@ -131,24 +149,26 @@ class SyncApi(
         path: String,
         body: String?,
         onFailure: (String) -> R,
-        parse: (String, Int) -> R,
-    ): R = withContext(Dispatchers.IO) {
-        val url = buildUrl(config.syncEndpoint, path)
-            ?: return@withContext onFailure("同步地址无效，请在设置里填写 http(s):// 开头的后台地址")
-        val builder = Request.Builder().url(url)
-        if (config.syncToken.isNotBlank()) builder.header("Authorization", "Bearer ${config.syncToken}")
-        builder.header("X-Device-Platform", "android-tablet")
-        if (body != null) {
-            builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-        }
-        try {
-            client.newCall(builder.build()).execute().use { response ->
-                parse(response.body?.string().orEmpty(), response.code)
+        parse: suspend (String, Int) -> R,
+    ): R = gate.run(config.uploadIntervalMs) {
+        withContext(Dispatchers.IO) {
+            val url = buildUrl(config.syncEndpoint, path)
+                ?: return@withContext onFailure("同步地址无效，请在设置里填写 http(s):// 开头的后台地址")
+            val builder = Request.Builder().url(url)
+            if (config.syncToken.isNotBlank()) builder.header("Authorization", "Bearer ${config.syncToken}")
+            builder.header("X-Device-Platform", "android-tablet")
+            if (body != null) {
+                builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
             }
-        } catch (io: IOException) {
-            onFailure(io.message ?: "网络不可用")
-        } catch (broken: Exception) {
-            onFailure("后台响应格式不符：${broken.message ?: "解析失败"}")
+            try {
+                client.newCall(builder.build()).execute().use { response ->
+                    parse(response.body?.string().orEmpty(), response.code)
+                }
+            } catch (io: IOException) {
+                onFailure(io.message ?: "网络不可用")
+            } catch (broken: Exception) {
+                onFailure("后台响应格式不符：${broken.message ?: "解析失败"}")
+            }
         }
     }
 
@@ -168,7 +188,16 @@ class SyncApi(
 }
 
 sealed interface PullOutcome {
-    data class Loaded(val favorites: List<FavoriteDto>, val videos: List<VideoDto>) : PullOutcome
+    data class Loaded(
+        val favorites: List<FavoriteDto>,
+        val videos: List<VideoDto>,
+        /** 下一页的游标；空串表示后台没有更多了 */
+        val nextCursor: String = "",
+        val hasMore: Boolean = false,
+        /** 后台收藏总数，每页都一样；0 表示这个后台还没上报总数 */
+        val total: Int = 0,
+    ) : PullOutcome
+
     data class Failed(val reason: String) : PullOutcome
 }
 

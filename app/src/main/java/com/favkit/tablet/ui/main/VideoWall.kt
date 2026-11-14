@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -21,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -29,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -106,6 +110,17 @@ fun VideoWall(
                         }
                     }
 
+                    // 离底还有两屏就去补下一页：卡片高，真到底了才发请求就慢得像是没反应
+                    val nearEnd by remember(columns, state.items.size) {
+                        derivedStateOf {
+                            val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                            lastVisible >= state.items.size - columns * 2
+                        }
+                    }
+                    LaunchedEffect(nearEnd) {
+                        if (nearEnd) viewModel.loadMoreFromServer()
+                    }
+
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(columns),
                         state = gridState,
@@ -136,6 +151,20 @@ fun VideoWall(
                                 onLongClick = { viewModel.toggleCheck(favorite.id) },
                             )
                         }
+
+                        if (state.remoteLoading) {
+                            item(key = "moreLoading", span = { GridItemSpan(maxLineSpan) }) {
+                                WallFooter(text = "正在从后台取下一页", loading = true, scale = scale)
+                            }
+                        } else if (!state.remoteHasMore) {
+                            item(key = "wallEnd", span = { GridItemSpan(maxLineSpan) }) {
+                                WallFooter(
+                                    text = "到底了 · 本地缓存 ${state.cachedTotal} 条，离线也能翻",
+                                    loading = false,
+                                    scale = scale,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -158,6 +187,34 @@ fun VideoWall(
     }
 }
 
+/** 列表尾部那一格：还有下一页时给个正在取的圈，到底了就说一句缓存了多少条 */
+@Composable
+private fun WallFooter(text: String, loading: Boolean, scale: TabletScale) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = scale.touchMin)
+            .padding(horizontal = scale.gapSm),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(modifier = Modifier.size(scale.gapXs))
+        }
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 private fun WallHeader(state: MainUiState, viewModel: MainViewModel, scale: TabletScale) {
     val pending = state.items.count {
@@ -173,7 +230,12 @@ private fun WallHeader(state: MainUiState, viewModel: MainViewModel, scale: Tabl
         horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
     ) {
         Text(
-            text = if (state.filter.active) "筛选出 ${state.items.size} 条" else "共 ${state.items.size} 条",
+            text = when {
+                // 分数式写法是有意给「往下滚还有」留钩子的：只说 50 条，没人知道后面还有 78 条
+                state.filter.active -> "筛选出 ${state.items.size} 条"
+                state.cachePartial -> "已取回 ${state.items.size} / ${state.remoteTotal} 条"
+                else -> "共 ${state.items.size} 条"
+            },
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -390,8 +452,9 @@ private fun Onboarding(viewModel: MainViewModel, scale: TabletScale) {
 
     TextButton(
         onClick = viewModel::pullFromServer,
+        enabled = !state.remoteLoading,
         modifier = Modifier.heightIn(min = scale.touchMin),
     ) {
-        Text("从后台回填已有收藏")
+        Text(if (state.remoteLoading) "正在从后台取第一页" else "从后台加载我的收藏")
     }
 }

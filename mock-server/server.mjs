@@ -413,6 +413,13 @@ function applySync(deviceId, ops) {
   return { applied, unknownOps, favorites: [...appliedFavorites.values()], videos: [...appliedVideos.values()] };
 }
 
+// 分页条数：不给就一页 50，最多 200，别让人一次把整库拽走
+function clampLimit(raw) {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 50;
+  return Math.min(Math.floor(value), 200);
+}
+
 function nextWaitMs() {
   const wait = UPLOAD_WAIT_JITTER_MS > 0
     ? UPLOAD_WAIT_MS + (syncSeq % 3) * UPLOAD_WAIT_JITTER_MS
@@ -461,10 +468,33 @@ const server = createServer(async (req, res) => {
 
     if (path === `${BASE_PATH}/favorites` && req.method === 'GET') {
       if (!authorized(req)) return rejectUnauthorized(res);
-      const favorites = Object.values(state.favorites);
-      const owned = new Set(favorites.map((row) => row.id));
+      // 分页：按 favorite_at 倒序的键集游标（上一页最后那条的 favorite_at）。
+      // 用偏移量的话，翻页途中新收藏一条就会把下一页顶掉一条；键集不会，
+      // 重复取到的那条由 App 按 id 去重。
+      const all = Object.values(state.favorites).sort((a, b) => (b.favorite_at ?? 0) - (a.favorite_at ?? 0));
+      const limit = clampLimit(url.searchParams.get('limit'));
+      const cursorRaw = url.searchParams.get('cursor');
+      let start = 0;
+      if (cursorRaw) {
+        const cursorAt = Number(cursorRaw);
+        start = Number.isFinite(cursorAt) ? all.findIndex((row) => (row.favorite_at ?? 0) < cursorAt) : -1;
+        if (start < 0) start = all.length;
+      }
+      const page = all.slice(start, start + limit);
+      const hasMore = start + page.length < all.length;
+      const owned = new Set(page.map((row) => row.id));
       const videos = Object.values(state.videos).filter((video) => owned.has(video.favorite_id));
-      send(res, 200, { ok: true, server_time: Date.now(), favorites, videos });
+      const last = page[page.length - 1];
+      send(res, 200, {
+        ok: true,
+        server_time: Date.now(),
+        favorites: page,
+        videos,
+        // 每页都带总数：App 靠它区分「一共就这些」和「本地只取回了前面几页」
+        total: all.length,
+        next_cursor: hasMore && last ? String(last.favorite_at ?? 0) : '',
+        has_more: hasMore,
+      });
       return;
     }
 

@@ -2,8 +2,11 @@ package com.favkit.tablet.ui.main
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -55,6 +58,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -371,7 +375,7 @@ private fun FocusStage(
 }
 
 /**
- * 图集段：Fit 完整显示，双指缩放、双击复原。
+ * 图集段：Fit 完整显示，双指缩放、双击复原，没放大时单指横滑翻页。
  *
  * [fullscreen] 为真时图片铺满整屏（连遮罩的内边距也不留），右上角按钮换成退出全屏。
  * 缩放与位移按 `segment.index` 记忆，翻到下一张不会把上一张的放大带过去。
@@ -384,8 +388,7 @@ private fun ImageStage(
     scale: TabletScale,
     onToggleFullscreen: () -> Unit,
 ) {
-    var zoom by remember(segment.index) { mutableFloatStateOf(1f) }
-    var shift by remember(segment.index) { mutableStateOf(Offset.Zero) }
+    val stage = remember(segment.index) { ImageStageState() }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -399,35 +402,17 @@ private fun ImageStage(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    scaleX = zoom
-                    scaleY = zoom
-                    translationX = shift.x
-                    translationY = shift.y
+                    scaleX = stage.zoom
+                    scaleY = stage.zoom
+                    translationX = stage.offset.x
+                    translationY = stage.offset.y
                 }
+                .pointerInput(segment.index) { imageStageGestures(stage) }
                 .pointerInput(segment.index) {
-                    detectTransformGestures { _, pan, factor, _ ->
-                        val next = (zoom * factor).coerceIn(1f, 4f)
-                        val maxX = size.width * (next - 1f) / 2f
-                        val maxY = size.height * (next - 1f) / 2f
-                        zoom = next
-                        shift = if (next <= 1f) {
-                            Offset.Zero
-                        } else {
-                            Offset(
-                                (shift.x + pan.x).coerceIn(-maxX, maxX),
-                                (shift.y + pan.y).coerceIn(-maxY, maxY),
-                            )
-                        }
-                    }
-                }
-                .pointerInput(segment.index) {
-                    detectTapGestures(onDoubleTap = {
-                        zoom = 1f
-                        shift = Offset.Zero
-                    })
+                    detectTapGestures(onDoubleTap = stage::reset)
                 },
         )
-        if (zoom <= 1f) {
+        if (stage.zoom <= 1f) {
             val hint = listOf(
                 label.takeIf { it.isNotBlank() },
                 "双指缩放 · 双击复原",
@@ -458,6 +443,51 @@ private fun ImageStage(
         }
     }
 }
+
+/** 一张图的缩放与平移量。手势协程和 graphicsLayer 共用这一份，翻到下一张各自归零。 */
+private class ImageStageState {
+    var zoom by mutableFloatStateOf(1f)
+    var offset by mutableStateOf(Offset.Zero)
+
+    fun reset() {
+        zoom = 1f
+        offset = Offset.Zero
+    }
+}
+
+/**
+ * 双指缩放、放大后单指平移；**没放大时的单指拖动一帧都不消费**，留给外层 HorizontalPager 翻页。
+ *
+ * 这里原先用 detectTransformGestures，它连单指拖动也一起消费。主指针 pass 子节点先于
+ * 父节点拿到事件，翻页手势一点余量都没剩下，于是视频段能左右切、图集段切不动。
+ */
+private suspend fun PointerInputScope.imageStageGestures(state: ImageStageState) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        while (true) {
+            val event = awaitPointerEvent()
+            val live = event.changes.filter { it.pressed }
+            if (live.isEmpty()) break
+            if (live.size < 2 && state.zoom <= 1f) continue
+            val next = (state.zoom * event.calculateZoom()).coerceIn(1f, MAX_IMAGE_ZOOM)
+            val pan = event.calculatePan()
+            state.zoom = next
+            state.offset = if (next <= 1f) {
+                Offset.Zero
+            } else {
+                val maxX = size.width * (next - 1f) / 2f
+                val maxY = size.height * (next - 1f) / 2f
+                Offset(
+                    (state.offset.x + pan.x).coerceIn(-maxX, maxX),
+                    (state.offset.y + pan.y).coerceIn(-maxY, maxY),
+                )
+            }
+            live.forEach { it.consume() }
+        }
+    }
+}
+
+private const val MAX_IMAGE_ZOOM = 4f
 
 /**
  * 全屏层按当前段的素材决定怎么铺满：图集段放大整屏、可以在图片之间左右翻；

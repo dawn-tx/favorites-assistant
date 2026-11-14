@@ -1,12 +1,8 @@
 package com.favkit.tablet.floating
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -25,10 +21,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.favkit.tablet.R
 import com.favkit.tablet.ui.components.FavColors
@@ -40,8 +34,9 @@ import kotlin.math.abs
  *
  * 触控热区由服务层按 10mm 物理尺寸设置窗口大小，保证整颗球都可直接点按。
  *
- * [badge] 是同步状态角标：画在圆肩那块透明角上（窗口本来就是见方的，四角透明），
- * 所以不需要扩大窗口，也不会给第三方 App 多压一块不可点的区域。
+ * [badge] 有待办要说时**直接占住球心**：数字替掉图标、球底换成那档的颜色。
+ * 原来把角标画在圆肩的透明角上，球只有 15mm，那颗点被 Surface 的圆形裁掉一截，
+ * 数字显示不全，现在整颗球都是它的显示区。
  */
 @Composable
 fun FloatingBall(
@@ -57,8 +52,7 @@ fun FloatingBall(
     Surface(
         shape = CircleShape,
         color = when {
-            // 贴右边半隐藏时露出的是球左侧那 9dp，右上角标在屏幕外 —— 这时换整球替角标说话
-            halfHidden && badge.visible -> badge.tone.color()
+            badge.visible -> badge.tone.color()
             halfHidden -> MaterialTheme.colorScheme.primary
             else -> MaterialTheme.colorScheme.primaryContainer
         },
@@ -91,46 +85,26 @@ fun FloatingBall(
                 }
             },
     ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(contentAlignment = Alignment.Center) {
+            if (badge.visible) {
+                Text(
+                    text = badge.label,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White,
+                    maxLines = 1,
+                )
+            } else {
                 Icon(
                     painter = painterResource(R.drawable.ic_ball_collect),
                     contentDescription = null,
                     tint = when {
-                        halfHidden && badge.visible -> Color.White
                         halfHidden -> MaterialTheme.colorScheme.onPrimary
                         else -> MaterialTheme.colorScheme.onPrimaryContainer
                     },
                     modifier = Modifier.size(32.dp),
                 )
             }
-            if (badge.visible) BadgeDot(badge, dotSize = maxWidth * 0.3f)
         }
-    }
-}
-
-/** 角标：数字居中，白描边把它从第三方 App 的任意底色上剥出来。挂在 BoxScope 上才能用 align */
-@Composable
-private fun BoxScope.BadgeDot(badge: BallBadge, dotSize: Dp) {
-    val dot = dotSize.coerceAtLeast(22.dp)
-    val density = LocalDensity.current
-    Box(
-        modifier = Modifier
-            .align(Alignment.TopEnd)
-            .size(dot)
-            .background(badge.tone.color(), CircleShape)
-            .border(1.5.dp, Color.White, CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = badge.label,
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = with(density) { (dot * 0.42f).toSp() },
-                fontWeight = FontWeight.Bold,
-            ),
-            color = Color.White,
-            maxLines = 1,
-        )
     }
 }
 

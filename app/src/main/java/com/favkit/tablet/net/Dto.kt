@@ -90,12 +90,17 @@ data class SyncResponse(
     val error: String = "",
 )
 
+/** 分页拉取收藏：`next_cursor` 空或 `has_more` 假都表示已经到底 */
 @Serializable
 data class PullResponse(
     val ok: Boolean = true,
     @SerialName("server_time") val serverTime: Long = 0L,
     val favorites: List<FavoriteDto> = emptyList(),
     val videos: List<VideoDto> = emptyList(),
+    @SerialName("next_cursor") val nextCursor: String = "",
+    @SerialName("has_more") val hasMore: Boolean = false,
+    /** 后台当前的收藏总数（不是这一页的条数）；老后台不下发时为 0，App 退回只显示本地条数 */
+    val total: Int = 0,
     val error: String = "",
 )
 

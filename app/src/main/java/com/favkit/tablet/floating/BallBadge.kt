@@ -1,13 +1,13 @@
 package com.favkit.tablet.floating
 
-/** 角标该用哪种告警色；NONE 表示根本不画 */
+/** 角标该用哪种告警色；NONE 表示根本没有待办，球显示图标 */
 enum class BadgeTone { NONE, PENDING, OFFLINE, FAILED }
 
 /**
- * 悬浮球角标：一个数字 + 一个颜色。
+ * 悬浮球球心的数字：一个数 + 一个颜色。
  *
  * 球只有 15mm 见方，摆两个小点读不出来，所以四态按优先级折成一个。
- * 口径与主界面状态胶囊完全一致：都从 `pending_ops` 与联网回调取数。
+ * 口径与主界面状态胶囊完全一致：只有待同步 / 失败 / 离线三种，都从 `pending_ops` 与联网回调取数。
  */
 data class BallBadge(val count: Int, val tone: BadgeTone) {
 

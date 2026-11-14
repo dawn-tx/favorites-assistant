@@ -68,6 +68,14 @@ interface FavoritesDao {
         """
     )
     fun observeUnresolvedCount(): Flow<Int>
+
+    /** 本地缓存里现有多少条：0 就是换机/清数据后的空库，冷启动该自动去后台取第一页 */
+    @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL")
+    suspend fun cachedCount(): Int
+
+    /** 同一个数的可订阅版本：计数条要跟着补页变，不能只在启动时查一次 */
+    @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL")
+    fun observeCachedCount(): Flow<Int>
 }
 
 @Dao
@@ -189,10 +197,6 @@ interface PendingOpsDao {
 
     @Query("UPDATE pending_ops SET attempts = :attempts, nextRetryAt = :nextRetryAt, lastError = :lastError WHERE id = :id")
     suspend fun markRetry(id: Long, attempts: Int, nextRetryAt: Long, lastError: String)
-
-    /** 上一条传完后，把剩余条目统一排到新的可跑时间，实现「等一段时间再传下一条」 */
-    @Query("UPDATE pending_ops SET nextRetryAt = :at WHERE nextRetryAt <= :now")
-    suspend fun scheduleRemaining(now: Long, at: Long): Int
 
     @Query("DELETE FROM pending_ops WHERE id = :id")
     suspend fun delete(id: Long)

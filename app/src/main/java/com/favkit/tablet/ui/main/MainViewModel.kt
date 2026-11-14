@@ -19,11 +19,15 @@ import com.favkit.tablet.net.PullOutcome
 import com.favkit.tablet.net.VideosOutcome
 import com.favkit.tablet.util.VideoLinkDetector
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -62,6 +66,16 @@ data class MainUiState(
     val prefetch: Map<String, Long> = emptyMap(),
     /** 正在向后台取解析结果 */
     val resolving: Boolean = false,
+    /** 上传器在等后台响应：顶栏按钮用它区分「正在排队」和「点了没用」 */
+    val syncing: Boolean = false,
+    /** 正在从后台取下一页收藏 */
+    val remoteLoading: Boolean = false,
+    /** 后台还有没发完的页；滚到底要不要补页、列表尾部挂不挂加载位都看它 */
+    val remoteHasMore: Boolean = true,
+    /** 后台上报的收藏总数（每页都带）；0 = 这个后台没上报，界面退回只说本地条数 */
+    val remoteTotal: Int = 0,
+    /** 本地缓存的条数，不带筛选：计数文案要的是「已取回多少」，跟筛出多少条无关 */
+    val cachedTotal: Int = 0,
     val settings: SettingsSnapshot? = null,
     val showSettings: Boolean = false,
     val quickCollect: Boolean = false,
@@ -69,8 +83,22 @@ data class MainUiState(
 ) {
     val selectionActive: Boolean get() = checked.isNotEmpty()
     val allChecked: Boolean get() = items.isNotEmpty() && checked.size == items.size
-    /** [queued] 是队列总数，含 [failed]；胶囊与角标都显示「还会自动再传的」，避免红黄两枚数同一批 */
-    val pendingUploads: Int get() = (queued - failed).coerceAtLeast(0)
+    /**
+     * 「待同步」的唯一口径。
+     *
+     * 解析结果就装在上传那一次响应里，所以「待上传」和「待解析」是同一批数据，
+     * 界面上不再分两枚胶囊数同一件事。队列总数 [queued] 含 [failed]，先减掉才是还会自动再传的；
+     * 队列空了却还有没解析出来的，那是后台欠的结果，同样算待同步。
+     */
+    val pendingSync: Int get() = if (pendingUploads > 0) pendingUploads else unresolvedCount
+
+    /**
+     * 本地只缓存了滚到过的那几页 —— 这时候顶栏再说「共 N 条」就是把后台的库说成了这一屏。
+     * 后台没上报总数（[remoteTotal] 为 0）时不算部分，退回显示本地条数。
+     */
+    val cachePartial: Boolean get() = remoteTotal > cachedTotal
+
+    private val pendingUploads: Int get() = (queued - failed).coerceAtLeast(0)
 }
 
 class MainViewModel private constructor(private val graph: AppGraph) : ViewModel() {
@@ -98,11 +126,23 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private val prefetches = ConcurrentHashMap<String, Pair<PrefetchHandle, Job>>()
     private var tickCount = 0
 
+    /** 后台下一页的游标；进程死了就归零，重取第一页靠 id 去重，不会翻倍 */
+    private var remoteCursor: String? = null
+    private var remotePaging = false
+
     init {
         viewModelScope.launch { graph.tags.ensurePresets() }
         bindFlows()
         cacheBytesFlow.value = graph.media.totalCachedBytes()
         refreshVideos()
+        seedRemoteCache()
+    }
+
+    /** 本地缓存空着 = 换机或清了数据，不必等用户点按钮，自己去后台取第一页 */
+    private fun seedRemoteCache() {
+        viewModelScope.launch {
+            if (graph.favorites.cachedCount() == 0) loadRemotePage(announce = false)
+        }
     }
 
     private fun bindFlows() {
@@ -124,6 +164,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { cacheBytesFlow.collect { v -> _state.update { it.copy(cacheBytes = v) } } }
         viewModelScope.launch { prefetchFlow.collect { v -> _state.update { it.copy(prefetch = v) } } }
         viewModelScope.launch { resolvingFlow.collect { v -> _state.update { it.copy(resolving = v) } } }
+        viewModelScope.launch { graph.sync.running.collect { v -> _state.update { it.copy(syncing = v) } } }
         viewModelScope.launch { graph.player.state.collect { v -> _state.update { it.copy(player = v) } } }
         viewModelScope.launch { graph.settings.snapshot.collect { v -> _state.update { it.copy(settings = v) } } }
         viewModelScope.launch { graph.sync.queuedCount.collect { v -> _state.update { it.copy(queued = v) } } }
@@ -132,10 +173,21 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.favorites.unresolvedCount.collect { v -> _state.update { it.copy(unresolvedCount = v) } }
         }
         viewModelScope.launch {
+            graph.favorites.cachedTotal.collect { v -> _state.update { it.copy(cachedTotal = v) } }
+        }
+        viewModelScope.launch {
             graph.favorites.unsyncedCount.collect { v -> _state.update { it.copy(unsynced = v) } }
         }
         viewModelScope.launch {
             graph.connectivity.onlineState().collect { v -> _state.update { it.copy(online = v) } }
+        }
+        // 队列排空了却还有条目停在 PENDING —— 后台异步解析的那条路。只在「刚变成这个状态」时
+        // 拉一次结果，不轮询也不定时；顶栏按钮不再兼任这个职责，因为它本该只管重试
+        viewModelScope.launch {
+            _state.map { it.online && it.queued == 0 && it.unresolvedCount > 0 }
+                .distinctUntilChanged()
+                .filter { it }
+                .collect { refreshVideos() }
         }
     }
 
@@ -307,7 +359,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     // endregion
 
     // region 后台解析
-    /** 向后台取未解析条目的视频信息；下拉刷新与启动时各走一次 */
+    /** 向后台取未解析条目的视频信息：启动时走一次，队列排空后仍有未解析条目再走一次 */
     fun refreshVideos() {
         val pending = _state.value.items
             .filter { it.video?.status != ResolveStatus.READY }
@@ -339,17 +391,79 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
-    /** 本地库为空（换机/清数据）时，从后台整体回填 */
+    /** 空状态、抽屉里那颗「从后台加载」：取下一页，并把结果一条一句说清楚 */
     fun pullFromServer() {
-        viewModelScope.launch {
-            when (val outcome = graph.api.pull()) {
-                is PullOutcome.Loaded -> {
-                    graph.favorites.importRemote(outcome.favorites, outcome.videos)
-                    messageFlow.value = "已从后台回填 ${outcome.favorites.size} 条收藏"
-                }
+        loadRemotePage(announce = true)
+    }
 
-                is PullOutcome.Failed -> messageFlow.value = "回填失败：${outcome.reason}"
+    /** 列表滚到底：静默补一页，离线或到底就不发 */
+    fun loadMoreFromServer() {
+        if (!_state.value.online) return
+        loadRemotePage(announce = false)
+    }
+
+    private fun loadRemotePage(announce: Boolean) {
+        if (remotePaging) return
+        if (!announce && !_state.value.remoteHasMore) return
+        remotePaging = true
+        _state.update { it.copy(remoteLoading = true) }
+        viewModelScope.launch {
+            try {
+                fetchRemotePage(announce)
+            } finally {
+                remotePaging = false
+                _state.update { it.copy(remoteLoading = false) }
             }
+        }
+    }
+
+    /**
+     * 取后台的一页收藏落进本地缓存 —— 服务端是事实来源，本地这张表只缓存滚到过的那几页，
+     * 所以离线能看的也就是这些，滚到底就再补一页。
+     *
+     * 整段兜异常：这条链原本没有隔离，后台多一条脏数据一崩就是 App 直接退出。
+     * 取消异常照常往上抛，别把它当失败弹消息。
+     * [announce] 为假是自动补页，除了界面自己的加载位，什么都不该弹。
+     */
+    private suspend fun fetchRemotePage(announce: Boolean) {
+        val outcome = try {
+            graph.api.pull(remoteCursor, PAGE_SIZE)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (broken: Exception) {
+            if (announce) messageFlow.value = "从后台加载失败：${broken.message ?: "后台响应异常"}"
+            return
+        }
+        when (outcome) {
+            is PullOutcome.Loaded -> {
+                val report = try {
+                    graph.favorites.importRemote(outcome.favorites, outcome.videos)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (broken: Exception) {
+                    if (announce) messageFlow.value = "从后台加载失败：${broken.message ?: "本地写入异常"}"
+                    return
+                }
+                remoteCursor = outcome.nextCursor.ifBlank { null }
+                // 后台说还有、却一条没发，那就是它自己数错了，别再往下滚着要了
+                val more = outcome.hasMore && outcome.favorites.isNotEmpty()
+                // 总数每页都一样，取到就覆盖；老后台不下发（0）时保持原值，界面退回只说本地条数
+                _state.update {
+                    it.copy(remoteHasMore = more, remoteTotal = if (outcome.total > 0) outcome.total else it.remoteTotal)
+                }
+                if (!announce) return
+                messageFlow.value = buildString {
+                    append("后台这一页 ${outcome.favorites.size} 条")
+                    if (outcome.total > 0) append("（后台共 ${outcome.total} 条）")
+                    append("，新入库 ${report.imported} 条")
+                    if (report.skipped > 0) append("，${report.skipped} 条本地已有")
+                    if (report.broken > 0) append("，${report.broken} 条数据异常已跳过")
+                    if (!report.videosSaved) append("；内容信息暂未写入，稍后会自动重取")
+                    append(if (more) "；往下滚还有下一页" else "；已经是最后一页")
+                }
+            }
+
+            is PullOutcome.Failed -> if (announce) messageFlow.value = "从后台加载失败：${outcome.reason}"
         }
     }
     // endregion
@@ -426,10 +540,40 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
-    fun retrySync() {
-        graph.sync.retryFailed()
-        graph.sync.flush()
-        messageFlow.value = "已重新排队，联网后自动补传"
+    /**
+     * 顶栏唯一的同步入口：**把失败的请求重新排队并立刻继续上传**。
+     *
+     * 这个位置原本放的是「取解析结果」，没有待解析条目时就静默 return，用户点了像没反应。
+     * 语义收窄成一件确实有用的事后，四种情况都必须回一句话，不许无声。
+     */
+    fun retrySyncNow() {
+        val current = _state.value
+        if (current.syncing) {
+            messageFlow.value = "正在等后台响应，传完这条会自动继续下一条"
+            return
+        }
+        when {
+            !current.online -> messageFlow.value =
+                if (current.queued > 0) "当前离线，队列已保留，联网后自动继续上传" else "当前离线，没有待同步的条目"
+
+            current.failed > 0 -> {
+                graph.sync.retryFailed()
+                messageFlow.value = "已把 ${current.failed} 条失败的重新排队，按上传节奏继续"
+            }
+
+            current.queued > 0 -> {
+                graph.sync.flush()
+                messageFlow.value = "队列里还有 ${current.queued} 条，已推动继续上传"
+            }
+
+            // 待同步胶囊这时候数的是「后台还欠我们的解析结果」，点它得有反应，不能报「一切正常」
+            current.unresolvedCount > 0 -> {
+                refreshVideos()
+                messageFlow.value = "队列已清空，还有 ${current.unresolvedCount} 条没解析出来，已向后台再取一次"
+            }
+
+            else -> messageFlow.value = "没有需要重试的条目，本地与后台一致"
+        }
     }
 
     /** 手动把某条视频缓存到本地，离线也能播 */
@@ -535,6 +679,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     companion object {
+        /** 一页收藏的条数：够铺两三屏，又不至于一次把几年的收藏全拽下来 */
+        private const val PAGE_SIZE = 50
+
         fun factory(graph: AppGraph) = viewModelFactory {
             initializer { MainViewModel(graph) }
         }

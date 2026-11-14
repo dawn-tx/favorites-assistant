@@ -101,8 +101,8 @@ data class FavoriteTagRow(val favoriteId: String, val tagId: Long)
 
 /**
  * 待上传队列：串行执行，一次只跑一条。
- * [nextRetryAt] 语义是「这条什么时候才允许被取走」：新入队为 0（立刻可跑），
- * 上一条传完后由上传器按「服务端返回的等待时间 ?? 设置里的上传间隔」写入。
+ * [nextRetryAt] 只管**这一条自己的**重试退避：新入队为 0（立刻可跑），失败后按退避时间推后。
+ * 「两条之间隔多久」不再写到这里，由 [com.favkit.tablet.net.SyncGate] 在出站口统一把控。
  */
 @Entity(tableName = "pending_ops", indices = [Index("nextRetryAt"), Index("favoriteId")])
 data class PendingOpRow(

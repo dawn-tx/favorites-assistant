@@ -10,12 +10,14 @@ import com.favkit.tablet.di.AppGraph
 import com.favkit.tablet.net.SyncOutcome
 import com.favkit.tablet.net.targetId
 import com.favkit.tablet.sync.SyncManager.Companion.MAX_ATTEMPTS
-import kotlinx.coroutines.delay
 
 /**
- * 待上传队列的执行体：**一次只跑一条**，跑完等一会儿再取下一条。
+ * 待上传队列的执行体：**一次只跑一条**，前一条有结果之后才发下一条。
  *
- * 等待时间优先取后台响应里的 `next_wait_ms`，其次取设置里的上传间隔（默认 3000ms）。
+ * 「等多久再发下一条」不在这里 sleep —— 节奏由 [com.favkit.tablet.net.SyncGate] 在所有出站请求
+ * （上传、取解析结果、回填）的唯一出口统一把控，成功、失败、重试、旁路都排同一个队。
+ * 时隙还远就把这一轮交回 WorkManager 退避重排，不占着 worker 干等。
+ *
  * 离线时 WorkManager 的 constraints 直接不调度本类；网络恢复由 [SyncManager.flush] 重新拉起。
  *
  * 成功判据是「后台确认的条数 == 送出的条数」。后台回 ok 但 applied 对不上时，
@@ -25,6 +27,16 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
 
     override suspend fun doWork(): Result {
         val graph = (applicationContext as? App)?.graph ?: return Result.failure()
+        // 顶栏按钮的转圈就是这个状态：点了要能分清「在等后台」还是「没东西可传」
+        graph.sync.markRunning(true)
+        return try {
+            drain(graph)
+        } finally {
+            graph.sync.markRunning(false)
+        }
+    }
+
+    private suspend fun drain(graph: AppGraph): Result {
         val ops = graph.db.pendingOps()
         val favorites = graph.db.favorites()
         val startedAt = System.currentTimeMillis()
@@ -62,11 +74,9 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
 
                         else -> dto.favorite?.let { favorites.updateBadge(it.id, SyncBadge.SYNCED.name) }
                     }
-                    val wait = (outcome.nextWaitMs ?: settingsInterval(graph)).coerceAtLeast(0L)
-                    if (wait > 0) {
-                        ops.scheduleRemaining(System.currentTimeMillis(), System.currentTimeMillis() + wait)
-                        delay(wait)
-                    }
+                    // 下一条的时隙还远就别把 worker 挂在原地：交回 WorkManager 退避后再来一轮，
+                    // 真正的等待由 SyncGate 在发请求前补齐
+                    if (graph.gate.timeUntilNextSlot() > HOLD_BUDGET_MS) return Result.retry()
                 }
 
                 is SyncOutcome.Rejected -> {
@@ -92,8 +102,6 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
         return if (ops.dueCount(System.currentTimeMillis()) > 0) Result.retry() else Result.success()
     }
 
-    private suspend fun settingsInterval(graph: AppGraph): Long = graph.settings.current().uploadIntervalMs
-
     private fun farFuture(): Long = Long.MAX_VALUE / 4
 
     companion object {
@@ -101,5 +109,8 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
         private const val OPS_PER_REQUEST = 1
         private const val BACKOFF_STEP_MS = 8_000L
         private const val MAX_RUN_MS = 3 * 60 * 1_000L
+
+        /** 下一条时隙超过这个时长就不占着 worker，改由 WorkManager 退避后重排 */
+        private const val HOLD_BUDGET_MS = 30_000L
     }
 }
