@@ -62,7 +62,8 @@ node mock-server/server.mjs     # 监听 0.0.0.0:8787/api/v1
 
 - 协议是纯明文 JSON（`POST /sync`、`GET /favorites`、`GET /videos`、`POST /videos/resolve`、`GET /health`、`GET /stats`），不再有信封加密和 RSA 密钥。
 - 启动日志会列出本机所有非内部 IPv4 地址，平板照抄 `http://<电脑内网 IP>:8787/api/v1` 即可。
-- 视频标题、封面、时长、播放地址由服务端按 url 哈希确定性生成（`resolver: mock`），
+- 标题、封面、时长、播放地址、`summary` 和 `media[]` 素材清单由服务端按 url 哈希确定性生成（`resolver: mock`）：
+  同一链接永远同一结果，四类构成（图+视频 / 纯图集 / 多段视频 / 单个视频）按哈希均匀出现，用来真跑一遍多素材展示链路。
   App 不需要自己猜标题；数据落在 `mock-server/data.json`。
 - 服务默认监听 `0.0.0.0`，同一局域网内任何设备都能访问，只适合内网调试，不要暴露到公网。
 - **真机连不上先看这三条**：
@@ -91,7 +92,7 @@ app/src/main/java/com/favkit/tablet/
     ├── MainActivity.kt        入口、旋转与权限处理、分享链接承接
     ├── ShareReceiverActivity.kt  系统分享接收（无界面，转交悬浮面板或主 App）
     ├── theme/ components/     Material3 主题与平板热区控件
-    ├── main/                  自适应主界面：VideoWall / VideoCard / NavPane / DetailPane + MainViewModel
+    ├── main/                  自适应主界面：VideoWall / VideoCard / FocusOverlay（聚焦遮罩层）/ FilterSheet（筛选抽屉）+ MainViewModel
     └── settings/              SettingsSheet
 
 mock-server/                   本地 mock 同步服务（明文协议 + 确定性假视频解析）
@@ -108,7 +109,7 @@ docs/                          使用说明、架构与性能验证、同步后�
 | 旋转不丢状态 | `fullSensor`（横竖屏都有排版）+ `configChanges`（Activity 不重建）+ 进程级草稿 `FloatingDraftStore` + `rememberLazyGridState`/`rememberLazyListState` 滚动位置 |
 | 触控目标 ≥10mm、边缘控件距屏 ≥20mm | `TabletMetrics` 用 `xdpi/ydpi` 真实物理 DPI 换算，并与 `sw600dp/sw720dp` 三档 dimens 基线取大 |
 | 间距比手机 +50% | `values/dimens.xml` 以 8dp × 1.5 为 `gap_sm` 基线，sw600/sw720 逐档加宽 |
-| 按 sw600dp/sw720dp 自适应 | 三档基线见 `values` / `values-sw600dp` / `values-sw720dp`；宽屏走「导航 + 视频墙 + 详情」分栏，窄屏/竖屏以视频墙为主体、详情整屏打开 |
+| 按 sw600dp/sw720dp 自适应 | 三档基线见 `values` / `values-sw600dp` / `values-sw720dp`；主界面不按宽度分栏，只有「视频墙 + 聚焦遮罩」两层，宽度只决定墙的列数与遮罩里信息栏是否并列 |
 | 常驻 ≤80MB / 冷启动 ≤2s | `AppGraph` 全 lazy、单一 `ExoPlayer` 实例复用、无第三方 DI/无启动器插件；测量步骤见 `docs/架构与性能验证.md` |
 | 后台静默同步不吃电量 | 只用 `ConnectivityManager` 回调触发，零轮询、零定时器 |
 | 悬浮球拖拽 + 贴边半隐 | `TYPE_APPLICATION_OVERLAY` 窗口 + `ValueAnimator` 吸附，位置持久化 |
@@ -116,13 +117,15 @@ docs/                          使用说明、架构与性能验证、同步后�
 | 面板四段结构（只读链接 / 手写备注 / 横滚标签 + 内联新建标签 / 保存同步·关闭） | `FloatingPanelScreen` |
 | 手写笔直接书写 | `StylusNoteField`：AndroidView 承载真实 `EditText`，复用 Android 14+ 对可编辑文本框默认开启的手写笔直写；更早系统用手写输入法，无需额外权限 |
 | 上报 url+备注+标签+来源+时间戳 | `SyncApi` 明文 JSON `POST /sync`；成功只认 `applied + unknown_ops == 送出条数`，对不上就重新排队，绝不静默丢数据 |
-| 一条收藏链接 ≠ 一个视频 | 收藏只存用户数据；标题/封面/时长/播放地址由后台解析后经 `video_info` 表缓存，卡片区分「解析中 / 已就绪 / 解析失败」并可手动重新解析 |
+| 一条收藏链接 ≠ 一个视频 | 收藏只存用户数据；后台解析回传 `summary`（一句话说明这链接里有什么）+ `media[]` 素材清单（图 + 多段视频），经 `video_info` 表缓存（`mediaJson` 一列存清单，不额外建表）。清单为空时退回顶层字段当单个视频，老后台不用改 |
 | 新收藏先进本地队列，按节奏逐条上传 | `SyncWorker` 每次只取 1 条，等待 `响应 next_wait_ms ?? 设置里的上传间隔（默认 3000ms）` 再传下一条 |
 | 2 秒轻提示 + 自动收起 + 回到原 App | Toast `LENGTH_SHORT`，面板窗口关闭，不启动任何 Activity |
 | 断网静默重试 3 次后进队列自动补传 | `SyncWorker` + `WorkManager` 网络约束与线性退避 + `pending_ops` 队列表 |
-| 以视频列表为主的大屏（自适应横竖屏） | `MainScreen`：`>=900dp` 左栏导航 + 视频墙，`>=1120dp` 再加常驻详情栏；更窄时整屏视频墙 + 整屏详情，列数按可用宽度算（2~5 列） |
-| 内置播放器倍速、拖动、全屏 | `PlayerStage`（详情栏内嵌 16:9，可一键全屏并沉浸系统栏，复用同一个 ExoPlayer 实例；倍速走选择器，全屏点画面只切换控制条显隐） |
-| 备注编辑、标签调整、批量删除 | `DetailPane` + `VideoWall` 长按多选批量条 |
+| 以视频列表为主的大屏（自适应横竖屏） | `MainScreen` = 整屏 `VideoWall`（列数按可用宽度取 2~5）+ 盖在墙上的 `FocusOverlay`；筛选、标签、同步状态收进顶栏 `FilterSheet` 抽屉 |
+| 后台返回内容一目了然 | `VideoCard` 按 `media[]` 真实构成变形（单图 / 等分拼格 / 首图 + 缩略条 + 「+N」），文字只留标题一行 + `summary` 两行；封面按卡片实际宽度解码，控制在 80MB 预算内 |
+| 看详情不丢浏览位置 | `FocusOverlay` 是墙的**兄弟节点**而不是分支：墙不退出组合，滚位与已解码封面都还在；逐段浏览用 `HorizontalPager` + 段条，段与段各自记进度；关闭后回到原位置并让那张卡闪一下边框 |
+| 内置播放器倍速、拖动、全屏 | `PlayerStage`（遮罩媒体区内嵌 16:9，可一键全屏并沉浸系统栏，复用同一个 ExoPlayer 实例；倍速走选择器，全屏点画面只切换控制条显隐） |
+| 备注编辑、标签调整、批量删除 | `FocusOverlay` 信息栏（备注、标签点一下即生效、缓存、删除）+ `VideoWall` 长按多选批量条 |
 | 全部本地缓存、离线可看 | Room 为唯一事实来源 + `SimpleCache` 边播边存 + 单条「缓存到本地」预取 |
 
 ## 六、已知边界（诚实说明）
