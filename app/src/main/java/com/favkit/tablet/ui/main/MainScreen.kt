@@ -89,7 +89,7 @@ fun MainScreen(
     // 关掉遮罩后要把用户带回刚才那条：滚到视野内 + 让那张卡闪一下
     var flashId by rememberSaveable { mutableStateOf<String?>(null) }
     val focus = state.focus
-    val focusFavorite = focus?.let { item -> state.items.firstOrNull { it.id == item.id } }
+    val focusFavorite = focus?.let { current -> state.items.firstOrNull { it.id == current.itemId } }
 
     LaunchedEffect(flashId) {
         val id = flashId ?: return@LaunchedEffect
