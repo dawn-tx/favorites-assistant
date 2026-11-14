@@ -89,6 +89,12 @@ class TabletPlayer(private val cache: MediaCache) {
         }
     }
 
+    /** 翻到图集段时让视频安静下来：不释放实例，已缓冲的还在，翻回来看下一段还是秒开 */
+    fun pausePlayback() {
+        val created = exoPlayer ?: return
+        if (created.isPlaying) created.pause()
+    }
+
     fun setSpeed(speed: Float) {
         _state.value = _state.value.copy(speed = speed)
         exoPlayer?.playbackParameters = PlaybackParameters(speed)

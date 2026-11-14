@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,14 +44,14 @@ import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.ui.components.ConfirmDialog
 import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.StatusPill
-import com.favkit.tablet.ui.components.TabletTagChip
 import com.favkit.tablet.util.ClipboardBridge
 import com.favkit.tablet.util.VideoLinkDetector
 
 /**
  * 主界面主体：后台解析出的视频墙。
  *
- * 窄屏（竖屏）把筛选条放在顶部横向滚动，宽屏由左栏承担筛选，这里只留计数与状态；
+ * 墙上只留三样东西：计数与解析状态、多选条、卡片本身。筛选走顶栏抽屉，
+ * 内容细节走遮罩层 —— 一屏里最该占面积的始终是卡片。
  * 列数按可用宽度算，卡片不会因为一屏只有一两列而显得空，也不会在窄屏挤成一条缝。
  */
 @Composable
@@ -59,15 +60,12 @@ fun VideoWall(
     state: MainUiState,
     scale: TabletScale,
     gridState: LazyGridState,
-    showFilterBar: Boolean,
+    flashId: String?,
     modifier: Modifier = Modifier,
 ) {
     var deleteConfirm by rememberSaveable { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxSize()) {
-        if (showFilterBar) {
-            FilterBar(viewModel = viewModel, state = state, scale = scale)
-        }
         if (state.selectionActive) {
             SelectionBar(
                 state = state,
@@ -92,6 +90,22 @@ fun VideoWall(
                     val spacing = scale.gapSm
                     val minCard = if (maxWidth >= 600.dp) 240.dp else 200.dp
                     val columns = ((maxWidth - spacing) / (minCard + spacing)).toInt().coerceIn(2, 5)
+                    // 封面按卡片实际宽度解码，不按整屏宽度：一面墙十几张卡各解一次全尺寸图，
+                    // 悬浮助手「常驻 <= 80MB」最先超的就是这块
+                    val cardWidth = (maxWidth - spacing * (columns - 1)) / columns
+
+                    // 从遮罩层回来时位置本来就没动（墙没退出组合）；
+                    // 只有遮罩层里翻过好几条收藏才需要把它滚进视野
+                    LaunchedEffect(flashId, columns) {
+                        val id = flashId ?: return@LaunchedEffect
+                        val index = state.items.indexOfFirst { it.id == id }
+                        if (index < 0) return@LaunchedEffect
+                        if (gridState.layoutInfo.visibleItemsInfo.none { it.index == index }) {
+                            val first = ((index / columns - 1).coerceAtLeast(0)) * columns
+                            gridState.scrollToItem(first)
+                        }
+                    }
+
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(columns),
                         state = gridState,
@@ -103,22 +117,23 @@ fun VideoWall(
                         items(items = state.items, key = { it.id }) { favorite ->
                             VideoCard(
                                 favorite = favorite,
-                                selected = favorite.id == state.selected?.id,
                                 checked = favorite.id in state.checked,
                                 selectionActive = state.selectionActive,
                                 online = state.online,
                                 prefetchBytes = state.prefetch[favorite.id],
-                                showTags = columns <= 3,
+                                decodeDp = cardWidth,
+                                // 卡片越窄，缩略条越省：4 列以上每块图块已经不到 80dp，再排三块就糊成马赛克了
+                                stripTiles = if (columns >= 4) 2 else 3,
+                                highlight = favorite.id == flashId,
                                 scale = scale,
                                 onClick = {
                                     if (state.selectionActive) {
                                         viewModel.toggleCheck(favorite.id)
                                     } else {
-                                        viewModel.openDetail(favorite.id)
+                                        viewModel.openFocus(favorite.id)
                                     }
                                 },
                                 onLongClick = { viewModel.toggleCheck(favorite.id) },
-                                onResolve = { viewModel.resolveNow(favorite.id) },
                             )
                         }
                     }
@@ -140,52 +155,6 @@ fun VideoWall(
             },
             onDismiss = { deleteConfirm = false },
         )
-    }
-}
-
-/** 窄屏顶部筛选条：仅未同步 + 标签，横向滚动，全部热区 >= touchMin */
-@Composable
-private fun FilterBar(
-    viewModel: MainViewModel,
-    state: MainUiState,
-    scale: TabletScale,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(vertical = scale.gapXs),
-        horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TabletTagChip(
-            label = "全部",
-            selected = !state.filter.active,
-            onClick = viewModel::clearFilters,
-            minHeight = scale.touchMin,
-        )
-        TabletTagChip(
-            label = "仅未同步",
-            selected = state.filter.onlyUnsynced,
-            onClick = { viewModel.showUnsyncedOnly(!state.filter.onlyUnsynced) },
-            minHeight = scale.touchMin,
-        )
-        state.tags.forEach { tag ->
-            TabletTagChip(
-                label = if (tag.usageCount > 0) "${tag.name} · ${tag.usageCount}" else tag.name,
-                selected = tag.id in state.filter.tagIds,
-                onClick = { viewModel.toggleTagFilter(tag.id) },
-                minHeight = scale.touchMin,
-            )
-        }
-        if (state.filter.active) {
-            TextButton(
-                onClick = viewModel::clearFilters,
-                modifier = Modifier.heightIn(min = scale.touchMin),
-            ) {
-                Text("清除筛选")
-            }
-        }
     }
 }
 
@@ -224,7 +193,7 @@ private fun WallHeader(state: MainUiState, viewModel: MainViewModel, scale: Tabl
             }
         } else if (state.items.isNotEmpty()) {
             Text(
-                text = "点卡片播放 · 长按多选",
+                text = "点卡片看内容 · 长按多选",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -323,7 +292,7 @@ private fun EmptyWall(
                 text = when {
                     unusedNames.isNotEmpty() ->
                         "标签「${unusedNames.joinToString("」「")}」还没有关联任何收藏，" +
-                            "先去详情页给条目打上标签，或取消这些标签的筛选。"
+                            "在遮罩层里给条目打上标签，或取消这些标签的筛选。"
 
                     selectedNames.isNotEmpty() ->
                         "选中的标签「${selectedNames.joinToString("」「")}」下没有同时满足其它条件的收藏。"

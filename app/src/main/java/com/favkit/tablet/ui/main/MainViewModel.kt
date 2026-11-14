@@ -27,13 +27,27 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/**
+ * 聚焦遮罩层看的是哪一条、第几段。
+ *
+ * 段号放在这里而不是从 `selected` 现推，是因为切段要能撤销、转屏和进程重启后也要回到
+ * 用户刚才看的那一段；[playerKey] 是播放器认的装载键，同一个收藏的不同段互不覆盖。
+ */
+data class FocusUiState(
+    val itemId: String,
+    val segmentIndex: Int = 0,
+) {
+    val playerKey: String get() = "$itemId#$segmentIndex"
+}
+
 data class MainUiState(
     val items: List<Favorite> = emptyList(),
     val tags: List<Tag> = emptyList(),
     val filter: FavoriteFilter = FavoriteFilter(),
-    val selected: Favorite? = null,
-    /** 竖屏与窄横屏下详情页作为整屏页打开；宽横屏为常驻右栏，此值恒为 true */
-    val detailOpen: Boolean = false,
+    /** 聚焦遮罩层看的是哪一条、第几段；为空表示正在看墙。遮罩是盖在墙上的，墙不会因此退出组合，滚动位置天然保留 */
+    val focus: FocusUiState? = null,
+    /** 筛选与标签管理收进顶栏抽屉，不再占一栏 */
+    val showFilters: Boolean = false,
     val checked: Set<String> = emptySet(),
     val player: PlayerUiState = PlayerUiState(),
     val fullscreen: Boolean = false,
@@ -60,8 +74,8 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     val state: StateFlow<MainUiState> = _state.asStateFlow()
 
     private val filterFlow = MutableStateFlow(FavoriteFilter())
-    private val selectedIdFlow = MutableStateFlow<String?>(null)
-    private val detailOpenFlow = MutableStateFlow(false)
+    private val focusFlow = MutableStateFlow<FocusUiState?>(null)
+    private val filtersFlow = MutableStateFlow(false)
     private val checkedFlow = MutableStateFlow<Set<String>>(emptySet())
     private val fullscreenFlow = MutableStateFlow(false)
     private val settingsFlow = MutableStateFlow(false)
@@ -88,18 +102,15 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     private fun bindFlows() {
         viewModelScope.launch {
-            combine(graph.favorites.observeAll(), filterFlow, selectedIdFlow) { all, filter, selectedId ->
-                val visible = all.filter(filter::matches)
-                visible to (visible.firstOrNull { it.id == selectedId } ?: visible.firstOrNull())
-            }.collect { (visible, detail) ->
-                _state.update { it.copy(items = visible, selected = detail) }
-            }
+            combine(graph.favorites.observeAll(), filterFlow) { all, filter -> all.filter(filter::matches) }
+                .collect { visible -> _state.update { it.copy(items = visible) } }
         }
         viewModelScope.launch { graph.tags.observeTags().collect { v -> _state.update { it.copy(tags = v) } } }
         // 筛选条件本身也要回写 state：items 由 combine 过滤，但 UI 的选中态、搜索框文字、
         // 「清除筛选」按钮都读 state.filter，不同步就会出现「筛了却看不见筛了什么」。
         viewModelScope.launch { filterFlow.collect { v -> _state.update { it.copy(filter = v) } } }
-        viewModelScope.launch { detailOpenFlow.collect { v -> _state.update { it.copy(detailOpen = v) } } }
+        viewModelScope.launch { focusFlow.collect { v -> _state.update { it.copy(focus = v) } } }
+        viewModelScope.launch { filtersFlow.collect { v -> _state.update { it.copy(showFilters = v) } } }
         viewModelScope.launch { checkedFlow.collect { v -> _state.update { it.copy(checked = v) } } }
         viewModelScope.launch { fullscreenFlow.collect { v -> _state.update { it.copy(fullscreen = v) } } }
         viewModelScope.launch { settingsFlow.collect { v -> _state.update { it.copy(showSettings = v) } } }
@@ -173,17 +184,57 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     /**
-     * 点卡片：打开详情并让播放器对准后台给的播放地址。
-     * 后台还没解析出可播地址时不启动播放器，由详情面板提示「解析中/解析失败」。
+     * 点卡片：把这条内容摊开放在遮罩层里。
+     *
+     * 落在上次看的那一段（老数据没有段号就第 0 段），因为后台给的 `media[]` 顺序就是阅读顺序，
+     * 中途退出再进来不该从第一张重看。
      */
-    fun openDetail(id: String) {
-        selectedIdFlow.value = id
-        detailOpenFlow.value = true
-        playIfReady(_state.value.items.firstOrNull { it.id == id })
+    fun openFocus(id: String) {
+        val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
+        if (favorite.segments.isEmpty()) return openFallback(favorite)
+        val start = favorite.lastSegmentIndex.takeIf { it in favorite.segments.indices } ?: 0
+        focusFlow.value = FocusUiState(id, start)
+        filtersFlow.value = false
+        loadSegment(favorite, start, autoPlay = false)
     }
 
-    fun closeDetail() {
-        detailOpenFlow.value = false
+    /** 还没解析出素材时也打开：遮罩层要能说明「在等什么」，并且留下重新解析的入口 */
+    private fun openFallback(favorite: Favorite) {
+        focusFlow.value = FocusUiState(favorite.id, 0)
+        filtersFlow.value = false
+        graph.player.pausePlayback()
+    }
+
+    fun closeFocus() {
+        persistProgressNow()
+        focusFlow.value = null
+    }
+
+    /** 筛选与标签管理收进顶栏抽屉；遮罩层打开时顶栏收起，所以抽屉只从墙上打开 */
+    fun showFilters(value: Boolean) {
+        filtersFlow.value = value
+    }
+
+    /** 分段条点击、媒体区左右滑动都走这里；[FocusUiState.playerKey] 让每段各自记住看到哪 */
+    fun showSegment(index: Int) {
+        val focus = focusFlow.value ?: return
+        val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
+        if (index !in favorite.segments.indices || index == focus.segmentIndex) return
+        persistProgressNow()
+        focusFlow.value = FocusUiState(focus.itemId, index)
+        viewModelScope.launch { graph.favorites.setLastSegment(favorite.id, index) }
+        // 在遮罩层里主动翻段 = 直接操作，视频段自动播起来；从墙上点开时才停在暂停态等用户按播放
+        loadSegment(favorite, index, autoPlay = true)
+    }
+
+    /** ‹ › 换一条：遮罩层不关，墙跟着滚到新位置 */
+    fun stepItem(delta: Int) {
+        val items = _state.value.items
+        if (items.isEmpty()) return
+        val position = items.indexOfFirst { it.id == focusFlow.value?.itemId }
+        val target = if (position < 0) 0 else (position + delta).coerceIn(0, items.lastIndex)
+        persistProgressNow()
+        openFocus(items[target].id)
     }
 
     fun showSettings(value: Boolean) {
@@ -196,15 +247,21 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     // endregion
 
     // region 播放
-    private fun playIfReady(favorite: Favorite?) {
-        val video = favorite?.video ?: return
-        if (!video.playable) return
+    private fun loadSegment(favorite: Favorite, index: Int, autoPlay: Boolean) {
+        val segment = favorite.segments.getOrNull(index) ?: return
+        if (!segment.playable) {
+            // 翻到图集段：让视频安静下来，实例不释放，翻回去还是秒开
+            graph.player.pausePlayback()
+            return
+        }
+        val resumeAtMs = favorite.segmentProgress[index]
+            ?: if (index == favorite.lastSegmentIndex) favorite.lastPositionMs else 0L
         graph.player.open(
-            itemId = favorite.id,
-            url = video.playUrl,
-            resumeAtMs = favorite.lastPositionMs,
+            itemId = FocusUiState(favorite.id, index).playerKey,
+            url = segment.url,
+            resumeAtMs = resumeAtMs,
             speed = _state.value.settings?.defaultPlaybackSpeed ?: 1f,
-            autoPlay = false,
+            autoPlay = autoPlay,
         )
     }
 
@@ -224,17 +281,19 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         fullscreenFlow.value = value
     }
 
-    /** 详情页每约 500ms 调用一次，进度每 6 次回写一次，避免频繁落盘 */
+    /** 遮罩层每约 500ms 调用一次，进度每 6 次回写一次，避免频繁落盘 */
     fun tick() {
         graph.player.syncTick()
         tickCount += 1
         if (tickCount % 6 == 0) persistProgressNow()
     }
 
+    /** 把「第几段看到哪」写回本地；播放器还没装载时别用 0 去覆盖已有进度 */
     fun persistProgressNow() {
-        val id = _state.value.selected?.id ?: return
+        val focus = focusFlow.value ?: return
         val (position, _) = graph.player.snapshotProgress()
-        viewModelScope.launch { graph.favorites.saveProgress(id, position) }
+        if (position <= 0L) return
+        viewModelScope.launch { graph.favorites.saveProgress(focus.itemId, focus.segmentIndex, position) }
     }
     // endregion
 
@@ -254,7 +313,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
-    /** 详情页「重新解析」：让后台丢弃旧结果重算 */
+    /** 遮罩层「重新解析」：让后台丢弃旧结果重算 */
     fun resolveNow(id: String) {
         resolvingFlow.value = true
         viewModelScope.launch {
@@ -304,7 +363,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.favorites.markDeleted(ids)
             graph.sync.queueDelete(ids)
             checkedFlow.value = emptySet()
-            detailOpenFlow.value = false
+            focusFlow.value = null
             messageFlow.value = "已删除 ${ids.size} 条，正在排队上传"
         }
     }
@@ -313,7 +372,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch {
             graph.favorites.markDeleted(listOf(id))
             graph.sync.queueDelete(listOf(id))
-            detailOpenFlow.value = false
+            focusFlow.value = null
             messageFlow.value = "已删除，正在排队上传"
         }
     }
@@ -330,6 +389,31 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch {
             graph.favorites.updateTags(id, tagIds)
             graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it) }
+        }
+    }
+
+    /**
+     * 遮罩层里点标签即时生效：本地一次写库 + 一次排队，比「改完再按保存」少一步，
+     * 也让快速新建的标签立刻出现在条目上，不需要 UI 自己维护一份勾选草稿。
+     */
+    fun toggleTagOnItem(id: String, tagId: Long) {
+        viewModelScope.launch {
+            val favorite = graph.favorites.byId(id) ?: return@launch
+            val ids = favorite.tags.map { it.id }.toMutableList()
+            if (!ids.remove(tagId)) ids.add(tagId)
+            graph.favorites.updateTags(id, ids)
+            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it) }
+        }
+    }
+
+    /** 「快速新建标签」：入库 + 直接挂到当前这条，省掉「先去标签库建、回来再勾选」 */
+    fun createTagOnItem(id: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            runCatching { graph.tags.getOrCreate(trimmed) }
+                .onSuccess { tag -> toggleTagOnItem(id, tag.id) }
+                .onFailure { messageFlow.value = "新建标签失败：${it.message}" }
         }
     }
 

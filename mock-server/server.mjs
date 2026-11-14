@@ -114,7 +114,7 @@ function parseJson(text) {
   }
 }
 
-// ---------- 假视频解析器：同一个 url 永远得到同一份结果 ----------
+// ---------- 假内容解析器：同一个 url 永远得到同一份结果 ----------
 
 const SITE_NAMES = [
   ['bilibili', '哔哩哔哩'],
@@ -132,6 +132,36 @@ const PLAY_URLS = [
   'https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
 ];
 const QUALITIES = ['720P', '1080P', '480P'];
+// 说明文案的后半句：让 mock 像真的读懂了内容，而不是只拼了个素材数量。
+// 分池是因为「纯图集」不能配「先看视频」这种话 —— App 现在把这句话当内容主体展示，
+// 文案和构成对不上，验证展示效果时就会被误导。
+const SUMMARY_HINTS = {
+  mixed: [
+    '先看视频再对照第 2 张图的参数逐项改',
+    '视频是过程，图片是整理前后的定妆照',
+    '图 1 是总览，其余按视频里的顺序展开',
+    '视频讲完会给一张清单图，可以照着核对',
+  ],
+  images: [
+    '地图在第一张，其余都是沿途实拍',
+    '每张图片对应一种配方，比例标在右侧',
+    '最后一张是清单，可以照着核对',
+    '第 2 到第 4 张是同一处景的三种参数',
+    '按由近到远排，最后一张是全景',
+    '只看第 1 张和第 5 张就够，其余是细节',
+  ],
+  videos: [
+    '顺序由浅入深，最后一段是错题示范',
+    '没有解说，建议佩戴耳机看',
+    '第一段是全程录屏，后面几段是分步讲解',
+    '每段各对应一个场景，可以直接跳到需要的那段',
+  ],
+  single: [
+    '全程录屏，可以直接从第 1 分钟开始看',
+    '有解说，前 30 秒是成品展示',
+    '结尾有小结，赶时间可以只看最后两段',
+  ],
+};
 
 function pendingVideo(favoriteId) {
   // 没有解析结果就老实回 pending，不能凭空造 ready 数据
@@ -148,7 +178,82 @@ function pendingVideo(favoriteId) {
     status: 'pending',
     error: '',
     is_mock_source: true,
+    summary: '',
+    media: [],
   };
+}
+
+/**
+ * 一条链接解析回来的可能是「图＋视频」「纯图集」「多段视频」，也可能就是最常见的单个视频。
+ * 构成只由 url 哈希决定，同一链接反复解析结果不变，方便反复验证 App 的多素材展示。
+ */
+function buildMedia(hash, slot, site) {
+  const bucket = slot % 10;
+  let images;
+  let videos;
+  if (bucket <= 3) {
+    images = 1 + (slot % 4);
+    videos = 1 + (slot % 2);
+  } else if (bucket <= 6) {
+    images = 1 + (slot % 12);
+    videos = 0;
+  } else if (bucket <= 8) {
+    images = 0;
+    videos = 2 + (slot % 3);
+  } else {
+    images = 0;
+    videos = 1;
+  }
+
+  const seed = hash.slice(0, 8);
+  const media = [];
+  // 视频排在前面：卡片首图取 media[0]，能播的先给封面
+  for (let i = 0; i < videos; i += 1) {
+    media.push({
+      index: media.length,
+      kind: 'video',
+      title: `${site}视频 ${i + 1}`,
+      cover_url: `https://picsum.photos/seed/${seed}-v${i}/640/360`,
+      url: PLAY_URLS[(slot + i) % PLAY_URLS.length],
+      duration_ms: 60_000 + (slot * (i + 3)) % 1_740_000,
+      quality: QUALITIES[(slot + i) % QUALITIES.length],
+    });
+  }
+  for (let i = 0; i < images; i += 1) {
+    media.push({
+      index: media.length,
+      kind: 'image',
+      title: `图 ${i + 1}`,
+      // 图片段没有单独的封面：它自己就是要看的那张图
+      cover_url: '',
+      url: `https://picsum.photos/seed/${seed}-i${i}/1280/720`,
+      duration_ms: 0,
+      quality: '',
+    });
+  }
+  return media;
+}
+
+function buildSummary(media, author, hash) {
+  const videos = media.filter((item) => item.kind === 'video');
+  const images = media.filter((item) => item.kind === 'image');
+  const minutes = Math.max(1, Math.round(videos.reduce((sum, item) => sum + item.duration_ms, 0) / 60_000));
+
+  let shape;
+  if (images.length && videos.length) shape = 'mixed';
+  else if (videos.length > 1) shape = 'videos';
+  else if (videos.length === 1) shape = 'single';
+  else shape = 'images';
+
+  const lead = {
+    mixed: `共 ${images.length} 张图 + ${videos.length} 段视频（合计约 ${minutes} 分钟）`,
+    videos: `共 ${videos.length} 段视频，合计约 ${minutes} 分钟`,
+    single: `1 段视频，约 ${minutes} 分钟`,
+    images: images.length === 1 ? '1 张图' : `共 ${images.length} 张图`,
+  }[shape];
+  const pool = SUMMARY_HINTS[shape];
+  const hint = pool[parseInt(hash.slice(20, 24), 16) % pool.length];
+  return `${lead}：${hint}${author ? `（${author}）` : ''}。`;
 }
 
 function resolveVideo(favoriteId, url) {
@@ -176,21 +281,27 @@ function resolveVideo(favoriteId, url) {
 
   const site = SITE_NAMES.find(([key]) => host.includes(key))?.[1] ?? host;
   const slot = parseInt(hash.slice(6, 10), 16);
-  const qualitySlot = parseInt(hash.slice(10, 14), 16);
+  const author = AUTHORS[slot % AUTHORS.length];
+  const media = buildMedia(hash, slot, site);
+  const firstVideo = media.find((item) => item.kind === 'video');
+  const first = media[0];
 
   return {
     favorite_id: favoriteId,
-    title: `${site}视频 · ${hash.slice(0, 6)}`,
-    cover_url: `https://picsum.photos/seed/${hash.slice(0, 8)}/640/360`,
-    author: AUTHORS[slot % AUTHORS.length],
+    title: `${site}${firstVideo ? '视频' : '图集'} · ${hash.slice(0, 6)}`,
+    // 顶层这几个字段是 media[0] 的镜像：老版本 App 只认它们，不能因为加了 media 就断供
+    cover_url: first ? first.cover_url || first.url : '',
+    author,
     site,
-    duration_ms: 60_000 + (slot % (1_800_000 - 60_000 + 1)),
-    play_url: PLAY_URLS[slot % PLAY_URLS.length],
-    quality: QUALITIES[qualitySlot % QUALITIES.length],
+    duration_ms: media.reduce((sum, item) => sum + item.duration_ms, 0),
+    play_url: firstVideo ? firstVideo.url : '',
+    quality: firstVideo ? firstVideo.quality : '',
     resolved_at: resolvedAt,
     status: 'ready',
     error: '',
     is_mock_source: true,
+    summary: buildSummary(media, author, hash),
+    media,
   };
 }
 

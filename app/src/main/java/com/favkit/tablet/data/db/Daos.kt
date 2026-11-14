@@ -38,12 +38,20 @@ interface FavoritesDao {
     @Query("DELETE FROM favorites WHERE id IN (:ids)")
     suspend fun deleteForever(ids: List<String>)
 
-    /** 播放进度属于本地数据，后台只用来校准，不覆盖本地已看得更靠前的位置 */
-    @Query("UPDATE favorites SET lastPositionMs = :positionMs WHERE id = :id")
-    suspend fun saveProgress(id: String, positionMs: Long)
+    /**
+     * 播放进度属于本地数据，后台只用来校准，不覆盖本地已看得更靠前的位置。
+     * [progress] 是整条「段号:毫秒」串：一列文本换一次 UPDATE，比建一张进度表再逐段更新便宜，
+     * 也不会把进度和每次都会被整体覆盖写回的 video_info 混在一起。
+     */
+    @Query("UPDATE favorites SET lastPositionMs = :positionMs, lastSegmentIndex = :segmentIndex, segmentProgress = :progress WHERE id = :id")
+    suspend fun saveProgress(id: String, positionMs: Long, segmentIndex: Int, progress: String?)
 
     @Query("UPDATE favorites SET locallyCached = :cached WHERE id = :id")
     suspend fun setLocallyCached(id: String, cached: Boolean)
+
+    /** 上次停在第几段。图集段没有播放位置，只有段号，所以单独一条 UPDATE，不借用 saveProgress */
+    @Query("UPDATE favorites SET lastSegmentIndex = :segmentIndex WHERE id = :id")
+    suspend fun setLastSegment(id: String, segmentIndex: Int)
 
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL AND badge <> 'SYNCED'")
     fun observeUnsyncedCount(): Flow<Int>

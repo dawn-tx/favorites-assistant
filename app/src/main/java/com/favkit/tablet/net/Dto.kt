@@ -4,11 +4,12 @@ import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.OpType
 import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.data.VideoInfo
+import com.favkit.tablet.data.MediaCodec
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
- * 后台协议：全部明文 JSON。收藏只上传用户产生的数据，视频信息由后台解析后回传。
+ * 后台协议：全部明文 JSON。收藏只上传用户产生的数据，内容信息由后台解析后回传。
  * 字段命名与 mock-server/server.mjs 一一对应，改任何一边都要同步改另一边。
  */
 @Serializable
@@ -39,6 +40,22 @@ data class SyncRequest(
     val ops: List<OpDto>,
 )
 
+/**
+ * 一条链接解析出来的单个素材。[url] 对视频段是可播地址，对图片段就是图片本身，
+ * 所以 App 不再区分「播放地址字段」和「图片地址字段」。
+ */
+@Serializable
+data class MediaDto(
+    val index: Int = 0,
+    /** image | video */
+    val kind: String = "video",
+    val title: String = "",
+    @SerialName("cover_url") val coverUrl: String = "",
+    val url: String = "",
+    @SerialName("duration_ms") val durationMs: Long = 0L,
+    val quality: String = "",
+)
+
 @Serializable
 data class VideoDto(
     @SerialName("favorite_id") val favoriteId: String = "",
@@ -54,6 +71,10 @@ data class VideoDto(
     val status: String = "pending",
     val error: String = "",
     @SerialName("is_mock_source") val isMockSource: Boolean = false,
+    /** 后台对这个条目解析结果的一句话说明 */
+    val summary: String = "",
+    /** 解析出来的素材清单；老后台不给时 App 用上面的单视频字段兜底 */
+    val media: List<MediaDto> = emptyList(),
 )
 
 @Serializable
@@ -144,4 +165,6 @@ fun VideoDto.toDomain(favoriteId: String): VideoInfo = VideoInfo(
     },
     error = error,
     isMockSource = isMockSource,
+    summary = summary,
+    media = MediaCodec.segments(media),
 )

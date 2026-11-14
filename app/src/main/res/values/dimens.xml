@@ -11,8 +11,6 @@
     <dimen name="gap_sm">12dp</dimen>
     <dimen name="gap_md">18dp</dimen>
     <dimen name="gap_lg">24dp</dimen>
-    <dimen name="column_nav">170dp</dimen>
-    <dimen name="column_detail">340dp</dimen>
     <dimen name="panel_width">460dp</dimen>
     <dimen name="ball_size">56dp</dimen>
 </resources>

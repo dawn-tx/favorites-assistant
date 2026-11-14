@@ -76,8 +76,6 @@ object TabletMetrics {
                 gapSm = dimenDp(context, R.dimen.gap_sm),
                 gapMd = dimenDp(context, R.dimen.gap_md),
                 gapLg = dimenDp(context, R.dimen.gap_lg),
-                navColumn = dimenDp(context, R.dimen.column_nav),
-                detailColumn = dimenDp(context, R.dimen.column_detail),
                 floatingPanelWidth = dimenDp(context, R.dimen.panel_width),
             )
         }
@@ -91,7 +89,5 @@ data class TabletScale(
     val gapSm: Dp,
     val gapMd: Dp,
     val gapLg: Dp,
-    val navColumn: Dp,
-    val detailColumn: Dp,
     val floatingPanelWidth: Dp,
 )

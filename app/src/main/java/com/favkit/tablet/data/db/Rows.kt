@@ -28,9 +28,18 @@ data class FavoriteRow(
     val updatedAt: Long = System.currentTimeMillis(),
     /** 软删除时间：非空表示已标记删除，等待后台补传后物理清除 */
     val deletedAt: Long? = null,
+    /** 「段号:毫秒」逗号分隔的段级进度；见 SegmentProgressCodec。纯本地，不上传 */
+    val segmentProgress: String? = null,
+    /** 上次停在第几段 */
+    val lastSegmentIndex: Int? = null,
 )
 
-/** 后台解析出的视频元数据缓存；离线时靠它继续展示列表 */
+/**
+ * 后台解析内容的元数据缓存；离线时靠它继续展示列表与说明文案。
+ *
+ * [summary] 与 [mediaJson] 声明成可空而不是带默认值的非空，迁移就能写成不带 DEFAULT 的
+ * `ALTER TABLE ADD COLUMN` —— Room 生成的建表语句里也没有 DEFAULT，两边逐字对得上。
+ */
 @Entity(
     tableName = "video_info",
     foreignKeys = [
@@ -55,6 +64,10 @@ data class VideoInfoRow(
     val status: String = com.favkit.tablet.data.ResolveStatus.PENDING.name,
     val error: String = "",
     val isMockSource: Boolean = false,
+    /** 后台给的说明文案，卡片与遮罩层的内容主体 */
+    val summary: String? = null,
+    /** 素材清单（List<MediaDto> 序列化后的 JSON）；为空表示后台只给了单个视频 */
+    val mediaJson: String? = null,
 )
 
 @Entity(tableName = "tags", indices = [Index(value = ["name"], unique = true)])

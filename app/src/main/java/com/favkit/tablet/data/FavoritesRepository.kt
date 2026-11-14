@@ -6,15 +6,13 @@ import com.favkit.tablet.data.db.FavoriteTagRow
 import com.favkit.tablet.data.db.VideoInfoRow
 import com.favkit.tablet.net.FavoriteDto
 import com.favkit.tablet.net.VideoDto
-import com.favkit.tablet.net.toDomain
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import java.util.UUID
 
 /**
- * 收藏 = 用户产生的数据；视频信息 = 后台解析结果。两者分开存，列表展示以后台数据为准。
+ * 收藏 = 用户产生的数据；内容信息 = 后台解析结果。两者分开存，列表展示以后台数据为准。
  */
 class FavoritesRepository(
     db: AppDatabase,
@@ -73,7 +71,7 @@ class FavoritesRepository(
 
     /**
      * 悬浮面板「保存同步」落库：链接 + 备注 + 标签 + 来源 App + 收藏时间戳。
-     * 此时还没有任何视频信息，标题由后台解析后回填。
+     * 此时还没有任何内容信息，标题与素材清单由后台解析后回填。
      */
     suspend fun create(
         url: String,
@@ -114,11 +112,22 @@ class FavoritesRepository(
         return ids
     }
 
-    suspend fun saveProgress(id: String, positionMs: Long) = favoritesDao.saveProgress(id, positionMs)
+    /**
+     * 记下「第 [segmentIndex] 段看到哪」。段号变了，旧段的位置要留在 map 里，
+     * 这样回到图集里的第 3 张、合集里的第 2 段都还能续上。
+     */
+    suspend fun saveProgress(id: String, segmentIndex: Int, positionMs: Long) {
+        val row = favoritesDao.byId(id) ?: return
+        val merged = LinkedHashMap(SegmentProgressCodec.decode(row.segmentProgress))
+        merged[segmentIndex] = positionMs.coerceAtLeast(0L)
+        favoritesDao.saveProgress(id, positionMs, segmentIndex, SegmentProgressCodec.encode(merged))
+    }
+
+    suspend fun setLastSegment(id: String, segmentIndex: Int) = favoritesDao.setLastSegment(id, segmentIndex)
 
     suspend fun setLocallyCached(id: String, cached: Boolean) = favoritesDao.setLocallyCached(id, cached)
 
-    /** 后台解析回来的视频信息，原样缓存；本地不派生任何标题 */
+    /** 后台解析回来的内容信息，原样缓存；本地不派生任何标题 */
     suspend fun saveVideos(dtos: List<VideoDto>) {
         val rows = dtos.filter { it.favoriteId.isNotBlank() }.map { it.toRow() }
         if (rows.isNotEmpty()) videosDao.upsertAll(rows)
@@ -161,6 +170,8 @@ class FavoritesRepository(
         status = status.uppercase(),
         error = error,
         isMockSource = isMockSource,
+        summary = summary.ifBlank { null },
+        mediaJson = MediaCodec.encode(media),
     )
 
     private fun VideoInfoRow.toDomain() = VideoInfo(
@@ -176,6 +187,8 @@ class FavoritesRepository(
         status = runCatching { ResolveStatus.valueOf(status) }.getOrDefault(ResolveStatus.PENDING),
         error = error,
         isMockSource = isMockSource,
+        summary = summary.orEmpty(),
+        media = MediaCodec.decode(mediaJson),
     )
 
     private fun FavoriteRow.toDomain(tags: List<Tag>, video: VideoInfo?) = Favorite(
@@ -189,5 +202,7 @@ class FavoritesRepository(
         locallyCached = locallyCached,
         tags = tags,
         video = video,
+        segmentProgress = SegmentProgressCodec.decode(segmentProgress),
+        lastSegmentIndex = lastSegmentIndex ?: 0,
     )
 }

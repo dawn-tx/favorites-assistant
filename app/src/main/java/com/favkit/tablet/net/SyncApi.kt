@@ -96,7 +96,7 @@ class SyncApi(
     /** 拉取已解析的视频信息：后台解析是异步的，App 靠这个把 PENDING 变 READY */
     suspend fun fetchVideos(ids: List<String>): VideosOutcome = videosCall(ids, "/videos?ids=" + ids.joinToString(","))
 
-    /** 详情页「重新解析」：让后台重算这几条链接的视频信息 */
+    /** 遮罩层「重新解析」：让后台重算这几条链接的视频信息 */
     suspend fun resolveVideos(ids: List<String>): VideosOutcome {
         val body = json.encodeToString(VideosRequest.serializer(), VideosRequest(ids = ids))
         return videosCall(ids, "/videos/resolve", body)
