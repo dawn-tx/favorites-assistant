@@ -8,7 +8,8 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 4
-code: 1a185b7
-note: 上一轮 run #14 在 compileDebugKotlin 就红了（FocusOverlay 缺 Modifier.height 导包、
-      MainScreen 把 FocusUiState.itemId 写成 item.id），1a185b7 修掉这两处后重新出包。
+build: 5
+code: 2dc23b2
+note: 2dc23b2 那一次推送没 bump，门禁把构建整段跳过了，所以这批改动（收藏链接原样去重、
+      图集段全屏、悬浮球同步角标与状态口径统一）至今没进过编译器。这次专门 bump 一次，
+      把它当编译校验跑：红了就修，绿了才算这批真正落地。
