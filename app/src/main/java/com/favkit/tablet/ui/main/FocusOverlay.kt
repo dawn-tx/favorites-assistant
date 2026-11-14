@@ -409,7 +409,8 @@ private fun ImageStage(
                 }
                 .pointerInput(segment.index) { imageStageGestures(stage) }
                 .pointerInput(segment.index) {
-                    detectTapGestures(onDoubleTap = stage::reset)
+                    // onDoubleTap 的签名是 (Offset) -> Unit，方法引用 stage::reset 是 () -> Unit，对不上
+                    detectTapGestures(onDoubleTap = { stage.reset() })
                 },
         )
         if (stage.zoom <= 1f) {

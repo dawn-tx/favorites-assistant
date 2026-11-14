@@ -374,6 +374,7 @@ private fun EmptyWall(
             }
         } else {
             Onboarding(
+                state = state,
                 viewModel = viewModel,
                 scale = scale,
             )
@@ -382,7 +383,7 @@ private fun EmptyWall(
 }
 
 @Composable
-private fun Onboarding(viewModel: MainViewModel, scale: TabletScale) {
+private fun Onboarding(state: MainUiState, viewModel: MainViewModel, scale: TabletScale) {
     val context = LocalContext.current
     val clipboard = remember(context) { ClipboardBridge(context) }
     var urlDraft by rememberSaveable { mutableStateOf("") }
