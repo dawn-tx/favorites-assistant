@@ -31,9 +31,10 @@ import com.favkit.tablet.util.ClipboardBridge
 import com.favkit.tablet.util.VideoLinkDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -46,7 +47,8 @@ import kotlinx.coroutines.launch
  *   下层 App，因此收藏全程不离开当前界面；`FLAG_WATCH_OUTSIDE_TOUCH` 用于点外部即收起。
  *
  * 耗电：无常驻定时器、无轮询；剪贴板只在面板打开那一刻按用户偏好读一次；补传由 WorkManager
- * 的网络约束与回调触发。
+ * 的网络约束与回调触发。球上的同步角标读的是两条 Room Flow 加一个联网回调，都只在真实写入或
+ * 网络跳变上发射；设置里关掉角标就把这三条订阅一起取消。
  */
 class FloatingAssistantService : Service() {
 
@@ -55,6 +57,8 @@ class FloatingAssistantService : Service() {
     private val graph: AppGraph? get() = (application as? App)?.graph
 
     private var halfHidden by mutableStateOf(false)
+    private var badge by mutableStateOf(BallBadge.None)
+    private var badgeJob: Job? = null
 
     private var ballView: View? = null
     private var ballHost: OverlayHost? = null
@@ -87,7 +91,10 @@ class FloatingAssistantService : Service() {
         )
         // 只做一次 Flow 订阅，设置变更才发射，不轮询
         scope.launch {
-            graph?.settings?.snapshot?.map { it.pasteSuggestion }?.collect { autoReadClipboard = it }
+            graph?.settings?.snapshot?.collect { values ->
+                autoReadClipboard = values.pasteSuggestion
+                applyBadgePreference(values.ballStatusBadge)
+            }
         }
     }
 
@@ -128,6 +135,31 @@ class FloatingAssistantService : Service() {
         ServiceCompat.startForeground(this, Notifications.NOTIFICATION_ASSISTANT, notification, type)
     }
 
+    /**
+     * 角标订阅跟着偏好起停：开着才 combine，关掉就取消任务并把数字清掉。
+     *
+     * 三条 Flow 都是事件驱动的（Room 写触发、联网回调），没有定时器也没有轮询。
+     * 代价是订阅会把数据库拉起来 —— 用户不想在球上看队列时，这份开销就不用付。
+     */
+    private fun applyBadgePreference(enabled: Boolean) {
+        val appGraph = graph
+        if (!enabled || appGraph == null) {
+            badgeJob?.cancel()
+            badgeJob = null
+            badge = BallBadge.None
+            return
+        }
+        if (badgeJob != null) return
+        badgeJob = scope.launch {
+            combine(
+                appGraph.sync.queuedCount,
+                appGraph.sync.failedCount,
+                appGraph.connectivity.onlineState(),
+            ) { queued, failed, online -> BallBadge.of(queued, failed, online) }
+                .collect { badge = it }
+        }
+    }
+
     // region 悬浮球
     private fun addBall() {
         if (ballView != null) return
@@ -141,6 +173,7 @@ class FloatingAssistantService : Service() {
         val view = host.createView {
             FloatingBall(
                 halfHidden = halfHidden,
+                badge = badge,
                 onMove = { dx, dy -> moveBall(dx, dy) },
                 onDragEnd = { snapToEdge() },
                 onClick = { if (halfHidden) expandBall() else openPanel(null) },
@@ -339,6 +372,12 @@ class FloatingAssistantService : Service() {
                     shortToast(outcome.reason)
                     FloatingDraftStore.clearAfterSave()
                     closePanel()
+                }
+
+                is SaveOutcome.Duplicate -> {
+                    // 面板不关、草稿不清：用户可能只是顺手重发了同一条，输入的东西不该消失
+                    shortToast(outcome.reason)
+                    FloatingDraftStore.update { copy(status = PanelStatus.NOTICE, message = outcome.reason) }
                 }
 
                 is SaveOutcome.Rejected -> {

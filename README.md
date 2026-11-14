@@ -113,11 +113,13 @@ docs/                          使用说明、架构与性能验证、同步后�
 | 常驻 ≤80MB / 冷启动 ≤2s | `AppGraph` 全 lazy、单一 `ExoPlayer` 实例复用、无第三方 DI/无启动器插件；测量步骤见 `docs/架构与性能验证.md` |
 | 后台静默同步不吃电量 | 只用 `ConnectivityManager` 回调触发，零轮询、零定时器 |
 | 悬浮球拖拽 + 贴边半隐 | `TYPE_APPLICATION_OVERLAY` 窗口 + `ValueAnimator` 吸附，位置持久化 |
+| 同步进度在悬浮球上可见 | `BallBadge`：`pending_ops` 两条 COUNT（总数 / `attempts>=3`）+ 联网回调，写触发无轮询；红=待处理失败，灰=离线攒着，黄=排队中，贴边半隐时换成整球底色 |
 | 复制即弹轻提示 | Android 10 起非焦点 App 禁止后台读剪贴板 → 采用悬浮球手动粘贴 + 系统分享接收（面板内已说明，见 `docs/使用说明.md`） |
 | 面板四段结构（只读链接 / 手写备注 / 横滚标签 + 内联新建标签 / 保存同步·关闭） | `FloatingPanelScreen` |
 | 手写笔直接书写 | `StylusNoteField`：AndroidView 承载真实 `EditText`，复用 Android 14+ 对可编辑文本框默认开启的手写笔直写；更早系统用手写输入法，无需额外权限 |
 | 上报 url+备注+标签+来源+时间戳 | `SyncApi` 明文 JSON `POST /sync`；成功只认 `applied + unknown_ops == 送出条数`，对不上就重新排队，绝不静默丢数据 |
 | 一条收藏链接 ≠ 一个视频 | 收藏只存用户数据；后台解析回传 `summary`（一句话说明这链接里有什么）+ `media[]` 素材清单（图 + 多段视频），经 `video_info` 表缓存（`mediaJson` 一列存清单，不额外建表）。清单为空时退回顶层字段当单个视频，老后台不用改 |
+| 同一条链接重复分享 | `FloatingSaveUseCase` 保存前先按链接原样查库（`FavoritesRepository.byUrl`，软删除过的不算，且排在建标签之前，免得留下孤儿标签）；命中返回 `SaveOutcome.Duplicate` → 不入库、不排队，面板用 `PanelStatus.NOTICE` 中性色提示已有收藏，草稿不动。刻意不做参数归一化：B 站 `?p=` 分 P 是不同内容 |
 | 新收藏先进本地队列，按节奏逐条上传 | `SyncWorker` 每次只取 1 条，等待 `响应 next_wait_ms ?? 设置里的上传间隔（默认 3000ms）` 再传下一条 |
 | 2 秒轻提示 + 自动收起 + 回到原 App | Toast `LENGTH_SHORT`，面板窗口关闭，不启动任何 Activity |
 | 断网静默重试 3 次后进队列自动补传 | `SyncWorker` + `WorkManager` 网络约束与线性退避 + `pending_ops` 队列表 |

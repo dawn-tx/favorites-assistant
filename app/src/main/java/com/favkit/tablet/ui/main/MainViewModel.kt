@@ -53,7 +53,11 @@ data class MainUiState(
     val fullscreen: Boolean = false,
     val online: Boolean = true,
     val queued: Int = 0,
+    /** 队列里重试耗尽/被后台拒绝、需要用户动手的那部分 */
+    val failed: Int = 0,
     val unsynced: Int = 0,
+    /** 还没解析出素材的条数，由库里数出来：以前从可见列表里数，筛一次就变小一次 */
+    val unresolvedCount: Int = 0,
     val cacheBytes: Long = 0L,
     val prefetch: Map<String, Long> = emptyMap(),
     /** 正在向后台取解析结果 */
@@ -65,7 +69,8 @@ data class MainUiState(
 ) {
     val selectionActive: Boolean get() = checked.isNotEmpty()
     val allChecked: Boolean get() = items.isNotEmpty() && checked.size == items.size
-    val unresolvedCount: Int get() = items.count { it.video?.status != ResolveStatus.READY }
+    /** [queued] 是队列总数，含 [failed]；胶囊与角标都显示「还会自动再传的」，避免红黄两枚数同一批 */
+    val pendingUploads: Int get() = (queued - failed).coerceAtLeast(0)
 }
 
 class MainViewModel private constructor(private val graph: AppGraph) : ViewModel() {
@@ -122,6 +127,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { graph.player.state.collect { v -> _state.update { it.copy(player = v) } } }
         viewModelScope.launch { graph.settings.snapshot.collect { v -> _state.update { it.copy(settings = v) } } }
         viewModelScope.launch { graph.sync.queuedCount.collect { v -> _state.update { it.copy(queued = v) } } }
+        viewModelScope.launch { graph.sync.failedCount.collect { v -> _state.update { it.copy(failed = v) } } }
+        viewModelScope.launch {
+            graph.favorites.unresolvedCount.collect { v -> _state.update { it.copy(unresolvedCount = v) } }
+        }
         viewModelScope.launch {
             graph.favorites.unsyncedCount.collect { v -> _state.update { it.copy(unsynced = v) } }
         }
@@ -470,6 +479,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun setSyncToken(value: String) = viewModelScope.launch { graph.settings.setSyncToken(value) }
     fun setAssistantEnabled(value: Boolean) = viewModelScope.launch { graph.settings.setAssistantEnabled(value) }
     fun setPasteSuggestion(value: Boolean) = viewModelScope.launch { graph.settings.setPasteSuggestion(value) }
+    fun setBallStatusBadge(value: Boolean) = viewModelScope.launch { graph.settings.setBallStatusBadge(value) }
     fun setUploadIntervalMs(value: Long) = viewModelScope.launch { graph.settings.setUploadIntervalMs(value) }
     fun setCacheLimitMb(value: Long) = viewModelScope.launch {
         graph.settings.setCacheLimitMb(value)
@@ -503,6 +513,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
                     messageFlow.value = outcome.reason
                     refreshVideos()
                 }
+
+                is SaveOutcome.Duplicate ->
+                    FloatingDraftStore.update { copy(status = PanelStatus.NOTICE, message = outcome.reason) }
 
                 is SaveOutcome.Rejected ->
                     FloatingDraftStore.update { copy(status = PanelStatus.FAILED, message = outcome.reason) }

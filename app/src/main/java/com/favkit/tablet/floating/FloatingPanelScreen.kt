@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.favkit.tablet.core.TabletMetrics
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.data.Tag
+import com.favkit.tablet.di.AppGraph
 import com.favkit.tablet.di.rememberAppGraph
 import com.favkit.tablet.util.ClipboardBridge
 import com.favkit.tablet.util.VideoLinkDetector
@@ -76,6 +77,8 @@ fun FloatingPanelScreen(
         shadowElevation = 16.dp,
     ) {
         Column(modifier = Modifier.padding(horizontal = scale.gapMd, vertical = scale.gapSm)) {
+            SyncStatusLine(graph = graph, scale = scale)
+
             LinkPreviewSection(
                 draft = draft,
                 scale = scale,
@@ -154,12 +157,19 @@ fun FloatingPanelScreen(
                 },
             )
 
-            if (draft.status == PanelStatus.FAILED && draft.message.isNotBlank()) {
+            if ((draft.status == PanelStatus.FAILED || draft.status == PanelStatus.NOTICE) &&
+                draft.message.isNotBlank()
+            ) {
                 Spacer(Modifier.height(scale.gapXs))
                 Text(
                     text = draft.message,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
+                    // 重复收藏只是「没再做任何事」，标红会让人以为保存失败了
+                    color = if (draft.status == PanelStatus.FAILED) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
             }
 
@@ -330,4 +340,48 @@ private fun TagStrip(
             }
         }
     }
+}
+
+/**
+ * 面板顶部一行同步状态。球上的角标只能说「有事」，这里说清是什么事、能不能立刻动手。
+ *
+ * 这四个数与主界面胶囊同源同口径：都从 pending_ops 和联网回调来，待上传不含失败那批。
+ * 订阅只活在面板打开期间，窗口一关就自动取消，所以给常驻服务添不了成本。
+ */
+@Composable
+private fun SyncStatusLine(graph: AppGraph, scale: TabletScale) {
+    val queued by remember(graph) { graph.sync.queuedCount }.collectAsState(initial = 0)
+    val failed by remember(graph) { graph.sync.failedCount }.collectAsState(initial = 0)
+    val unresolved by remember(graph) { graph.favorites.unresolvedCount }.collectAsState(initial = 0)
+    val online by remember(graph) { graph.connectivity.onlineState() }.collectAsState(initial = true)
+    val parts = listOfNotNull(
+        "离线".takeIf { !online },
+        "待上传 ${(queued - failed).coerceAtLeast(0)}".takeIf { queued - failed > 0 },
+        "失败 $failed".takeIf { failed > 0 },
+        "待解析 $unresolved".takeIf { unresolved > 0 },
+    )
+    if (parts.isEmpty()) return
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(scale.gapSm),
+    ) {
+        Text(
+            text = parts.joinToString(" · "),
+            style = MaterialTheme.typography.labelMedium,
+            color = if (failed > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (failed > 0) {
+            TextButton(
+                onClick = { graph.sync.retryFailed() },
+                modifier = Modifier.heightIn(min = scale.touchMin),
+            ) {
+                Text("立即重试")
+            }
+        }
+    }
+    Spacer(Modifier.height(scale.gapXs))
 }

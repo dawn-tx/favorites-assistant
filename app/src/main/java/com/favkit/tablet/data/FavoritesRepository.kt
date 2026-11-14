@@ -26,6 +26,9 @@ class FavoritesRepository(
 
     val unsyncedCount: Flow<Int> = favoritesDao.observeUnsyncedCount()
 
+    /** 还没解析出素材的条数，库里数；与主界面、筛选抽屉、悬浮面板共用同一个口径 */
+    val unresolvedCount: Flow<Int> = favoritesDao.observeUnresolvedCount()
+
     private val allFavorites: Flow<List<Favorite>> = combine(
         favoritesDao.observeRows(),
         videosDao.observeAll(),
@@ -48,6 +51,14 @@ class FavoritesRepository(
     fun observeAll(): Flow<List<Favorite>> = allFavorites
 
     suspend fun byId(id: String): Favorite? = favoritesDao.byId(id)?.let {
+        it.toDomain(tagsOf(it.id), videosDao.byFavorite(it.id)?.toDomain())
+    }
+
+    /**
+     * 按链接原样查已有收藏（不做参数归一化：同一视频带不同跟踪参数就算两条）。
+     * 软删除过的不算，否则删掉再收藏同一链接会被自己挡住。
+     */
+    suspend fun byUrl(url: String): Favorite? = favoritesDao.byUrl(url)?.let {
         it.toDomain(tagsOf(it.id), videosDao.byFavorite(it.id)?.toDomain())
     }
 

@@ -336,7 +336,13 @@ private fun FocusStage(
         ) { page ->
             val segment = segments[page]
             when {
-                segment.kind == MediaKind.IMAGE && segment.viewable -> ImagePage(segment)
+                segment.kind == MediaKind.IMAGE && segment.viewable -> ImageStage(
+                    segment = segment,
+                    fullscreen = false,
+                    label = "",
+                    scale = scale,
+                    onToggleFullscreen = { viewModel.setFullscreen(true) },
+                )
 
                 !segment.playable -> EmptySegmentPage(segment)
 
@@ -364,9 +370,20 @@ private fun FocusStage(
     }
 }
 
-/** 图集段：Fit 完整显示，双指缩放、双击复原 */
+/**
+ * 图集段：Fit 完整显示，双指缩放、双击复原。
+ *
+ * [fullscreen] 为真时图片铺满整屏（连遮罩的内边距也不留），右上角按钮换成退出全屏。
+ * 缩放与位移按 `segment.index` 记忆，翻到下一张不会把上一张的放大带过去。
+ */
 @Composable
-private fun ImagePage(segment: MediaSegment) {
+private fun ImageStage(
+    segment: MediaSegment,
+    fullscreen: Boolean,
+    label: String,
+    scale: TabletScale,
+    onToggleFullscreen: () -> Unit,
+) {
     var zoom by remember(segment.index) { mutableFloatStateOf(1f) }
     var shift by remember(segment.index) { mutableStateOf(Offset.Zero) }
     Box(
@@ -411,15 +428,109 @@ private fun ImagePage(segment: MediaSegment) {
                 },
         )
         if (zoom <= 1f) {
+            val hint = listOf(
+                label.takeIf { it.isNotBlank() },
+                "双指缩放 · 双击复原",
+            ).filterNotNull().joinToString(" · ")
             Text(
-                text = "双指缩放 · 双击复原",
+                text = hint,
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0x99FFFFFF),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
+                    .then(if (fullscreen) Modifier.systemBarsPadding() else Modifier)
                     .padding(bottom = 12.dp),
             )
         }
+        IconButton(
+            onClick = onToggleFullscreen,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .then(if (fullscreen) Modifier.systemBarsPadding() else Modifier)
+                .padding(6.dp)
+                .size(scale.touchMin),
+        ) {
+            Icon(
+                painter = painterResource(if (fullscreen) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen),
+                contentDescription = if (fullscreen) "退出全屏" else "全屏看这张图",
+                tint = Color.White,
+            )
+        }
+    }
+}
+
+/**
+ * 全屏层按当前段的素材决定怎么铺满：图集段放大整屏、可以在图片之间左右翻；
+ * 视频段（以及还没有解析结果的段）仍交给播放器那条路。
+ *
+ * 段号始终写在 [MainViewModel] 的 focus 里，所以退出全屏后遮罩层停在同一张图、同一段视频。
+ */
+@Composable
+internal fun FullscreenLayer(
+    viewModel: MainViewModel,
+    state: MainUiState,
+    graph: AppGraph,
+    favorite: Favorite?,
+    focus: FocusUiState?,
+    scale: TabletScale,
+) {
+    val segments = favorite?.segments.orEmpty()
+    val current = focus?.segmentIndex ?: -1
+    val image = segments.getOrNull(current)?.takeIf { it.viewable }
+    if (favorite != null && image != null) {
+        FullscreenImages(
+            segments = segments,
+            current = current,
+            scale = scale,
+            onExit = { viewModel.setFullscreen(false) },
+            onSegment = viewModel::showSegment,
+        )
+    } else {
+        PlayerStage(
+            player = state.player,
+            graph = graph,
+            fullscreen = true,
+            onTogglePlay = viewModel::togglePlay,
+            onSeek = viewModel::seekTo,
+            onSpeed = viewModel::setSpeed,
+            onToggleFullscreen = { viewModel.setFullscreen(false) },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/** 整屏看图：只在图集段之间翻页，翻到哪一张就回写哪一段的编号 */
+@Composable
+private fun FullscreenImages(
+    segments: List<MediaSegment>,
+    current: Int,
+    scale: TabletScale,
+    onExit: () -> Unit,
+    onSegment: (Int) -> Unit,
+) {
+    val images = remember(segments) { segments.filter { it.viewable } }
+    val pagerState = rememberPagerState(
+        initialPage = images.indexOfFirst { it.index == current }.coerceAtLeast(0),
+        pageCount = { images.size },
+    )
+    // 手势停下来才回写：拖过 5 张就写 5 次段号、5 次落盘，白做功
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.currentPage to pagerState.isScrollInProgress }
+            .collect { (page, scrolling) ->
+                if (!scrolling) images.getOrNull(page)?.let { onSegment(it.index) }
+            }
+    }
+    HorizontalPager(
+        state = pagerState,
+        modifier = Modifier.fillMaxSize(),
+    ) { page ->
+        ImageStage(
+            segment = images[page],
+            fullscreen = true,
+            label = "第 ${page + 1}/${images.size} 张",
+            scale = scale,
+            onToggleFullscreen = onExit,
+        )
     }
 }
 

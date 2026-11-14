@@ -55,6 +55,19 @@ interface FavoritesDao {
 
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL AND badge <> 'SYNCED'")
     fun observeUnsyncedCount(): Flow<Int>
+
+    /**
+     * 还没解析出素材的收藏条数。必须在库里数：悬浮面板和筛选抽屉都没有完整列表，
+     * 而从「已筛选的列表」里 count 出来的数会跟着搜索词变，同一个标签三处显示三个值。
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM favorites f
+        LEFT JOIN video_info v ON v.favoriteId = f.id
+        WHERE f.deletedAt IS NULL AND (v.favoriteId IS NULL OR v.status <> 'READY')
+        """
+    )
+    fun observeUnresolvedCount(): Flow<Int>
 }
 
 @Dao
@@ -160,6 +173,13 @@ interface PendingOpsDao {
 
     @Query("SELECT COUNT(*) FROM pending_ops")
     fun observeCount(): Flow<Int>
+
+    /**
+     * 重试耗尽或被后台明确拒绝、但仍留在队列里的条数 —— 只有这些需要用户动手。
+     * 3 = [com.favkit.tablet.sync.SyncManager.MAX_ATTEMPTS]，@Query 里只能写字面量，改动要同步看 SyncWorker。
+     */
+    @Query("SELECT COUNT(*) FROM pending_ops WHERE attempts >= 3")
+    fun observeFailedCount(): Flow<Int>
 
     @Query("SELECT * FROM pending_ops WHERE favoriteId = :favoriteId ORDER BY createdAt DESC LIMIT 1")
     suspend fun latestFor(favoriteId: String): PendingOpRow?

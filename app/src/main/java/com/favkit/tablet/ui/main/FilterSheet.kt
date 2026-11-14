@@ -85,7 +85,7 @@ fun FilterSheet(
                         verticalArrangement = Arrangement.spacedBy(scale.gapXs),
                     ) {
                         SectionTitle("同步")
-                        val hasStatus = !state.online || state.queued > 0 || state.unsynced > 0 ||
+                        val hasStatus = !state.online || state.pendingUploads > 0 || state.failed > 0 ||
                             state.unresolvedCount > 0
                         Row(
                             modifier = Modifier
@@ -95,8 +95,8 @@ fun FilterSheet(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (!state.online) StatusPill("离线", FavColors.muted)
-                            if (state.queued > 0) StatusPill("待上传 ${state.queued}", FavColors.warn)
-                            if (state.unsynced > 0) StatusPill("未同步 ${state.unsynced}", FavColors.fail)
+                            if (state.pendingUploads > 0) StatusPill("待上传 ${state.pendingUploads}", FavColors.warn)
+                            if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
                             if (state.unresolvedCount > 0) StatusPill("待解析 ${state.unresolvedCount}", FavColors.warn)
                         }
                         if (!hasStatus) {

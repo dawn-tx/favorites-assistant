@@ -155,15 +155,14 @@ fun MainScreen(
                 .padding(innerPadding),
         ) {
             if (state.fullscreen) {
-                PlayerStage(
-                    player = state.player,
+                // 全屏层按当前段的素材分派：图集段铺满整屏翻着看，视频段仍走播放器
+                FullscreenLayer(
+                    viewModel = viewModel,
+                    state = state,
                     graph = graph,
-                    fullscreen = true,
-                    onTogglePlay = viewModel::togglePlay,
-                    onSeek = viewModel::seekTo,
-                    onSpeed = viewModel::setSpeed,
-                    onToggleFullscreen = { viewModel.setFullscreen(false) },
-                    modifier = Modifier.fillMaxSize(),
+                    favorite = focusFavorite,
+                    focus = focus,
+                    scale = scale,
                 )
             } else {
                 VideoWall(
@@ -337,12 +336,12 @@ private fun FilterAction(state: MainUiState, scale: TabletScale, onClick: () -> 
     }
 }
 
-/** 状态胶囊：离线 / 队列 / 未同步 / 待解析。放不下由外层动作区一起横向滚 */
+/** 状态胶囊：离线 / 待上传 / 失败 / 待解析。待上传不含失败那批，放不下由外层动作区一起横向滚 */
 @Composable
 private fun StatusPillsRow(state: MainUiState, scale: TabletScale) {
     val hasAny = !state.online ||
-        state.queued > 0 ||
-        state.unsynced > 0 ||
+        state.pendingUploads > 0 ||
+        state.failed > 0 ||
         state.unresolvedCount > 0
     if (!hasAny) return
     Row(
@@ -350,8 +349,8 @@ private fun StatusPillsRow(state: MainUiState, scale: TabletScale) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (!state.online) StatusPill("离线", FavColors.muted)
-        if (state.queued > 0) StatusPill("待上传 ${state.queued}", FavColors.warn)
-        if (state.unsynced > 0) StatusPill("未同步 ${state.unsynced}", FavColors.fail)
+        if (state.pendingUploads > 0) StatusPill("待上传 ${state.pendingUploads}", FavColors.warn)
+        if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
         if (state.unresolvedCount > 0) StatusPill("待解析 ${state.unresolvedCount}", FavColors.warn)
     }
 }

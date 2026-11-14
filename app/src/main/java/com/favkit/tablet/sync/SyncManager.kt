@@ -41,6 +41,9 @@ class SyncManager(
 
     val queuedCount: Flow<Int> = pendingOps.observeCount()
 
+    /** 重试耗尽/被拒绝、需要用户动手的那部分；[queuedCount] 是包含它的总数 */
+    val failedCount: Flow<Int> = pendingOps.observeFailedCount()
+
     init {
         // 联网跳变即补传。仅注册回调、不轮询，无常驻定时器。
         val connectivity = Connectivity(appContext)

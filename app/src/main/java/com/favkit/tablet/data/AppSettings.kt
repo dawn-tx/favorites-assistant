@@ -20,6 +20,8 @@ data class SettingsSnapshot(
     val syncToken: String,
     val assistantEnabled: Boolean,
     val pasteSuggestion: Boolean,
+    /** 悬浮球上的同步状态角标要不要画 */
+    val ballStatusBadge: Boolean,
     val defaultPlaybackSpeed: Float,
     val cacheLimitMb: Long,
     /** 上一条传完后，后台没给等待时间时用的间隔 */
@@ -35,6 +37,7 @@ class AppSettings(context: Context) {
         val TOKEN = stringPreferencesKey("sync_token")
         val ASSISTANT = booleanPreferencesKey("assistant_enabled")
         val PASTE_SUGGEST = booleanPreferencesKey("paste_suggestion")
+        val BALL_BADGE = booleanPreferencesKey("ball_status_badge")
         val SPEED = floatPreferencesKey("default_speed")
         val CACHE_MB = longPreferencesKey("cache_limit_mb")
         val UPLOAD_INTERVAL = longPreferencesKey("upload_interval_ms")
@@ -47,6 +50,7 @@ class AppSettings(context: Context) {
             syncToken = p[Keys.TOKEN] ?: "",
             assistantEnabled = p[Keys.ASSISTANT] ?: true,
             pasteSuggestion = p[Keys.PASTE_SUGGEST] ?: true,
+            ballStatusBadge = p[Keys.BALL_BADGE] ?: true,
             defaultPlaybackSpeed = p[Keys.SPEED] ?: 1.0f,
             cacheLimitMb = p[Keys.CACHE_MB] ?: 512L,
             uploadIntervalMs = p[Keys.UPLOAD_INTERVAL] ?: DEFAULT_UPLOAD_INTERVAL_MS,
@@ -72,6 +76,7 @@ class AppSettings(context: Context) {
     suspend fun setSyncToken(value: String) = update { this[Keys.TOKEN] = value.trim() }
     suspend fun setAssistantEnabled(value: Boolean) = update { this[Keys.ASSISTANT] = value }
     suspend fun setPasteSuggestion(value: Boolean) = update { this[Keys.PASTE_SUGGEST] = value }
+    suspend fun setBallStatusBadge(value: Boolean) = update { this[Keys.BALL_BADGE] = value }
     suspend fun setDefaultPlaybackSpeed(value: Float) = update { this[Keys.SPEED] = value }
     suspend fun setCacheLimitMb(value: Long) = update { this[Keys.CACHE_MB] = value }
 

@@ -240,8 +240,8 @@ fun SettingsSheet(
                             horizontalArrangement = Arrangement.spacedBy(scale.gapSm),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            StatusPill("待上传 ${state.queued}", FavColors.warn)
-                            StatusPill("未同步 ${state.unsynced}", FavColors.fail)
+                            StatusPill("待上传 ${state.pendingUploads}", FavColors.warn)
+                            StatusPill("失败 ${state.failed}", FavColors.fail)
                             Spacer(Modifier.weight(1f))
                             TextButton(
                                 onClick = viewModel::retrySync,
@@ -292,6 +292,14 @@ fun SettingsSheet(
                             checked = settings.pasteSuggestion,
                             scale = scale,
                             onCheckedChange = viewModel::setPasteSuggestion,
+                        )
+                        ToggleRow(
+                            label = "悬浮球显示同步角标",
+                            hint = "球肩上标出还需要处理的条数：红=有条目重试耗尽或被拒绝，灰=离线攒着，黄=排队等上传。" +
+                                "贴边半隐藏时角标会被裁到屏幕外，那种状态下改用整球底色报警。关掉后悬浮助手不再读同步队列。",
+                            checked = settings.ballStatusBadge,
+                            scale = scale,
+                            onCheckedChange = viewModel::setBallStatusBadge,
                         )
                     }
                 }

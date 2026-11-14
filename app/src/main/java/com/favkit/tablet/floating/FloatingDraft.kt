@@ -4,7 +4,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class PanelStatus { IDLE, SAVING, FAILED }
+/** NOTICE：不是失败的提示（例如「这条链接已经收藏过了」），用中性色显示 */
+enum class PanelStatus { IDLE, SAVING, FAILED, NOTICE }
 
 /**
  * 悬浮面板的草稿状态。放在进程级单例而不是 Activity/Service 实例里，
