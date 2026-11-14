@@ -8,7 +8,7 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 2
-code: 3305cec
-note: 第一次带触发器的推送被 message 里的 skip 字面量吃掉，没建 run；这次重新 bump 走通「构建」分支，
-      验证 gate 判定 + 全量 if 守卫确实能出 APK（app/ 代码自 3305cec 起没变过，产物仍是那套代码）。
+build: 3
+code: 00d32ab
+note: 主界面重做「视频墙 + 聚焦遮罩」两层布局（新增 FocusOverlay / FilterSheet / PlayerStage / MediaCodec，
+      删掉 NavPane / DetailPane），Room 升到 v3 并真做迁移，需要一套能装上平板逐段浏览的新 APK 才能验收。
