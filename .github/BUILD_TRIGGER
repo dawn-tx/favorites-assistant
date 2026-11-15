@@ -8,8 +8,8 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 7
-code: d3f4a43
-note: 上一轮（build 6，run 43643474238）红了：FocusOverlay 的 onDoubleTap 方法引用签名对不上、
-      VideoWall 空状态按钮读了 Onboarding 没收到的 state，共三条编译错误，d3f4a43 已修。
-      这次 bump 是为了把 6112277 那批六项改动连同修复一起真正编译过一遍，绿了才算落地。
+build: 8
+code: 9c2b5a0
+note: 9c2b5a0 那次动了 22 个文件：Room 从两张表合成 v4 单表、DTO 全换（删掉 VideoInfo/ResolveStatus）、
+      MainViewModel 整篇重写、遮罩层新增 StepEdge 手势条并把 body 换成 Row 嵌套。
+      这些都是没跑过编译的改动，本地也没有 Gradle，只能靠云端这一次把类型与 API 调用全查一遍。
