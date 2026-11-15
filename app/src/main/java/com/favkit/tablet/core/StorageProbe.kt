@@ -103,7 +103,7 @@ class StorageProbe(
     }.getOrDefault(file.length())
 
     private fun total(dir: File, useDisk: Boolean): Long = runCatching {
-        dir.walkBottomUp.filter { it.isFile }.sumOf { f -> if (useDisk) disk(f) else f.length() }
+        dir.walkBottomUp().filter { it.isFile }.sumOf { f -> if (useDisk) disk(f) else f.length() }
     }.getOrDefault(0L)
 
     private fun Long.num(): String = String.format(Locale.US, "%,13d", this)

@@ -8,9 +8,7 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 10
-code: 49966c8
-note: 这轮加的是存储明细探针（core/StorageProbe + 设置页入口 + favorites 表两个计数查询 +
-      MediaCache.cacheRootPath），目的是让用户数据「清完缓存还剩 2MB」这件事能用设备上的真实
-      字节定位，而不是我在这儿按每行几 KB 估。Room 只做只读计数，库名挪成 AppDatabase.DB_NAME 常量，
-      schema 与 version 都没动。
+build: 11
+code: 735b879
+note: 上一轮（run 43773161476）只有一条真错：StorageProbe 里把 walkBottomUp 当属性写了
+      （dir.walkBottomUp.filter），它是函数，得带括号。同一提交里补括号并 bump，把探针真正编译过一遍。
