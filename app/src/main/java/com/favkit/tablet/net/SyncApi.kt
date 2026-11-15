@@ -7,6 +7,7 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -41,7 +42,7 @@ class SyncApi(
             .build()
     }
 
-    /** 上传一批操作；后台会顺带回传这些收藏解析出来的视频信息 */
+    /** 上传一批操作；后台在同一次调用里保存并解析，回执直接带回解析后的收藏 */
     suspend fun push(ops: List<OpDto>): SyncOutcome {
         val config = settings.current()
         val body = json.encodeToString(
@@ -75,7 +76,6 @@ class SyncApi(
                             serverTime = parsed.serverTime,
                             unknownOps = parsed.unknownOps,
                             favorites = parsed.favorites,
-                            videos = parsed.videos,
                             nextWaitMs = parsed.nextWaitMs,
                         )
                     }
@@ -104,41 +104,40 @@ class SyncApi(
                 if (!parsed.ok) {
                     PullOutcome.Failed(parsed.error.ifBlank { "后台没有返回这一页" })
                 } else {
-                    PullOutcome.Loaded(parsed.favorites, parsed.videos, parsed.nextCursor, parsed.hasMore, parsed.total)
+                    PullOutcome.Loaded(parsed.favorites, parsed.nextCursor, parsed.hasMore, parsed.total)
                 }
             }
         }
     }
 
-    /** 拉取已解析的视频信息：后台解析是异步的，App 靠这个把 PENDING 变 READY */
-    suspend fun fetchVideos(ids: List<String>): VideosOutcome = videosCall(ids, "/videos?ids=" + ids.joinToString(","))
-
-    /** 遮罩层「重新解析」：让后台重算这几条链接的视频信息 */
-    suspend fun resolveVideos(ids: List<String>): VideosOutcome {
-        val body = json.encodeToString(VideosRequest.serializer(), VideosRequest(ids = ids))
-        return videosCall(ids, "/videos/resolve", body)
-    }
-
-    private suspend fun videosCall(
-        requested: List<String>,
-        path: String,
-        body: String? = null,
-    ): VideosOutcome {
+    /**
+     * 手动重新解析这几条收藏：后台重算内容信息并原样带回，`favorite_at` 不变。
+     *
+     * 只有用户在遮罩层点「重新解析」时才发这一条请求 —— 自动重试没有意义，
+     * 同一条链接的解析结果由链接本身决定，再问一遍只会多占一个出站时隙。
+     */
+    suspend fun resolve(ids: List<String>): ResolveOutcome {
+        if (ids.isEmpty()) return ResolveOutcome()
+        val body = json.encodeToString(ResolveRequest.serializer(), ResolveRequest(favoriteIds = ids))
         val config = settings.current()
-        return exchange(config, path, body, { reason -> VideosOutcome(emptyList(), requested, null, reason) }) { text, code ->
+        return exchange(config, "/resolve", body, { reason -> ResolveOutcome(error = reason) }) { text, code ->
             if (code in 400..499) {
-                val parsed = runCatching { json.decodeFromString(VideosResponse.serializer(), text) }.getOrNull()
-                VideosOutcome(emptyList(), requested, null, parsed?.error?.ifBlank { null } ?: "后台拒绝：HTTP $code")
+                val parsed = runCatching { json.decodeFromString(ResolveResponse.serializer(), text) }.getOrNull()
+                ResolveOutcome(error = parsed?.error?.ifBlank { null } ?: "后台拒绝：HTTP $code")
             } else {
-                val parsed = json.decodeFromString(VideosResponse.serializer(), text)
+                val parsed = json.decodeFromString(ResolveResponse.serializer(), text)
                 gate.noteServerWait(parsed.nextWaitMs)
-                VideosOutcome(parsed.videos, parsed.unknownIds, parsed.nextWaitMs, null)
+                if (!parsed.ok) {
+                    ResolveOutcome(error = parsed.error.ifBlank { "后台没有返回解析结果" })
+                } else {
+                    ResolveOutcome(parsed.favorites, parsed.unknownIds, null)
+                }
             }
         }
     }
 
     @Serializable
-    private data class VideosRequest(val ids: List<String>)
+    private data class ResolveRequest(@SerialName("favorite_ids") val favoriteIds: List<String>)
 
     /**
      * 统一出口。[parse] 收到响应体与状态码；[onFailure] 负责把传输层/解析层失败映射成各自的失败类型，
@@ -189,8 +188,8 @@ class SyncApi(
 
 sealed interface PullOutcome {
     data class Loaded(
+        /** 这一页的收藏，每条都已带后台的解析结果 */
         val favorites: List<FavoriteDto>,
-        val videos: List<VideoDto>,
         /** 下一页的游标；空串表示后台没有更多了 */
         val nextCursor: String = "",
         val hasMore: Boolean = false,
@@ -200,12 +199,3 @@ sealed interface PullOutcome {
 
     data class Failed(val reason: String) : PullOutcome
 }
-
-data class VideosOutcome(
-    val videos: List<VideoDto>,
-    /** 后台没有这些收藏的解析结果 */
-    val unknownIds: List<String> = emptyList(),
-    val nextWaitMs: Long? = null,
-    /** 非空表示这次没拿到结果，原因在此 */
-    val error: String? = null,
-)

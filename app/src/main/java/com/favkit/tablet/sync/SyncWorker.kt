@@ -15,7 +15,7 @@ import com.favkit.tablet.sync.SyncManager.Companion.MAX_ATTEMPTS
  * 待上传队列的执行体：**一次只跑一条**，前一条有结果之后才发下一条。
  *
  * 「等多久再发下一条」不在这里 sleep —— 节奏由 [com.favkit.tablet.net.SyncGate] 在所有出站请求
- * （上传、取解析结果、回填）的唯一出口统一把控，成功、失败、重试、旁路都排同一个队。
+ * （上传、取列表、重新解析）的唯一出口统一把控，成功、失败、重试、旁路都排同一个队。
  * 时隙还远就把这一轮交回 WorkManager 退避重排，不占着 worker 干等。
  *
  * 离线时 WorkManager 的 constraints 直接不调度本类；网络恢复由 [SyncManager.flush] 重新拉起。
@@ -67,7 +67,8 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
                         continue
                     }
                     ops.delete(op.id)
-                    graph.favorites.saveVideos(outcome.videos)
+                    // 后台在同一次调用里保存并解析，回执自带这条收藏的内容信息，直接回填
+                    graph.favorites.importRemote(outcome.favorites)
                     when {
                         dto.type == OpType.DELETE.name ->
                             dto.favoriteId?.let { favorites.deleteForever(listOf(it)) }

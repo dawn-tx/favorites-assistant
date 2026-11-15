@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
@@ -73,11 +74,9 @@ import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.MediaKind
 import com.favkit.tablet.data.MediaSegment
-import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.di.AppGraph
 import com.favkit.tablet.ui.components.ConfirmDialog
 import com.favkit.tablet.ui.components.FavColors
-import com.favkit.tablet.ui.components.ResolveStatusPill
 import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.TabletTagChip
 import com.favkit.tablet.ui.components.TabletTextField
@@ -91,6 +90,12 @@ import kotlinx.coroutines.delay
 
 /** 并列放信息栏的最小宽度；再窄就把信息栏挪到媒体区下面 */
 private const val FOCUS_SIDE_BY_SIDE_MIN_WIDTH_DP = 900
+
+/** 两侧换条手势区的宽度：够拇指根按住，又窄到不啃内容区 */
+private const val STEP_EDGE_WIDTH_DP = 28
+
+/** 换一条要抹过的距离：比误碰大，比一次有意的手势小 */
+private const val STEP_TRIGGER_DP = 48
 
 /**
  * 聚焦遮罩层：把后台解析回来的内容原样摊开看。
@@ -167,82 +172,92 @@ fun FocusOverlay(
                     favorite = favorite,
                     focus = focus,
                     scale = scale,
-                    onStep = viewModel::stepItem,
                     onDismiss = onDismiss,
                 )
 
-                if (segments.isEmpty()) {
-                    PendingStage(
-                        favorite = favorite,
-                        resolving = state.resolving,
+                // 两侧各留一条手势区，中间才是内容列：手势区在内容之外，不抢 pager 的横向翻页，
+                // 也不抢信息栏的纵向滚动
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                ) {
+                    StepEdge(
                         scale = scale,
-                        onReparse = { viewModel.resolveNow(favorite.id) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
+                        onStep = viewModel::stepItem,
+                        modifier = Modifier.fillMaxHeight(),
                     )
-                } else if (wide) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(scale.gapMd),
-                    ) {
-                        FocusStage(
-                            viewModel = viewModel,
-                            favorite = favorite,
-                            focus = focus,
-                            pagerState = pagerState,
-                            graph = graph,
-                            state = state,
-                            scale = scale,
-                            modifier = Modifier
-                                .weight(1.5f)
-                                .fillMaxHeight(),
-                        )
-                        FocusInfo(
-                            viewModel = viewModel,
-                            state = state,
-                            favorite = favorite,
-                            focus = focus,
-                            scale = scale,
-                            onClosed = onDismiss,
+
+                    if (wide) {
+                        Row(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight(),
-                        )
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(scale.gapSm),
-                    ) {
-                        FocusStage(
-                            viewModel = viewModel,
-                            favorite = favorite,
-                            focus = focus,
-                            pagerState = pagerState,
-                            graph = graph,
-                            state = state,
-                            scale = scale,
+                            horizontalArrangement = Arrangement.spacedBy(scale.gapMd),
+                        ) {
+                            StageArea(
+                                viewModel = viewModel,
+                                favorite = favorite,
+                                focus = focus,
+                                pagerState = pagerState,
+                                graph = graph,
+                                state = state,
+                                scale = scale,
+                                modifier = Modifier
+                                    .weight(1.5f)
+                                    .fillMaxHeight(),
+                            )
+                            FocusInfo(
+                                viewModel = viewModel,
+                                state = state,
+                                favorite = favorite,
+                                focus = focus,
+                                scale = scale,
+                                onClosed = onDismiss,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight(),
+                            )
+                        }
+                    } else {
+                        Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1.1f),
-                        )
-                        FocusInfo(
-                            viewModel = viewModel,
-                            state = state,
-                            favorite = favorite,
-                            focus = focus,
-                            scale = scale,
-                            onClosed = onDismiss,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f),
-                        )
+                                .weight(1f)
+                                .fillMaxHeight(),
+                            verticalArrangement = Arrangement.spacedBy(scale.gapSm),
+                        ) {
+                            StageArea(
+                                viewModel = viewModel,
+                                favorite = favorite,
+                                focus = focus,
+                                pagerState = pagerState,
+                                graph = graph,
+                                state = state,
+                                scale = scale,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1.1f),
+                            )
+                            FocusInfo(
+                                viewModel = viewModel,
+                                state = state,
+                                favorite = favorite,
+                                focus = focus,
+                                scale = scale,
+                                onClosed = onDismiss,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f),
+                            )
+                        }
                     }
+
+                    StepEdge(
+                        scale = scale,
+                        onStep = viewModel::stepItem,
+                        modifier = Modifier.fillMaxHeight(),
+                    )
                 }
             }
         }
@@ -254,7 +269,6 @@ private fun FocusHeader(
     favorite: Favorite,
     focus: FocusUiState,
     scale: TabletScale,
-    onStep: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
     Row(
@@ -262,8 +276,6 @@ private fun FocusHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
     ) {
-        StepButton(label = "‹", description = "上一条收藏", scale = scale, onClick = { onStep(-1) })
-        StepButton(label = "›", description = "下一条收藏", scale = scale, onClick = { onStep(1) })
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = favorite.displayTitle,
@@ -285,29 +297,60 @@ private fun FocusHeader(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        ResolveStatusPill(favorite.video)
         IconButton(onClick = onDismiss, modifier = Modifier.size(scale.touchMin)) {
             Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
         }
     }
 }
 
+/**
+ * 遮罩层两侧的换条手势区：上下抹一下换一条收藏，向上是下一条。
+ *
+ * 顶栏原先那对 ‹ › 摘掉了 —— 它们和标题挤在同一行，窄屏下把标题压得只剩一个字，
+ * 而「换一条」本来就是个连续动作，手指在两侧抹一下比连点按钮顺手。
+ * 手势区只吃纵向拖动，宽度落在内容列之外的留白里：横向留给里面的 pager（图集翻页），
+ * 纵向留给信息栏自己的滚动，谁也不抢谁。淡箭头只负责让人知道这里能抹，不是按钮。
+ */
 @Composable
-private fun StepButton(
-    label: String,
-    description: String,
+private fun StepEdge(
     scale: TabletScale,
-    onClick: () -> Unit,
+    onStep: (Int) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = Modifier
-            .size(scale.touchMin)
-            .clip(CircleShape)
-            .background(Color(0x33FFFFFF))
-            .clickable(onClickLabel = description, onClick = onClick),
+        modifier = modifier
+            .width(STEP_EDGE_WIDTH_DP.dp)
+            .fillMaxHeight()
+            .pointerInput(scale) {
+                val trigger = with(density) { STEP_TRIGGER_DP.dp.toPx() }
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var dragged = 0f
+                    while (true) {
+                        val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                        dragged += change.position.y - change.previousPosition.y
+                        change.consume()
+                        // 手指上移时 y 增量为负，和短视频里「往上滑看下一条」一致
+                        if (dragged <= -trigger) {
+                            onStep(1)
+                            dragged = 0f
+                        } else if (dragged >= trigger) {
+                            onStep(-1)
+                            dragged = 0f
+                        }
+                    }
+                }
+            },
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = label, style = MaterialTheme.typography.titleLarge, color = Color.White)
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text("︿", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
+            Text("﹀", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
+        }
     }
 }
 
@@ -684,17 +727,43 @@ private fun SegmentStrip(
     }
 }
 
-/** 后台还没给出素材清单时的说明台：讲清在等什么，并留下立刻重试的入口 */
+/** 内容位有素材就逐段浏览，一条素材都没有就说明这条链接怎么了 */
 @Composable
-private fun PendingStage(
+private fun StageArea(
+    viewModel: MainViewModel,
     favorite: Favorite,
-    resolving: Boolean,
+    focus: FocusUiState,
+    pagerState: PagerState,
+    graph: AppGraph,
+    state: MainUiState,
     scale: TabletScale,
-    onReparse: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val video = favorite.video
-    val failed = video?.status == ResolveStatus.FAILED
+    if (favorite.segments.isEmpty()) {
+        UnresolvedStage(favorite, modifier)
+    } else {
+        FocusStage(
+            viewModel = viewModel,
+            favorite = favorite,
+            focus = focus,
+            pagerState = pagerState,
+            graph = graph,
+            state = state,
+            scale = scale,
+            modifier = modifier,
+        )
+    }
+}
+
+/**
+ * 没有素材清单时占掉内容位：把后台给的原因原话说出来。
+ *
+ * 「重新解析」不在这里 —— 这颗按钮放在右边（窄屏时下方）信息栏里，任何时候都看得见：
+ * 只有失败时才冒出来的入口，用户根本不知道自己错过了它。
+ */
+@Composable
+private fun UnresolvedStage(favorite: Favorite, modifier: Modifier = Modifier) {
+    val failed = favorite.failedReason.isNotBlank()
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(20.dp))
@@ -702,20 +771,15 @@ private fun PendingStage(
             .padding(scale.gapMd),
         verticalArrangement = Arrangement.spacedBy(scale.gapSm),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (!failed && resolving) {
-                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(20.dp), color = FavColors.warn)
-            }
-            Text(
-                text = if (failed) "后台没能解析这条链接" else "还在等后台的解析结果",
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.White,
-            )
-        }
+        Text(
+            text = if (failed) "后台没能解析这条链接" else "这条收藏还没有内容信息",
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White,
+        )
         Text(
             text = when {
-                failed -> video?.error.orEmpty().ifBlank { "可以重试一次，重试会重新提交后台的解析任务。" }
-                else -> "封面、标题、素材清单都由后台返回；解析完成后这里会直接变成可逐段浏览的内容。"
+                failed -> favorite.failedReason
+                else -> "链接还没上传到后台，或后台还没给出结果。封面、标题、素材清单都由后台返回。"
             },
             style = MaterialTheme.typography.bodyMedium,
             color = Color(0xFFB7BDC6),
@@ -727,13 +791,6 @@ private fun PendingStage(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
-        Button(
-            onClick = onReparse,
-            enabled = !resolving,
-            modifier = Modifier.heightIn(min = scale.touchMin),
-        ) {
-            Text(if (failed) "重新解析" else "现在就要结果")
-        }
     }
 }
 
@@ -752,10 +809,8 @@ private fun FocusInfo(
     var noteDraft by remember(favorite.id) { mutableStateOf(favorite.note) }
     var newTagName by remember { mutableStateOf("") }
 
-    val video = favorite.video
     val segment = favorite.segments.getOrNull(focus.segmentIndex)
-    val watchedMs = favorite.segmentProgress[focus.segmentIndex]
-        ?: if (focus.segmentIndex == favorite.lastSegmentIndex) favorite.lastPositionMs else 0L
+    val watchedMs = favorite.segmentProgress[focus.segmentIndex] ?: 0L
     val prefetchBytes = state.prefetch[favorite.id]
     val attached = favorite.tags.map { it.id }.toSet()
 
@@ -773,7 +828,7 @@ private fun FocusInfo(
             style = MaterialTheme.typography.bodyMedium,
             color = FOCUS_TEXT,
         )
-        video?.compositionLabel?.takeIf { it.isNotBlank() }?.let { StatusPill(it, FavColors.accent) }
+        favorite.compositionLabel.takeIf { it.isNotBlank() }?.let { StatusPill(it, FavColors.accent) }
 
         if (segment != null) {
             SectionDark("当前段")
@@ -787,13 +842,38 @@ private fun FocusInfo(
         }
 
         SectionDark("后台信息")
-        MetaRow("作者", video?.author?.takeIf { it.isNotBlank() } ?: "—")
-        MetaRow("站点", video?.site?.takeIf { it.isNotBlank() } ?: favorite.hostLabel)
-        MetaRow("清晰度", video?.quality?.takeIf { it.isNotBlank() } ?: "—")
+        MetaRow("作者", favorite.author.ifBlank { "—" })
+        MetaRow("站点", favorite.site.ifBlank { favorite.hostLabel })
+        MetaRow("清晰度", segment?.quality?.takeIf { it.isNotBlank() } ?: "—")
         MetaRow("总时长", if (favorite.durationMs > 0L) formatClock(favorite.durationMs) else "—")
-        MetaRow("解析时间", formatDate(video?.resolvedAt ?: 0L))
+        MetaRow("解析时间", formatDate(favorite.resolvedAt))
         MetaRow("收藏时间", formatDate(favorite.favoriteAt))
-        if (video?.isMockSource == true) StatusPill("演示源：数据来自本地 mock 后台", FavColors.warn)
+        if (favorite.failedReason.isNotBlank()) {
+            Text(
+                text = favorite.failedReason,
+                style = MaterialTheme.typography.bodySmall,
+                color = FOCUS_ERROR,
+            )
+        }
+        // 这颗按钮永远在位：解析失败只在条目上说话，用户要有一个不用猜就能找到的出口
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+        ) {
+            Text(
+                text = "让后台丢弃旧结果，按这条链接重算一次。",
+                style = MaterialTheme.typography.labelMedium,
+                color = Color(0xFF9AA0A6),
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = { viewModel.resolveNow(favorite.id) },
+                modifier = Modifier.heightIn(min = scale.touchMin),
+            ) {
+                Text("重新解析")
+            }
+        }
         state.player.error?.let {
             Text(text = it, style = MaterialTheme.typography.bodySmall, color = FOCUS_ERROR)
         }
@@ -894,7 +974,7 @@ private fun FocusInfo(
             } else {
                 Button(
                     onClick = { viewModel.prefetch(favorite.id) },
-                    enabled = video?.playable == true,
+                    enabled = favorite.segments.any { it.playable },
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = scale.touchMin),

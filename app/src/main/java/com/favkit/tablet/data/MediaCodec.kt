@@ -1,13 +1,12 @@
 package com.favkit.tablet.data
 
-import com.favkit.tablet.net.MediaDto
+import com.favkit.tablet.net.SegmentDto
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /**
- * 后台返回的素材清单在本地只存一行 JSON，不单独建表 —— 这样 v2→v3 迁移只剩四条
- * `ALTER TABLE ADD COLUMN`。手写 CREATE TABLE 要精确猜中 Room 生成的 DDL，而云端 CI
- * 只编译、从不跑迁移，猜错就是装机即崩；ADD COLUMN 猜错最多读出 null，退回单视频老路径。
+ * 后台返回的素材清单在本地只存一行 JSON，不单独建表：一段一段建表要外键、要排序、
+ * 要在每次覆盖解析结果时删了重插，而这条清单从头到尾只整体读、整体写。
  */
 internal object MediaCodec {
 
@@ -17,10 +16,10 @@ internal object MediaCodec {
         explicitNulls = false
     }
 
-    private val serializer = ListSerializer(MediaDto.serializer())
+    private val serializer = ListSerializer(SegmentDto.serializer())
 
     /** 网络侧与本地侧共用同一套归一化：按后台给的顺序排，再重新编号成 0..n-1 */
-    fun segments(dtos: List<MediaDto>): List<MediaSegment> =
+    fun segments(dtos: List<SegmentDto>): List<MediaSegment> =
         dtos.sortedBy { it.index }.mapIndexed { position, dto ->
             MediaSegment(
                 index = position,
@@ -34,7 +33,7 @@ internal object MediaCodec {
         }
 
     /** 空清单写成 null 而不是 "[]"，省得一列永远占着字节 */
-    fun encode(dtos: List<MediaDto>): String? =
+    fun encode(dtos: List<SegmentDto>): String? =
         if (dtos.isEmpty()) null else json.encodeToString(serializer, dtos)
 
     fun decode(raw: String?): List<MediaSegment> {
@@ -47,8 +46,8 @@ internal object MediaCodec {
 /**
  * 段级播放进度：「段号:毫秒」逗号分隔。
  *
- * 存 favorites 而不是 video_info —— 后者每次取解析结果都会被后台响应整体覆盖写回，
- * 本地进度放那儿等于每刷新一次就丢一次。
+ * 一整条收藏的进度用一列文本换一次 UPDATE；解析结果每次都被后台响应整体覆盖，
+ * 本地进度绝不能放在会被覆盖的那批字段里。
  */
 internal object SegmentProgressCodec {
 

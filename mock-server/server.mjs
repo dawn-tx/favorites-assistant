@@ -2,9 +2,12 @@
 //
 //   node mock-server/server.mjs
 //
-// 协议是纯明文 JSON：App 直接 POST 收藏操作，服务端落盘并回显，顺便用确定性的假解析器
-// 生成视频元数据（标题/封面/播放地址），用来在本地完整验证「保存同步 / 断网排队 / 联网补传」链路。
-// 刻意不做加密：收藏数据没有保密需求，加密只会把「解不开也回 200」这类缺陷藏起来。
+// 协议是纯明文 JSON：App POST 收藏操作，服务端落盘的**同一次调用里**就把内容解析完，
+// 元数据（标题/作者/说明/素材清单）内联在那条收藏上，写、读、回都带着它走。
+// 解析只有两种结局：给出 segments[]，或给出 failed_reason —— 没有「稍后再补给你」的中间态，
+// 所以也就没有轮询接口。刻意不做加密：收藏数据没有保密需求，加密只会把「解不开也回 200」这类缺陷藏起来。
+//
+// 数据接口一共三个：POST /sync 写收藏、GET /favorites 分页读、POST /resolve 重解析指定几条。
 //
 // 环境变量：
 //   HOST                  监听地址，默认 0.0.0.0（所有网卡，方便平板直连）
@@ -42,17 +45,13 @@ function positiveInt(raw, fallback) {
   return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : fallback;
 }
 
-// 只认这三类数据，旧文件里其它字段（比如遗留的密钥相关字段）直接忽略
+// 只有一张收藏表，内容解析结果内联在行的 media 上；旧文件里的其它字段直接忽略
 function loadData() {
   try {
     const parsed = JSON.parse(readFileSync(DATA_FILE, 'utf8'));
-    return {
-      favorites: plainObject(parsed?.favorites),
-      videos: plainObject(parsed?.videos),
-      devices: plainObject(parsed?.devices),
-    };
+    return { favorites: plainObject(parsed?.favorites) };
   } catch {
-    return { favorites: {}, videos: {}, devices: {} };
+    return { favorites: {} };
   }
 }
 
@@ -124,12 +123,12 @@ const SITE_NAMES = [
   ['dailymotion', 'Dailymotion'],
 ];
 const AUTHORS = ['阿茶', '老周', '小林同学', '夜航星', '橘子汽水', '慢慢看', '山城阿甘'];
-// 只用业界常用的公开测试流，不编新地址
+// 不要修改这几个测试地址
 const PLAY_URLS = [
-  'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
-  'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_ts/master.m3u8',
-  'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-  'https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+  'http://192.168.1.33:9200/test/xgplayer-demo-360p.mp4',
+  'http://192.168.1.33:9200/test/cyberplayer-demo.mp4',
+  'http://192.168.1.33:9200/test/xgplayer-demo-360p.mp4',
+  'http://192.168.1.33:9200/test/cyberplayer-demo.mp4',
 ];
 const QUALITIES = ['720P', '1080P', '480P'];
 // 说明文案的后半句：让 mock 像真的读懂了内容，而不是只拼了个素材数量。
@@ -163,41 +162,21 @@ const SUMMARY_HINTS = {
   ],
 };
 
-function pendingVideo(favoriteId) {
-  // 没有解析结果就老实回 pending，不能凭空造 ready 数据
-  return {
-    favorite_id: favoriteId,
-    title: '',
-    cover_url: '',
-    author: '',
-    site: '',
-    duration_ms: 0,
-    play_url: '',
-    quality: '',
-    resolved_at: 0,
-    status: 'pending',
-    error: '',
-    is_mock_source: true,
-    summary: '',
-    media: [],
-  };
-}
-
 /**
  * 一条链接解析回来的可能是「图＋视频」「纯图集」「多段视频」，也可能就是最常见的单个视频。
  * 构成只由 url 哈希决定，同一链接反复解析结果不变，方便反复验证 App 的多素材展示。
  */
 function buildMedia(hash, slot, site) {
-  const bucket = slot % 10;
+  const shape = slot % 10;
   let images;
   let videos;
-  if (bucket <= 3) {
+  if (shape <= 3) {
     images = 1 + (slot % 4);
     videos = 1 + (slot % 2);
-  } else if (bucket <= 6) {
+  } else if (shape <= 6) {
     images = 1 + (slot % 12);
     videos = 0;
-  } else if (bucket <= 8) {
+  } else if (shape <= 8) {
     images = 0;
     videos = 2 + (slot % 3);
   } else {
@@ -256,7 +235,11 @@ function buildSummary(media, author, hash) {
   return `${lead}：${hint}${author ? `（${author}）` : ''}。`;
 }
 
-function resolveVideo(favoriteId, url) {
+/**
+ * 解析一条链接，给出这条收藏的 media 内联结果。只有两种结局：segments[] 或 failed_reason。
+ * 保存与解析在同一次调用里做完，所以 App 不需要回头轮询，协议里也没有 pending 这个状态。
+ */
+function resolveMedia(url) {
   const hash = createHash('sha1').update(String(url)).digest('hex');
   const resolvedAt = Date.now();
 
@@ -271,55 +254,54 @@ function resolveVideo(favoriteId, url) {
 
   if (!host) {
     return {
-      ...pendingVideo(favoriteId),
+      title: '',
+      author: '',
       site: '未知站点',
+      summary: '',
+      segments: [],
+      failed_reason: '收藏链接不是合法的 http(s) 地址',
       resolved_at: resolvedAt,
-      status: 'failed',
-      error: '收藏链接不是合法的 http(s) 地址',
     };
   }
 
   const site = SITE_NAMES.find(([key]) => host.includes(key))?.[1] ?? host;
   const slot = parseInt(hash.slice(6, 10), 16);
   const author = AUTHORS[slot % AUTHORS.length];
-  const media = buildMedia(hash, slot, site);
-  const firstVideo = media.find((item) => item.kind === 'video');
-  const first = media[0];
+  const segments = buildMedia(hash, slot, site);
+  const firstVideo = segments.find((item) => item.kind === 'video');
 
   return {
-    favorite_id: favoriteId,
+    // 标题是后台给的，App 不再自己派生；封面、时长、清晰度都在 segments[0] 上，这里不再镜像一份
     title: `${site}${firstVideo ? '视频' : '图集'} · ${hash.slice(0, 6)}`,
-    // 顶层这几个字段是 media[0] 的镜像：老版本 App 只认它们，不能因为加了 media 就断供
-    cover_url: first ? first.cover_url || first.url : '',
     author,
     site,
-    duration_ms: media.reduce((sum, item) => sum + item.duration_ms, 0),
-    play_url: firstVideo ? firstVideo.url : '',
-    quality: firstVideo ? firstVideo.quality : '',
+    summary: buildSummary(segments, author, hash),
+    segments,
+    failed_reason: '',
     resolved_at: resolvedAt,
-    status: 'ready',
-    error: '',
-    is_mock_source: true,
-    summary: buildSummary(media, author, hash),
-    media,
   };
+}
+
+/** 数据文件里若有早于内联格式的旧行，读到时按同一个哈希补一次，不为这事单开迁移 */
+function ensureMedia(row) {
+  if (!row.media) row.media = resolveMedia(row.url);
+  return row;
 }
 
 // ---------- 同步请求校验：任何一条不合法都整批 400，绝不半应用 ----------
 
+/** 收藏只由用户产生的数据构成；内容信息一律由服务端解析出来，客户端传来的同名字段一律不认 */
 function normalizeFavorite(favorite, at) {
   if (favorite.tags != null && (!Array.isArray(favorite.tags) || favorite.tags.some((tag) => typeof tag !== 'string'))) {
     throw new HttpError(400, `${at}的 favorite.tags 必须是字符串数组`);
   }
   return {
-    ...favorite,
     id: favorite.id.trim(),
+    url: favorite.url,
     note: optionalString(favorite.note, `${at}的 favorite.note`),
     tags: favorite.tags ?? [],
     source_app: optionalString(favorite.source_app, `${at}的 favorite.source_app`),
     favorite_at: optionalNumber(favorite.favorite_at, `${at}的 favorite.favorite_at`, Date.now()),
-    bucket: optionalString(favorite.bucket, `${at}的 favorite.bucket`) || 'INBOX',
-    last_position_ms: optionalNumber(favorite.last_position_ms, `${at}的 favorite.last_position_ms`, 0),
   };
 }
 
@@ -375,26 +357,25 @@ function validateSyncRequest(body) {
   return { deviceId: body.device_id.trim(), ops: normalizeOps(body.ops) };
 }
 
-function applySync(deviceId, ops) {
+/** 写与解析一次做完：UPSERT 落盘时就把 media 算好，响应里带回来的就是能直接渲染的那条收藏 */
+function applySync(ops) {
   const now = Date.now();
-  const appliedFavorites = new Map();
-  const appliedVideos = new Map();
+  const saved = [];
   const unknownOps = [];
   let applied = 0;
 
   for (const op of ops) {
     if (op.type === 'UPSERT') {
-      const row = { ...op.favorite, device_id: deviceId, updated_at: now };
+      const row = { ...op.favorite, media: resolveMedia(op.favorite.url), updated_at: now };
       state.favorites[row.id] = row;
-      const video = resolveVideo(row.id, row.url);
-      state.videos[row.id] = video;
-      appliedFavorites.set(row.id, row);
-      appliedVideos.set(row.id, video);
+      saved.push(row);
       applied += 1;
-      console.log(`  UPSERT ${row.id}  ${row.url}  tags=[${row.tags.join(',')}]`);
+      const outcome = row.media.failed_reason
+        ? `解析失败：${row.media.failed_reason}`
+        : `${row.media.segments.length} 段`;
+      console.log(`  UPSERT ${row.id}  ${row.url}  tags=[${row.tags.join(',')}]  ${outcome}`);
     } else if (state.favorites[op.favoriteId]) {
       delete state.favorites[op.favoriteId];
-      delete state.videos[op.favoriteId];
       applied += 1;
       console.log(`  DELETE ${op.favoriteId}`);
     } else {
@@ -403,14 +384,11 @@ function applySync(deviceId, ops) {
     }
   }
 
-  const device = plainObject(state.devices[deviceId]);
-  state.devices[deviceId] = { ...device, last_sync_at: now, favorites: Object.keys(state.favorites).length };
-
   // App 靠这个等式判断成功，内部一旦对不上宁可报错也不能回假成功
   if (applied + unknownOps.length !== ops.length) {
     throw new Error(`内部错误：applied(${applied}) + unknown_ops(${unknownOps.length}) 与操作数(${ops.length}) 不一致`);
   }
-  return { applied, unknownOps, favorites: [...appliedFavorites.values()], videos: [...appliedVideos.values()] };
+  return { applied, unknownOps, favorites: saved };
 }
 
 // 分页条数：不给就一页 50，最多 200，别让人一次把整库拽走
@@ -450,18 +428,7 @@ const server = createServer(async (req, res) => {
         host: HOST,
         port: PORT,
         favorites: Object.keys(state.favorites).length,
-        videos: Object.keys(state.videos).length,
         resolver: 'mock',
-      });
-      return;
-    }
-
-    if (path === `${BASE_PATH}/stats` && req.method === 'GET') {
-      send(res, 200, {
-        ok: true,
-        favorites: Object.keys(state.favorites).length,
-        videos: Object.keys(state.videos).length,
-        devices: state.devices,
       });
       return;
     }
@@ -471,7 +438,8 @@ const server = createServer(async (req, res) => {
       // 分页：按 favorite_at 倒序的键集游标（上一页最后那条的 favorite_at）。
       // 用偏移量的话，翻页途中新收藏一条就会把下一页顶掉一条；键集不会，
       // 重复取到的那条由 App 按 id 去重。
-      const all = Object.values(state.favorites).sort((a, b) => (b.favorite_at ?? 0) - (a.favorite_at ?? 0));
+      const all = Object.values(state.favorites).map(ensureMedia)
+        .sort((a, b) => (b.favorite_at ?? 0) - (a.favorite_at ?? 0));
       const limit = clampLimit(url.searchParams.get('limit'));
       const cursorRaw = url.searchParams.get('cursor');
       let start = 0;
@@ -482,14 +450,11 @@ const server = createServer(async (req, res) => {
       }
       const page = all.slice(start, start + limit);
       const hasMore = start + page.length < all.length;
-      const owned = new Set(page.map((row) => row.id));
-      const videos = Object.values(state.videos).filter((video) => owned.has(video.favorite_id));
       const last = page[page.length - 1];
       send(res, 200, {
         ok: true,
         server_time: Date.now(),
         favorites: page,
-        videos,
         // 每页都带总数：App 靠它区分「一共就这些」和「本地只取回了前面几页」
         total: all.length,
         next_cursor: hasMore && last ? String(last.favorite_at ?? 0) : '',
@@ -498,47 +463,38 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (path === `${BASE_PATH}/videos` && req.method === 'GET') {
-      if (!authorized(req)) return rejectUnauthorized(res);
-      const ids = (url.searchParams.get('ids') ?? '')
-        .split(',')
-        .map((id) => id.trim())
-        .filter(Boolean);
-      const videos = ids.map((id) => state.videos[id] ?? pendingVideo(id));
-      send(res, 200, { ok: true, server_time: Date.now(), videos });
-      return;
-    }
-
-    if (path === `${BASE_PATH}/videos/resolve` && req.method === 'POST') {
+    // 重解析只由用户在遮罩层里点：后台没有异步任务，也就没有轮询
+    if (path === `${BASE_PATH}/resolve` && req.method === 'POST') {
       if (!authorized(req)) return rejectUnauthorized(res);
       try {
         const body = parseJson(await readBody(req));
-        if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.ids)
-          || body.ids.some((id) => typeof id !== 'string')) {
-          throw new HttpError(400, 'ids 必须是字符串数组');
+        if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.favorite_ids)
+          || body.favorite_ids.some((id) => typeof id !== 'string')) {
+          throw new HttpError(400, 'favorite_ids 必须是字符串数组');
         }
-        const videos = [];
+        const favorites = [];
         const unknownIds = [];
         const seen = new Set();
-        for (const raw of body.ids) {
+        for (const raw of body.favorite_ids) {
           const id = raw.trim();
           if (!id || seen.has(id)) continue;
           seen.add(id);
-          const favorite = state.favorites[id];
-          if (!favorite) {
+          const row = state.favorites[id];
+          if (!row) {
             unknownIds.push(id);
             continue;
           }
-          const video = resolveVideo(id, favorite.url);
-          state.videos[id] = video;
-          videos.push(video);
+          // 只换 media，不动 favorite_at：重解析不该把这条顶到列表最前
+          row.media = resolveMedia(row.url);
+          row.updated_at = Date.now();
+          favorites.push(row);
         }
-        if (videos.length) saveData();
-        console.log(`POST /videos/resolve  ids=${seen.size} 覆盖=${videos.length} 未知=${unknownIds.length}`);
-        send(res, 200, { ok: true, server_time: Date.now(), videos, unknown_ids: unknownIds });
+        if (favorites.length) saveData();
+        console.log(`POST /resolve  ids=${seen.size} 重解析=${favorites.length} 未知=${unknownIds.length}`);
+        send(res, 200, { ok: true, server_time: Date.now(), favorites, unknown_ids: unknownIds });
       } catch (error) {
         const status = error instanceof HttpError ? error.status : 500;
-        console.error(`POST /videos/resolve 失败(${status}): ${error.message}`);
+        console.error(`POST /resolve 失败(${status}): ${error.message}`);
         send(res, status, { ok: false, error: error.message });
       }
       return;
@@ -549,7 +505,7 @@ const server = createServer(async (req, res) => {
       try {
         const body = parseJson(await readBody(req));
         const { deviceId, ops } = validateSyncRequest(body);
-        const result = applySync(deviceId, ops);
+        const result = applySync(ops);
         saveData();
         const wait = nextWaitMs();
         console.log(`POST /sync device=${deviceId} ops=${ops.length} applied=${result.applied} unknown=${result.unknownOps.length} next_wait_ms=${wait}`);
@@ -559,7 +515,6 @@ const server = createServer(async (req, res) => {
           applied: result.applied,
           unknown_ops: result.unknownOps,
           favorites: result.favorites,
-          videos: result.videos,
           next_wait_ms: wait,
         }, { 'retry-after': String(Math.max(0, Math.ceil(wait / 1000))) });
       } catch (error) {
@@ -602,8 +557,8 @@ server.listen(PORT, HOST, () => {
   }
 
   console.log(TOKEN ? '已开启 Bearer 校验：数据接口必须带 Authorization: Bearer <SYNC_TOKEN>' : '未开启 token 校验（SYNC_TOKEN 为空）');
-  console.log('视频解析器：mock（由 url 哈希确定性生成，不联网）');
-  console.log(`数据文件: ${DATA_FILE}（已读取收藏 ${Object.keys(state.favorites).length} 条、视频 ${Object.keys(state.videos).length} 条）`);
+  console.log('内容解析器：mock（由 url 哈希确定性生成，与保存同一次调用完成，不联网）');
+  console.log(`数据文件: ${DATA_FILE}（已读取收藏 ${Object.keys(state.favorites).length} 条）`);
   console.log(UPLOAD_WAIT_JITTER_MS > 0
     ? `next_wait_ms: 基准 ${UPLOAD_WAIT_MS}ms，按请求序号抖动 ${UPLOAD_WAIT_JITTER_MS}ms（0/1/2 倍循环）`
     : `next_wait_ms: 固定 ${UPLOAD_WAIT_MS}ms`);

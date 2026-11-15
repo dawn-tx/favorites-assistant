@@ -36,9 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
-import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.data.SyncBadge
-import com.favkit.tablet.data.VideoInfo
 
 /** 语义色：同步点、解析状态、缓存角标统一取自这里，深浅色下都不用改 */
 object FavColors {
@@ -49,15 +47,14 @@ object FavColors {
     val accent = Color(0xFF3B82F6)
 }
 
-/** 列表项/详情里的同步状态小圆点：绿=已同步，黄=待同步/排队，红=失败，灰=仅本地 */
+/** 列表项/详情里的同步状态小圆点：绿=已同步，黄=排队中，红=失败；离线一律灰 */
 @Composable
 fun SyncDot(badge: SyncBadge, online: Boolean, modifier: Modifier = Modifier, size: Dp = 10.dp) {
     val color = when {
         !online -> FavColors.muted
         badge == SyncBadge.SYNCED -> FavColors.ok
         badge == SyncBadge.QUEUED -> FavColors.warn
-        badge == SyncBadge.FAILED -> FavColors.fail
-        else -> FavColors.muted
+        else -> FavColors.fail
     }
     Box(
         modifier = modifier
@@ -71,24 +68,7 @@ fun syncBadgeLabel(badge: SyncBadge, online: Boolean): String = when {
     !online -> "离线"
     badge == SyncBadge.SYNCED -> "已同步"
     badge == SyncBadge.QUEUED -> "待同步"
-    badge == SyncBadge.FAILED -> "同步失败"
-    else -> "仅本地"
-}
-
-/** 后台解析状态：链接本身不是视频，解析完才有封面/时长/播放地址 */
-@Composable
-fun ResolveStatusPill(video: VideoInfo?, modifier: Modifier = Modifier) {
-    when (video?.status) {
-        ResolveStatus.READY ->
-            if (video?.isMockSource == true) {
-                StatusPill("演示源", FavColors.warn, modifier)
-            } else {
-                StatusPill("可播放", FavColors.ok, modifier)
-            }
-
-        ResolveStatus.FAILED -> StatusPill("解析失败", FavColors.fail, modifier)
-        else -> StatusPill("解析中", FavColors.warn, modifier)
-    }
+    else -> "同步失败"
 }
 
 @Composable

@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,6 +43,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
@@ -267,14 +267,15 @@ private fun MainTopBar(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("视频收藏", style = MaterialTheme.typography.titleLarge, maxLines = 1)
-                // 本地只是后台的分页缓存：没取完时说「共 N 条」会把取回的那几页说成整库
+                // 本地只是后台的分页缓存：没取完时说「共 N 条」会把取回的那几页说成整库。
+                // 这里只报条数，不报「就绪」—— 收藏传回的那刻内容信息就同时到了，没有第二种状态可数
                 val cached = state.cachedTotal
-                val ready = (cached - state.unresolvedCount).coerceAtLeast(0)
                 Text(
                     text = when {
-                        state.cachePartial -> "后台共 ${state.remoteTotal} 条 · 已取回 $cached 条"
-                        state.remoteTotal > 0 -> "共 $cached 条 · 已就绪 $ready 条"
-                        else -> "本地 $cached 条 · 已就绪 $ready 条"
+                        state.cachePartial -> "共 ${state.remoteTotal} 条 · 已取回 $cached 条"
+                        state.remoteTotal > 0 -> "共 ${state.remoteTotal} 条"
+                        !state.online -> "本地 $cached 条 · 离线"
+                        else -> "本地 $cached 条"
                     },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -300,8 +301,9 @@ private fun MainTopBar(
                 )
                 FilterAction(state = state, scale = scale, onClick = onOpenFilters)
                 SyncAction(
-                    syncing = state.syncing || state.resolving,
-                    pendingAttention = state.failed > 0,
+                    syncing = state.syncing,
+                    pendingSync = state.pendingSync,
+                    failed = state.failed,
                     scale = scale,
                     onClick = onSync,
                 )
@@ -400,33 +402,43 @@ private fun SearchField(
 }
 
 /**
- * 顶栏唯一的同步入口：**重试失败的上传并立刻推动队列**。
+ * 顶栏唯一的同步入口：**把失败的上传重新排队并立刻推动队列**。
  *
- * 以前这里放的是「重新拉取解析结果」，没有待解析条目就静默什么都不做，点了像坏了。
- * 现在忙不忙看得见（转圈），有失败也看得见（图标染色）。
+ * 用文字而不是刷新图标 —— 这个图标在这里一直被读成「刷新墙列表」，而墙列表压根不需要刷新：
+ * 它由本地库的订阅驱动，滚到底自动补页。按钮也只在确实有话说的时候才占位置，队列清空就不出现，
+ * 免得用户对着一个永远「点了像没反应」的图标猜它在忙什么。
  */
 @Composable
 private fun SyncAction(
     syncing: Boolean,
-    pendingAttention: Boolean,
+    pendingSync: Int,
+    failed: Int,
     scale: TabletScale,
     onClick: () -> Unit,
 ) {
-    if (syncing) {
-        Box(modifier = Modifier.size(scale.touchMin), contentAlignment = Alignment.Center) {
+    when {
+        syncing -> Box(modifier = Modifier.size(scale.touchMin), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(
                 strokeWidth = 2.dp,
                 modifier = Modifier.size(scale.touchMin * 0.38f),
             )
         }
-    } else {
-        TabletIconButton(
-            icon = Icons.Filled.Refresh,
-            contentDescription = if (pendingAttention) "重试失败的上传并继续队列" else "检查并继续上传队列",
-            minTouch = scale.touchMin,
-            tint = if (pendingAttention) FavColors.fail else LocalContentColor.current,
-            onClick = onClick,
-        )
+
+        failed > 0 -> SyncTextButton("重试上传 $failed", FavColors.fail, scale, onClick)
+
+        pendingSync > 0 -> SyncTextButton("继续上传 $pendingSync", LocalContentColor.current, scale, onClick)
+
+        else -> Unit
+    }
+}
+
+@Composable
+private fun SyncTextButton(label: String, tint: Color, scale: TabletScale, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.heightIn(min = scale.touchMin),
+    ) {
+        Text(label, color = tint, maxLines = 1)
     }
 }
 

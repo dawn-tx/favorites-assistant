@@ -17,10 +17,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -41,8 +42,6 @@ import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.MediaKind
 import com.favkit.tablet.data.MediaSegment
-import com.favkit.tablet.data.ResolveStatus
-import com.favkit.tablet.data.VideoInfo
 import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.SyncDot
 import com.favkit.tablet.ui.components.VideoCover
@@ -58,8 +57,8 @@ private val TILE_GAP = 2.dp
  * 而是按 `media[]` 的真实构成变形：单条就一整张图，纯图集就等分拼格，
  * 有视频或多素材就首图放大 + 右侧缩略条，看不下的用「+N」收尾。
  *
- * 标题压在封面底部那层渐变上，时长和「+N」同一条；文字区只剩说明两行 + 标签一行，
- * 一屏能多摆一条内容。标签最多露两个，只做识别，不当按钮用。
+ * 封面底部那条放标签（最多两枚 + 「+N」）以及时长、同步与缓存色点；文字区是标题一行 + 说明两行，
+ * 标题跟着说明走才读得顺，压在封面上时它和封面的花、渐变抢注意力。标签只做识别，不当按钮用。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -113,16 +112,17 @@ fun VideoCard(
             Box(modifier = Modifier.fillMaxWidth()) {
                 Mosaic(favorite, segments, decodeDp, stripTiles)
 
-                val composition = favorite.video?.compositionLabel.orEmpty()
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    ResolveChip(favorite.video)
-                    if (composition.isNotBlank()) CoverChip(composition, Color.White)
+                val composition = favorite.compositionLabel
+                if (composition.isNotBlank()) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CoverChip(composition, Color.White)
+                    }
                 }
 
                 if (selectionActive) {
@@ -144,7 +144,7 @@ fun VideoCard(
                 } else {
                     (segments.size - 1 - stripTiles).coerceAtLeast(0)
                 }
-                TitleBand(
+                CoverFooter(
                     favorite = favorite,
                     segments = segments,
                     online = online,
@@ -158,26 +158,32 @@ fun VideoCard(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
+                    text = favorite.displayTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
                     text = favorite.displaySummary,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                CardTagRow(favorite.tags.map { it.name })
             }
         }
     }
 }
 
 /**
- * 封面底部那条：标题 + 时长 + 「+N」+ 同步与缓存色点。
+ * 封面底部那条：标签在左，时长 / 「+N」/ 同步与缓存色点在右。
  *
- * 标题原先在封面下面单独占一行，卡片被文字拉长；压进封面后文字区只剩说明和标签。
- * 底下那层从透明到近黑的渐变是给白字垫底的，不然花在封面上根本读不出来。
+ * 标签放在封面上而不是文字区，是因为它只用来「认出这条是哪一批」，不该把卡片再撑高一行；
+ * 底下那层从透明到近黑的渐变原本是给标题垫底的，现在给标签垫底 —— 标题回到文字区跟着说明走。
  */
 @Composable
-private fun BoxScope.TitleBand(
+private fun BoxScope.CoverFooter(
     favorite: Favorite,
     segments: List<MediaSegment>,
     online: Boolean,
@@ -194,14 +200,8 @@ private fun BoxScope.TitleBand(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(
-            text = favorite.displayTitle,
-            style = MaterialTheme.typography.titleSmall,
-            color = Color.White,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        CardTagRow(favorite.tags.map { it.name })
+        Spacer(Modifier.weight(1f))
         val duration = HeroDuration(segments.firstOrNull())
         if (duration != null) DurationPill(duration)
         if (hidden > 0) DurationPill("+$hidden")
@@ -221,49 +221,44 @@ private fun HeroDuration(hero: MediaSegment?): String? {
 }
 
 /**
- * 标签行：最多露两个，剩下的收进「+N」。
+ * 封面底部那条上的标签：最多露两个，剩下的收进「+N」。
  *
  * 只做识别不当按钮用 —— 点卡片是打开遮罩层，按标签筛选在顶栏抽屉里。
- * 最后露出的那枚拿到剩余宽度，名字再长也是自己省略，不会把「+N」挤出卡片。
+ * 压在封面上就得自己垫底：半透明黑块 + 白字，浅色封面和深色封面都读得清。
+ * 名字再长也是自己省略，不会把右边的时长和色点挤出卡片。
  */
 @Composable
 private fun CardTagRow(names: List<String>) {
-    if (names.isEmpty()) return
     val shown = names.take(MAX_CARD_TAGS)
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        shown.forEachIndexed { index, name ->
-            Text(
-                text = name,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .then(
-                        if (index == shown.lastIndex) {
-                            Modifier.weight(1f, fill = false)
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-            )
-        }
-        val rest = names.size - shown.size
-        if (rest > 0) {
-            Text(
-                text = "+$rest",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-            )
-        }
+    if (shown.isEmpty()) return
+    shown.forEachIndexed { index, name ->
+        Text(
+            text = name,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .then(
+                    if (index == shown.lastIndex && names.size <= MAX_CARD_TAGS) {
+                        Modifier.widthIn(max = 140.dp)
+                    } else {
+                        Modifier
+                    }
+                )
+                .clip(CircleShape)
+                .background(Color(0x99000000))
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+    }
+    val rest = names.size - shown.size
+    if (rest > 0) {
+        Text(
+            text = "+$rest",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.75f),
+            maxLines = 1,
+        )
     }
 }
 
@@ -362,11 +357,16 @@ private fun CoverTile(
     }
 }
 
-/** 还没解析出来 / 解析失败：明说在等什么，不放一张假装有内容的图 */
+/**
+ * 封面区的两种「还没有内容」：后台解析失败，或这条的解析结果还没取回来。
+ *
+ * 失败原因只在这里、只在这条卡片上说一句 —— 它不进顶栏计数，也不占一枚胶囊：
+ * 上传成功和解析失败是两件事，混成一个全局状态就没人分得清该重试还是该改链接。
+ */
 @Composable
 private fun UnresolvedStage(favorite: Favorite, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
-    val failed = favorite.video?.status == ResolveStatus.FAILED
+    val failed = favorite.failedReason.isNotBlank()
     Box(
         modifier = modifier
             .background(
@@ -384,24 +384,17 @@ private fun UnresolvedStage(favorite: Favorite, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (!failed) {
-                CircularProgressIndicator(
-                    color = FavColors.accent,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(22.dp),
-                )
-            }
             Text(
-                text = if (failed) "解析失败" else "等待后台解析",
+                text = if (failed) "解析失败" else "内容信息还没取回来",
                 style = MaterialTheme.typography.labelLarge,
                 color = if (failed) scheme.error else scheme.onSurfaceVariant,
                 maxLines = 1,
             )
             Text(
-                text = favorite.url,
+                text = favorite.failedReason.ifBlank { favorite.url },
                 style = MaterialTheme.typography.labelSmall,
-                color = scheme.onSurfaceVariant.copy(alpha = 0.8f),
-                maxLines = 1,
+                color = if (failed) scheme.error else scheme.onSurfaceVariant.copy(alpha = 0.8f),
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -449,39 +442,7 @@ private fun TintDot(tint: Color) {
     )
 }
 
-/** 封面左上角状态角标：压在图片上，所以用半透明黑底而不是主题淡色底 */
-@Composable
-private fun ResolveChip(video: VideoInfo?) {
-    when (video?.status) {
-        ResolveStatus.READY -> CoverChip(
-            text = if (video.isMockSource) "演示源" else "已解析",
-            textColor = if (video.isMockSource) Color(0xFFFFD54F) else Color(0xFF81C995),
-        )
-
-        ResolveStatus.FAILED -> CoverChip("解析失败", Color(0xFFFF8A80))
-
-        else -> Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(Color(0xCC000000))
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            CircularProgressIndicator(
-                color = Color(0xFFFDD663),
-                strokeWidth = 1.5.dp,
-                modifier = Modifier.size(12.dp),
-            )
-            Text(
-                text = "解析中",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFFFDD663),
-            )
-        }
-    }
-}
-
+/** 封面左上角的构成角标：只在「这条不止一个素材」时出现，压在图片上所以要自己垫底 */
 @Composable
 private fun CoverChip(text: String, textColor: Color) {
     Box(

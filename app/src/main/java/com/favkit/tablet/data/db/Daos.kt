@@ -39,35 +39,18 @@ interface FavoritesDao {
     suspend fun deleteForever(ids: List<String>)
 
     /**
-     * 播放进度属于本地数据，后台只用来校准，不覆盖本地已看得更靠前的位置。
-     * [progress] 是整条「段号:毫秒」串：一列文本换一次 UPDATE，比建一张进度表再逐段更新便宜，
-     * 也不会把进度和每次都会被整体覆盖写回的 video_info 混在一起。
+     * 播放进度属于本地数据，不上传：看了多少由这台设备自己记，换台设备不该被远端覆盖。
+     * [progress] 是整条「段号:毫秒」串，一列文本换一次 UPDATE，比建一张进度表再逐段更新便宜。
      */
-    @Query("UPDATE favorites SET lastPositionMs = :positionMs, lastSegmentIndex = :segmentIndex, segmentProgress = :progress WHERE id = :id")
-    suspend fun saveProgress(id: String, positionMs: Long, segmentIndex: Int, progress: String?)
+    @Query("UPDATE favorites SET lastSegmentIndex = :segmentIndex, segmentProgress = :progress WHERE id = :id")
+    suspend fun saveProgress(id: String, segmentIndex: Int, progress: String?)
 
     @Query("UPDATE favorites SET locallyCached = :cached WHERE id = :id")
     suspend fun setLocallyCached(id: String, cached: Boolean)
 
-    /** 上次停在第几段。图集段没有播放位置，只有段号，所以单独一条 UPDATE，不借用 saveProgress */
+    /** 图集段没有播放位置，只有段号，所以单独一条 UPDATE，不借用 saveProgress */
     @Query("UPDATE favorites SET lastSegmentIndex = :segmentIndex WHERE id = :id")
     suspend fun setLastSegment(id: String, segmentIndex: Int)
-
-    @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL AND badge <> 'SYNCED'")
-    fun observeUnsyncedCount(): Flow<Int>
-
-    /**
-     * 还没解析出素材的收藏条数。必须在库里数：悬浮面板和筛选抽屉都没有完整列表，
-     * 而从「已筛选的列表」里 count 出来的数会跟着搜索词变，同一个标签三处显示三个值。
-     */
-    @Query(
-        """
-        SELECT COUNT(*) FROM favorites f
-        LEFT JOIN video_info v ON v.favoriteId = f.id
-        WHERE f.deletedAt IS NULL AND (v.favoriteId IS NULL OR v.status <> 'READY')
-        """
-    )
-    fun observeUnresolvedCount(): Flow<Int>
 
     /** 本地缓存里现有多少条：0 就是换机/清数据后的空库，冷启动该自动去后台取第一页 */
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL")
@@ -76,19 +59,6 @@ interface FavoritesDao {
     /** 同一个数的可订阅版本：计数条要跟着补页变，不能只在启动时查一次 */
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL")
     fun observeCachedCount(): Flow<Int>
-}
-
-@Dao
-interface VideosDao {
-
-    @Query("SELECT * FROM video_info")
-    fun observeAll(): Flow<List<VideoInfoRow>>
-
-    @Upsert
-    suspend fun upsertAll(rows: List<VideoInfoRow>)
-
-    @Query("SELECT * FROM video_info WHERE favoriteId = :favoriteId")
-    suspend fun byFavorite(favoriteId: String): VideoInfoRow?
 }
 
 @Dao

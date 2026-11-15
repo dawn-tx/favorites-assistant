@@ -6,7 +6,6 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.FavoriteFilter
-import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.data.SettingsSnapshot
 import com.favkit.tablet.data.Tag
 import com.favkit.tablet.di.AppGraph
@@ -16,7 +15,6 @@ import com.favkit.tablet.floating.PanelStatus
 import com.favkit.tablet.floating.SaveOutcome
 import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.net.PullOutcome
-import com.favkit.tablet.net.VideosOutcome
 import com.favkit.tablet.util.VideoLinkDetector
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -25,9 +23,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -59,13 +54,8 @@ data class MainUiState(
     val queued: Int = 0,
     /** 队列里重试耗尽/被后台拒绝、需要用户动手的那部分 */
     val failed: Int = 0,
-    val unsynced: Int = 0,
-    /** 还没解析出素材的条数，由库里数出来：以前从可见列表里数，筛一次就变小一次 */
-    val unresolvedCount: Int = 0,
     val cacheBytes: Long = 0L,
     val prefetch: Map<String, Long> = emptyMap(),
-    /** 正在向后台取解析结果 */
-    val resolving: Boolean = false,
     /** 上传器在等后台响应：顶栏按钮用它区分「正在排队」和「点了没用」 */
     val syncing: Boolean = false,
     /** 正在从后台取下一页收藏 */
@@ -83,22 +73,20 @@ data class MainUiState(
 ) {
     val selectionActive: Boolean get() = checked.isNotEmpty()
     val allChecked: Boolean get() = items.isNotEmpty() && checked.size == items.size
+
     /**
-     * 「待同步」的唯一口径。
+     * 「待同步」的唯一口径：队列里还会自动再传的那部分。
      *
-     * 解析结果就装在上传那一次响应里，所以「待上传」和「待解析」是同一批数据，
-     * 界面上不再分两枚胶囊数同一件事。队列总数 [queued] 含 [failed]，先减掉才是还会自动再传的；
-     * 队列空了却还有没解析出来的，那是后台欠的结果，同样算待同步。
+     * 后台保存与解析在同一次调用里完成，收藏传成功内容信息也就到了，所以不存在「待解析」
+     * 这第二个数；解析失败是那条内容自己的事，在卡片和遮罩层上说明，不进计数。
      */
-    val pendingSync: Int get() = if (pendingUploads > 0) pendingUploads else unresolvedCount
+    val pendingSync: Int get() = (queued - failed).coerceAtLeast(0)
 
     /**
      * 本地只缓存了滚到过的那几页 —— 这时候顶栏再说「共 N 条」就是把后台的库说成了这一屏。
      * 后台没上报总数（[remoteTotal] 为 0）时不算部分，退回显示本地条数。
      */
     val cachePartial: Boolean get() = remoteTotal > cachedTotal
-
-    private val pendingUploads: Int get() = (queued - failed).coerceAtLeast(0)
 }
 
 class MainViewModel private constructor(private val graph: AppGraph) : ViewModel() {
@@ -116,7 +104,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private val messageFlow = MutableStateFlow<String?>(null)
     private val cacheBytesFlow = MutableStateFlow(0L)
     private val prefetchFlow = MutableStateFlow<Map<String, Long>>(emptyMap())
-    private val resolvingFlow = MutableStateFlow(false)
 
     private class PrefetchHandle {
         @Volatile
@@ -134,7 +121,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { graph.tags.ensurePresets() }
         bindFlows()
         cacheBytesFlow.value = graph.media.totalCachedBytes()
-        refreshVideos()
         seedRemoteCache()
     }
 
@@ -163,31 +149,16 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { messageFlow.collect { v -> _state.update { it.copy(message = v) } } }
         viewModelScope.launch { cacheBytesFlow.collect { v -> _state.update { it.copy(cacheBytes = v) } } }
         viewModelScope.launch { prefetchFlow.collect { v -> _state.update { it.copy(prefetch = v) } } }
-        viewModelScope.launch { resolvingFlow.collect { v -> _state.update { it.copy(resolving = v) } } }
         viewModelScope.launch { graph.sync.running.collect { v -> _state.update { it.copy(syncing = v) } } }
         viewModelScope.launch { graph.player.state.collect { v -> _state.update { it.copy(player = v) } } }
         viewModelScope.launch { graph.settings.snapshot.collect { v -> _state.update { it.copy(settings = v) } } }
         viewModelScope.launch { graph.sync.queuedCount.collect { v -> _state.update { it.copy(queued = v) } } }
         viewModelScope.launch { graph.sync.failedCount.collect { v -> _state.update { it.copy(failed = v) } } }
         viewModelScope.launch {
-            graph.favorites.unresolvedCount.collect { v -> _state.update { it.copy(unresolvedCount = v) } }
-        }
-        viewModelScope.launch {
             graph.favorites.cachedTotal.collect { v -> _state.update { it.copy(cachedTotal = v) } }
         }
         viewModelScope.launch {
-            graph.favorites.unsyncedCount.collect { v -> _state.update { it.copy(unsynced = v) } }
-        }
-        viewModelScope.launch {
             graph.connectivity.onlineState().collect { v -> _state.update { it.copy(online = v) } }
-        }
-        // 队列排空了却还有条目停在 PENDING —— 后台异步解析的那条路。只在「刚变成这个状态」时
-        // 拉一次结果，不轮询也不定时；顶栏按钮不再兼任这个职责，因为它本该只管重试
-        viewModelScope.launch {
-            _state.map { it.online && it.queued == 0 && it.unresolvedCount > 0 }
-                .distinctUntilChanged()
-                .filter { it }
-                .collect { refreshVideos() }
         }
     }
 
@@ -248,25 +219,30 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
      * 点卡片：把这条内容摊开放在遮罩层里。
      *
      * 落在上次看的那一段（老数据没有段号就第 0 段），因为后台给的 `media[]` 顺序就是阅读顺序，
-     * 中途退出再进来不该从第一张重看。
+     * 中途退出再进来不该从第一张重看。没解析出素材也照样打开 —— 遮罩层要能说清这条链接怎么了，
+     * 并且把「重新解析」放在用户看得见的位置。
      */
     fun openFocus(id: String) {
         val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
-        if (favorite.segments.isEmpty()) return openFallback(favorite)
+        focusFlow.value = FocusUiState(id, 0)
+        filtersFlow.value = false
+        if (favorite.segments.isEmpty()) {
+            graph.player.pausePlayback()
+            return
+        }
         val start = favorite.lastSegmentIndex.takeIf { it in favorite.segments.indices } ?: 0
         focusFlow.value = FocusUiState(id, start)
-        filtersFlow.value = false
         loadSegment(favorite, start, autoPlay = false)
     }
 
-    /** 还没解析出素材时也打开：遮罩层要能说明「在等什么」，并且留下重新解析的入口 */
-    private fun openFallback(favorite: Favorite) {
-        focusFlow.value = FocusUiState(favorite.id, 0)
-        filtersFlow.value = false
-        graph.player.pausePlayback()
-    }
-
+    /**
+     * 关闭遮罩层：停下播放。
+     *
+     * 墙上没有播放器，遮罩层一关就没有任何界面能再控制这个实例了 —— 之前只落进度不暂停，
+     * 用户听到的就是「关了还在放」。
+     */
     fun closeFocus() {
+        graph.player.pausePlayback()
         persistProgressNow()
         focusFlow.value = null
     }
@@ -288,7 +264,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         loadSegment(favorite, index, autoPlay = true)
     }
 
-    /** ‹ › 换一条：遮罩层不关，墙跟着滚到新位置 */
+    /** 遮罩层两侧的上下滑动手势换一条：遮罩层不关，墙跟着滚到新位置 */
     fun stepItem(delta: Int) {
         val items = _state.value.items
         if (items.isEmpty()) return
@@ -315,12 +291,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.player.pausePlayback()
             return
         }
-        val resumeAtMs = favorite.segmentProgress[index]
-            ?: if (index == favorite.lastSegmentIndex) favorite.lastPositionMs else 0L
         graph.player.open(
             itemId = FocusUiState(favorite.id, index).playerKey,
             url = segment.url,
-            resumeAtMs = resumeAtMs,
+            resumeAtMs = favorite.segmentProgress[index] ?: 0L,
             speed = _state.value.settings?.defaultPlaybackSpeed ?: 1f,
             autoPlay = autoPlay,
         )
@@ -358,36 +332,30 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
     // endregion
 
-    // region 后台解析
-    /** 向后台取未解析条目的视频信息：启动时走一次，队列排空后仍有未解析条目再走一次 */
-    fun refreshVideos() {
-        val pending = _state.value.items
-            .filter { it.video?.status != ResolveStatus.READY }
-            .map { it.id }
-        if (pending.isEmpty()) return
-        resolvingFlow.value = true
-        viewModelScope.launch {
-            when (val outcome = graph.api.fetchVideos(pending)) {
-                is VideosOutcome -> applyVideos(outcome, silentEmpty = true)
-            }
-            resolvingFlow.value = false
-        }
-    }
-
-    /** 遮罩层「重新解析」：让后台丢弃旧结果重算 */
+    // region 后台读写
+    /**
+     * 遮罩层「重新解析」：让后台丢弃旧结果重算这一条。
+     *
+     * 这是全站唯一主动要解析结果的入口，必须由用户点：同一条链接的解析结果由链接决定，
+     * 自动重试只会多占一个出站时隙。
+     */
     fun resolveNow(id: String) {
-        resolvingFlow.value = true
         viewModelScope.launch {
-            applyVideos(graph.api.resolveVideos(listOf(id)), silentEmpty = false)
-            resolvingFlow.value = false
-        }
-    }
-
-    private suspend fun applyVideos(outcome: VideosOutcome, silentEmpty: Boolean) {
-        if (outcome.videos.isNotEmpty()) graph.favorites.saveVideos(outcome.videos)
-        when {
-            outcome.error != null -> messageFlow.value = "取解析结果失败：${outcome.error}"
-            outcome.videos.isEmpty() && !silentEmpty -> messageFlow.value = "后台暂无这条链接的解析结果"
+            val outcome = graph.api.resolve(listOf(id))
+            if (outcome.error != null) {
+                messageFlow.value = "重新解析失败：${outcome.error}"
+                return@launch
+            }
+            if (outcome.unknownIds.isNotEmpty()) {
+                messageFlow.value = "后台没有这条收藏，请先把它重新上传"
+                return@launch
+            }
+            if (outcome.favorites.isEmpty()) {
+                messageFlow.value = "后台没有返回这条的解析结果"
+                return@launch
+            }
+            graph.favorites.importRemote(outcome.favorites)
+            messageFlow.value = "已重新解析"
         }
     }
 
@@ -419,7 +387,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     /**
      * 取后台的一页收藏落进本地缓存 —— 服务端是事实来源，本地这张表只缓存滚到过的那几页，
-     * 所以离线能看的也就是这些，滚到底就再补一页。
+     * 所以离线能看的也就是这些，滚到底就再补一页。每条收藏自带解析结果，取回即完整。
      *
      * 整段兜异常：这条链原本没有隔离，后台多一条脏数据一崩就是 App 直接退出。
      * 取消异常照常往上抛，别把它当失败弹消息。
@@ -437,7 +405,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         when (outcome) {
             is PullOutcome.Loaded -> {
                 val report = try {
-                    graph.favorites.importRemote(outcome.favorites, outcome.videos)
+                    graph.favorites.importRemote(outcome.favorites)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (broken: Exception) {
@@ -456,9 +424,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
                     append("后台这一页 ${outcome.favorites.size} 条")
                     if (outcome.total > 0) append("（后台共 ${outcome.total} 条）")
                     append("，新入库 ${report.imported} 条")
-                    if (report.skipped > 0) append("，${report.skipped} 条本地已有")
+                    if (report.refreshed > 0) append("，刷新 ${report.refreshed} 条")
+                    if (report.skipped > 0) append("，${report.skipped} 条链接为空已跳过")
                     if (report.broken > 0) append("，${report.broken} 条数据异常已跳过")
-                    if (!report.videosSaved) append("；内容信息暂未写入，稍后会自动重取")
                     append(if (more) "；往下滚还有下一页" else "；已经是最后一页")
                 }
             }
@@ -486,7 +454,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.favorites.markDeleted(ids)
             graph.sync.queueDelete(ids)
             checkedFlow.value = emptySet()
-            focusFlow.value = null
+            closeFocus()
             messageFlow.value = "已删除 ${ids.size} 条，正在排队上传"
         }
     }
@@ -495,7 +463,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch {
             graph.favorites.markDeleted(listOf(id))
             graph.sync.queueDelete(listOf(id))
-            focusFlow.value = null
+            closeFocus()
             messageFlow.value = "已删除，正在排队上传"
         }
     }
@@ -543,8 +511,8 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     /**
      * 顶栏唯一的同步入口：**把失败的请求重新排队并立刻继续上传**。
      *
-     * 这个位置原本放的是「取解析结果」，没有待解析条目时就静默 return，用户点了像没反应。
-     * 语义收窄成一件确实有用的事后，四种情况都必须回一句话，不许无声。
+     * 这里只做上传这一件事，不兼任「取解析结果」：后台传回收藏时就把它解析出来的内容一起
+     * 带回来了，没有第二件事可等。四种情况都必须回一句话，不许无声。
      */
     fun retrySyncNow() {
         val current = _state.value
@@ -566,12 +534,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
                 messageFlow.value = "队列里还有 ${current.queued} 条，已推动继续上传"
             }
 
-            // 待同步胶囊这时候数的是「后台还欠我们的解析结果」，点它得有反应，不能报「一切正常」
-            current.unresolvedCount > 0 -> {
-                refreshVideos()
-                messageFlow.value = "队列已清空，还有 ${current.unresolvedCount} 条没解析出来，已向后台再取一次"
-            }
-
             else -> messageFlow.value = "没有需要重试的条目，本地与后台一致"
         }
     }
@@ -579,7 +541,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     /** 手动把某条视频缓存到本地，离线也能播 */
     fun prefetch(id: String) {
         val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
-        val url = favorite.video?.playUrl ?: return
+        val url = favorite.segments.firstOrNull { it.playable }?.url ?: return
         if (url.isBlank() || prefetches.containsKey(id)) return
         val handle = PrefetchHandle()
         val job = viewModelScope.launch {
@@ -655,7 +617,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
                     FloatingDraftStore.clearAfterSave()
                     quickCollectFlow.value = false
                     messageFlow.value = outcome.reason
-                    refreshVideos()
                 }
 
                 is SaveOutcome.Duplicate ->

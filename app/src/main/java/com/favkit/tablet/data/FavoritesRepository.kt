@@ -3,9 +3,8 @@ package com.favkit.tablet.data
 import com.favkit.tablet.data.db.AppDatabase
 import com.favkit.tablet.data.db.FavoriteRow
 import com.favkit.tablet.data.db.FavoriteTagRow
-import com.favkit.tablet.data.db.VideoInfoRow
 import com.favkit.tablet.net.FavoriteDto
-import com.favkit.tablet.net.VideoDto
+import com.favkit.tablet.net.MediaDto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -13,7 +12,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import java.util.UUID
 
 /**
- * 收藏 = 用户产生的数据；内容信息 = 后台解析结果。两者分开存，列表展示以后台数据为准。
+ * 收藏的唯一读写口。一张 favorites 表：用户产生的数据 ＋ 后台解析回来的内容信息。
+ *
+ * 「上传」和「解析」在同一次后台调用里完成，所以这里没有「等解析」的中间态，
+ * 也不需要第二条读路径 —— 响应里的 media 就是这条收藏的最新内容。
  */
 class FavoritesRepository(
     db: AppDatabase,
@@ -21,31 +23,18 @@ class FavoritesRepository(
 ) {
 
     private val favoritesDao = db.favorites()
-    private val videosDao = db.videos()
     private val refDao = db.refs()
     private val tagsDao = db.tags()
 
-    val unsyncedCount: Flow<Int> = favoritesDao.observeUnsyncedCount()
-
-    /** 还没解析出素材的条数，库里数；与主界面、筛选抽屉、悬浮面板共用同一个口径 */
-    val unresolvedCount: Flow<Int> = favoritesDao.observeUnresolvedCount()
-
     private val allFavorites: Flow<List<Favorite>> = combine(
         favoritesDao.observeRows(),
-        videosDao.observeAll(),
         refDao.observeAll(),
         tagsDao.observeUsage(),
-    ) { rows, videos, refs, tagUsages ->
+    ) { rows, refs, tagUsages ->
         val tagById = tagUsages.associate { it.id to Tag(it.id, it.name, it.isPreset, it.usageCount) }
         val refsByFavorite = refs.groupBy { it.favoriteId }
-        val videoByFavorite = videos.associateBy { it.favoriteId }
         rows.sortedByDescending { it.favoriteAt }
-            .map { row ->
-                row.toDomain(
-                    refsByFavorite[row.id]?.mapNotNull { tagById[it.tagId] }.orEmpty(),
-                    videoByFavorite[row.id]?.toDomain(),
-                )
-            }
+            .map { row -> row.toDomain(refsByFavorite[row.id]?.mapNotNull { tagById[it.tagId] }.orEmpty()) }
     }.distinctUntilChanged()
 
     /**
@@ -60,17 +49,13 @@ class FavoritesRepository(
     /** 同一个数的订阅版：计数要跟着补页与新增变动，不能只在启动时查一次 */
     val cachedTotal: Flow<Int> = favoritesDao.observeCachedCount()
 
-    suspend fun byId(id: String): Favorite? = favoritesDao.byId(id)?.let {
-        it.toDomain(tagsOf(it.id), videosDao.byFavorite(it.id)?.toDomain())
-    }
+    suspend fun byId(id: String): Favorite? = favoritesDao.byId(id)?.let { it.toDomain(tagsOf(it.id)) }
 
     /**
      * 按链接原样查已有收藏（不做参数归一化：同一视频带不同跟踪参数就算两条）。
      * 软删除过的不算，否则删掉再收藏同一链接会被自己挡住。
      */
-    suspend fun byUrl(url: String): Favorite? = favoritesDao.byUrl(url)?.let {
-        it.toDomain(tagsOf(it.id), videosDao.byFavorite(it.id)?.toDomain())
-    }
+    suspend fun byUrl(url: String): Favorite? = favoritesDao.byUrl(url)?.let { it.toDomain(tagsOf(it.id)) }
 
     private suspend fun tagsOf(favoriteId: String): List<Tag> {
         val ids = refDao.tagIdsFor(favoriteId)
@@ -85,14 +70,12 @@ class FavoritesRepository(
     suspend fun favoritesWithTag(tagId: Long): List<Favorite> {
         val ids = refDao.favoriteIdsForTag(tagId)
         if (ids.isEmpty()) return emptyList()
-        return favoritesDao.byIds(ids).map {
-            it.toDomain(tagsOf(it.id), videosDao.byFavorite(it.id)?.toDomain())
-        }
+        return favoritesDao.byIds(ids).map { it.toDomain(tagsOf(it.id)) }
     }
 
     /**
      * 悬浮面板「保存同步」落库：链接 + 备注 + 标签 + 来源 App + 收藏时间戳。
-     * 此时还没有任何内容信息，标题与素材清单由后台解析后回填。
+     * 内容信息要等这一条上传到后台之后才回来，此刻媒体列全空。
      */
     suspend fun create(
         url: String,
@@ -108,13 +91,12 @@ class FavoritesRepository(
             note = note.trim(),
             sourceApp = sourceApp.ifBlank { "未知来源" },
             favoriteAt = now,
-            bucket = "INBOX",
             badge = SyncBadge.QUEUED.name,
         )
         favoritesDao.upsert(row)
         if (tagIds.isNotEmpty()) refDao.insertAll(tagIds.map { FavoriteTagRow(id, it) })
         settings.ensureDeviceId()
-        return row.toDomain(tagsOf(id), video = null)
+        return row.toDomain(tagsOf(id))
     }
 
     suspend fun updateNote(id: String, note: String): Favorite? {
@@ -141,32 +123,27 @@ class FavoritesRepository(
         val row = favoritesDao.byId(id) ?: return
         val merged = LinkedHashMap(SegmentProgressCodec.decode(row.segmentProgress))
         merged[segmentIndex] = positionMs.coerceAtLeast(0L)
-        favoritesDao.saveProgress(id, positionMs, segmentIndex, SegmentProgressCodec.encode(merged))
+        favoritesDao.saveProgress(id, segmentIndex, SegmentProgressCodec.encode(merged))
     }
 
     suspend fun setLastSegment(id: String, segmentIndex: Int) = favoritesDao.setLastSegment(id, segmentIndex)
 
     suspend fun setLocallyCached(id: String, cached: Boolean) = favoritesDao.setLocallyCached(id, cached)
 
-    /** 后台解析回来的内容信息，原样缓存；本地不派生任何标题 */
-    suspend fun saveVideos(dtos: List<VideoDto>) {
-        val rows = dtos.filter { it.favoriteId.isNotBlank() }.map { it.toRow() }
-        if (rows.isNotEmpty()) videosDao.upsertAll(rows)
-    }
-
     /**
-     * 云端分页入库：按 id/url 去重，历史收藏不重复落本地。
+     * 后台响应入库：每条收藏都自带解析结果。
      *
-     * 服务端是事实来源，本地这张表只是它的一页页缓存（滚到底再取下一页），
-     * 所以同一批数据被重复取回是常态，不是异常。
+     * - 本地已有这条：只用 media 覆盖内容列，用户产生的数据、上传状态、播放进度一概不动 ——
+     *   这一条可能正排在队列里等着上传，被远端旧字段覆盖会把用户的改动吃掉。
+     * - 本地没有：整条落库，标 SYNCED（它是从后台来的，没有未上传的改动）。
      *
      * **逐条 try**：后台多来一条脏数据（url 为空、字段对不上）原本会把整批入库带崩，
      * 而这条调用链上层原本没有任何异常隔离，App 直接退出。现在一条坏数据只丢那一条，
      * 计数如实回给界面，用户看得见「跳过了几条」。
      */
-    suspend fun importRemote(favorites: List<FavoriteDto>, videos: List<VideoDto>): ImportReport {
-        val videosOk = runGuarded { saveVideos(videos) }.isSuccess
+    suspend fun importRemote(favorites: List<FavoriteDto>): ImportReport {
         var imported = 0
+        var refreshed = 0
         var skipped = 0
         var broken = 0
         for (dto in favorites) {
@@ -175,33 +152,36 @@ class FavoritesRepository(
                 continue
             }
             val outcome = runGuarded {
-                if (favoritesDao.byId(dto.id) != null || favoritesDao.byUrl(dto.url) != null) {
-                    return@runGuarded false
+                val existing = favoritesDao.byId(dto.id) ?: favoritesDao.byUrl(dto.url)
+                if (existing == null) {
+                    val row = FavoriteRow(
+                        id = dto.id.ifBlank { UUID.randomUUID().toString() },
+                        url = dto.url,
+                        note = dto.note,
+                        sourceApp = dto.sourceApp,
+                        favoriteAt = dto.favoriteAt,
+                        badge = SyncBadge.SYNCED.name,
+                    ).withMedia(dto.media)
+                    favoritesDao.upsert(row)
+                    if (dto.tags.isNotEmpty()) {
+                        val ids = dto.tags.mapNotNull { name -> tagsDao.byName(name)?.id }.distinct()
+                        if (ids.isNotEmpty()) refDao.insertAll(ids.map { FavoriteTagRow(row.id, it) })
+                    }
+                    true
+                } else {
+                    // 已有条目只在后台真给了内容信息时才写：DELETE 的回执不带 media，
+                    // 补一次空 UPDATE 等于每页白多 50 次磁盘写
+                    if (dto.media != null) favoritesDao.upsert(existing.withMedia(dto.media))
+                    false
                 }
-                val row = FavoriteRow(
-                    id = dto.id.ifBlank { UUID.randomUUID().toString() },
-                    url = dto.url,
-                    note = dto.note,
-                    sourceApp = dto.sourceApp,
-                    favoriteAt = dto.favoriteAt,
-                    lastPositionMs = dto.lastPositionMs,
-                    bucket = dto.bucket,
-                    badge = SyncBadge.SYNCED.name,
-                )
-                favoritesDao.upsert(row)
-                if (dto.tags.isNotEmpty()) {
-                    val ids = dto.tags.mapNotNull { name -> tagsDao.byName(name)?.id }.distinct()
-                    if (ids.isNotEmpty()) refDao.insertAll(ids.map { FavoriteTagRow(row.id, it) })
-                }
-                true
             }
             when {
                 outcome.isFailure -> broken++
                 outcome.getOrDefault(false) -> imported++
-                else -> skipped++
+                else -> refreshed++
             }
         }
-        return ImportReport(imported, skipped, broken, videosOk)
+        return ImportReport(imported, refreshed, skipped, broken)
     }
 
     /**
@@ -217,60 +197,56 @@ class FavoritesRepository(
             Result.failure(dirty)
         }
 
-    private fun VideoDto.toRow() = VideoInfoRow(
-        favoriteId = favoriteId,
-        title = title,
-        coverUrl = coverUrl,
-        author = author,
-        site = site,
-        durationMs = durationMs,
-        playUrl = playUrl,
-        quality = quality,
-        resolvedAt = resolvedAt,
-        status = status.uppercase(),
-        error = error,
-        isMockSource = isMockSource,
-        summary = summary.ifBlank { null },
-        mediaJson = MediaCodec.encode(media),
-    )
+    /** 解析结果整体覆盖内容列：后台给了什么就是什么，本地不合并、不保留旧标题 */
+    private fun FavoriteRow.withMedia(media: MediaDto?): FavoriteRow {
+        if (media == null) return this
+        return FavoriteRow(
+            id = id,
+            url = url,
+            note = note,
+            sourceApp = sourceApp,
+            favoriteAt = favoriteAt,
+            title = media.title,
+            author = media.author,
+            site = media.site,
+            summary = media.summary,
+            segmentsJson = MediaCodec.encode(media.segments),
+            failedReason = media.failedReason,
+            resolvedAt = media.resolvedAt,
+            badge = badge,
+            locallyCached = locallyCached,
+            updatedAt = updatedAt,
+            deletedAt = deletedAt,
+            segmentProgress = segmentProgress,
+            lastSegmentIndex = lastSegmentIndex,
+        )
+    }
 
-    private fun VideoInfoRow.toDomain() = VideoInfo(
-        favoriteId = favoriteId,
-        title = title,
-        coverUrl = coverUrl,
-        author = author,
-        site = site,
-        durationMs = durationMs,
-        playUrl = playUrl,
-        quality = quality,
-        resolvedAt = resolvedAt,
-        status = runCatching { ResolveStatus.valueOf(status) }.getOrDefault(ResolveStatus.PENDING),
-        error = error,
-        isMockSource = isMockSource,
-        summary = summary.orEmpty(),
-        media = MediaCodec.decode(mediaJson),
-    )
-
-    private fun FavoriteRow.toDomain(tags: List<Tag>, video: VideoInfo?) = Favorite(
+    private fun FavoriteRow.toDomain(tags: List<Tag>) = Favorite(
         id = id,
         url = url,
         note = note,
         sourceApp = sourceApp,
         favoriteAt = favoriteAt,
-        lastPositionMs = lastPositionMs,
-        badge = runCatching { SyncBadge.valueOf(badge) }.getOrDefault(SyncBadge.LOCAL_ONLY),
+        title = title,
+        author = author,
+        site = site,
+        summary = summary,
+        segments = MediaCodec.decode(segmentsJson),
+        failedReason = failedReason,
+        resolvedAt = resolvedAt,
+        badge = runCatching { SyncBadge.valueOf(badge) }.getOrDefault(SyncBadge.QUEUED),
         locallyCached = locallyCached,
         tags = tags,
-        video = video,
         segmentProgress = SegmentProgressCodec.decode(segmentProgress),
         lastSegmentIndex = lastSegmentIndex ?: 0,
     )
 }
 
-/** 一次回填的账目：入库几条、已在本地跳过几条、脏数据跳过几条、视频信息有没有落下来 */
+/** 一次后台响应的入库账目：新增几条、刷新几条、脏数据与空链接各跳过几条 */
 data class ImportReport(
     val imported: Int,
+    val refreshed: Int,
     val skipped: Int,
     val broken: Int,
-    val videosSaved: Boolean,
 )

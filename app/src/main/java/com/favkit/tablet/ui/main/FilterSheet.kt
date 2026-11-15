@@ -106,13 +106,13 @@ fun FilterSheet(
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(scale.gapXs)) {
                             TabletTagChip(
-                                label = if (state.unsynced > 0) "仅看未同步 · ${state.unsynced}" else "仅看未同步",
+                                label = "仅看未同步",
                                 selected = state.filter.onlyUnsynced,
                                 onClick = { viewModel.showUnsyncedOnly(!state.filter.onlyUnsynced) },
                                 minHeight = scale.touchMin,
                             )
                             Spacer(Modifier.weight(1f))
-                            if (state.unsynced > 0 || state.queued > 0) {
+                            if (state.queued > 0) {
                                 Button(
                                     onClick = viewModel::retrySyncNow,
                                     modifier = Modifier.heightIn(min = scale.touchMin),

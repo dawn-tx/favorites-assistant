@@ -8,7 +8,11 @@ import com.favkit.tablet.data.OpType
 import com.favkit.tablet.data.SyncBadge
 
 /**
- * 用户产生的数据。标题、封面、时长、播放地址不在这里 —— 那些属于 [VideoInfoRow]，由后台给出。
+ * 一条收藏 = 一张表里的一行：用户产生的数据 ＋ 后台解析回来的内容信息。
+ *
+ * 后台保存与解析是同一次调用完成的，解析结果本来就来在收藏响应里，没有理由再拆一张表、
+ * 再让界面去数「有没有解析完」。早期版本拆成 favorites/video_info 两张，是因为那时以为
+ * 解析是异步的 —— 那个前提不成立，两侧就各多出一套状态、一套计数、一个轮询接口。
  */
 @Entity(
     tableName = "favorites",
@@ -16,58 +20,35 @@ import com.favkit.tablet.data.SyncBadge
 )
 data class FavoriteRow(
     @PrimaryKey val id: String,
+
+    // —— 以下四项是用户上传的内容，也是上传载荷里唯一的字段 ——
     val url: String,
     val note: String,
     val sourceApp: String,
     val favoriteAt: Long,
-    val lastPositionMs: Long = 0L,
-    /** 协议透传字段：App 已不做归档分类，一律写 INBOX；留着是为了不改表、不影响老数据 */
-    val bucket: String,
-    val badge: String = SyncBadge.LOCAL_ONLY.name,
+
+    // —— 以下是后台解析回来的内容信息，本地只当缓存，一律以后台为准 ——
+    val title: String = "",
+    val author: String = "",
+    val site: String = "",
+    /** 后台写的一句说明，卡片与遮罩层的内容主体 */
+    val summary: String = "",
+    /** 素材清单（List<SegmentDto> 序列化后的 JSON）；空表示后台没解析出可看可播的东西 */
+    val segmentsJson: String? = null,
+    /** 非空表示后台解析这条链接失败了，这里就是给用户看的原因 */
+    val failedReason: String = "",
+    val resolvedAt: Long = 0L,
+
+    // —— 以下是纯本地状态，不参与上传 ——
+    val badge: String = SyncBadge.QUEUED.name,
     val locallyCached: Boolean = false,
     val updatedAt: Long = System.currentTimeMillis(),
     /** 软删除时间：非空表示已标记删除，等待后台补传后物理清除 */
     val deletedAt: Long? = null,
-    /** 「段号:毫秒」逗号分隔的段级进度；见 SegmentProgressCodec。纯本地，不上传 */
+    /** 「段号:毫秒」逗号分隔的段级进度；见 SegmentProgressCodec */
     val segmentProgress: String? = null,
     /** 上次停在第几段 */
     val lastSegmentIndex: Int? = null,
-)
-
-/**
- * 后台解析内容的元数据缓存；离线时靠它继续展示列表与说明文案。
- *
- * [summary] 与 [mediaJson] 声明成可空而不是带默认值的非空，迁移就能写成不带 DEFAULT 的
- * `ALTER TABLE ADD COLUMN` —— Room 生成的建表语句里也没有 DEFAULT，两边逐字对得上。
- */
-@Entity(
-    tableName = "video_info",
-    foreignKeys = [
-        ForeignKey(
-            entity = FavoriteRow::class,
-            parentColumns = ["id"],
-            childColumns = ["favoriteId"],
-            onDelete = ForeignKey.CASCADE,
-        ),
-    ],
-)
-data class VideoInfoRow(
-    @PrimaryKey val favoriteId: String,
-    val title: String = "",
-    val coverUrl: String = "",
-    val author: String = "",
-    val site: String = "",
-    val durationMs: Long = 0L,
-    val playUrl: String = "",
-    val quality: String = "",
-    val resolvedAt: Long = 0L,
-    val status: String = com.favkit.tablet.data.ResolveStatus.PENDING.name,
-    val error: String = "",
-    val isMockSource: Boolean = false,
-    /** 后台给的说明文案，卡片与遮罩层的内容主体 */
-    val summary: String? = null,
-    /** 素材清单（List<MediaDto> 序列化后的 JSON）；为空表示后台只给了单个视频 */
-    val mediaJson: String? = null,
 )
 
 @Entity(tableName = "tags", indices = [Index(value = ["name"], unique = true)])

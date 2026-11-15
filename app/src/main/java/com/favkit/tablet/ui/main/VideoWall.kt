@@ -44,10 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.favkit.tablet.core.TabletScale
-import com.favkit.tablet.data.ResolveStatus
 import com.favkit.tablet.ui.components.ConfirmDialog
-import com.favkit.tablet.ui.components.FavColors
-import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.util.ClipboardBridge
 import com.favkit.tablet.util.VideoLinkDetector
 
@@ -217,11 +214,6 @@ private fun WallFooter(text: String, loading: Boolean, scale: TabletScale) {
 
 @Composable
 private fun WallHeader(state: MainUiState, viewModel: MainViewModel, scale: TabletScale) {
-    val pending = state.items.count {
-        it.video == null || it.video?.status == ResolveStatus.PENDING
-    }
-    val failed = state.items.count { it.video?.status == ResolveStatus.FAILED }
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -240,11 +232,6 @@ private fun WallHeader(state: MainUiState, viewModel: MainViewModel, scale: Tabl
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
         )
-        if (state.resolving) {
-            StatusPill("正在取解析结果", FavColors.accent)
-        }
-        if (pending > 0) StatusPill("待解析 $pending", FavColors.warn)
-        if (failed > 0) StatusPill("解析失败 $failed", FavColors.fail)
         Spacer(Modifier.weight(1f))
         if (state.filter.active) {
             TextButton(
