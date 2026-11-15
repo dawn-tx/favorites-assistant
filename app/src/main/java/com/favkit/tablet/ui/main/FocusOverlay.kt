@@ -740,7 +740,7 @@ private fun StageArea(
     modifier: Modifier = Modifier,
 ) {
     if (favorite.segments.isEmpty()) {
-        UnresolvedStage(favorite, modifier)
+        UnresolvedStage(favorite, scale, modifier)
     } else {
         FocusStage(
             viewModel = viewModel,
@@ -762,7 +762,7 @@ private fun StageArea(
  * 只有失败时才冒出来的入口，用户根本不知道自己错过了它。
  */
 @Composable
-private fun UnresolvedStage(favorite: Favorite, modifier: Modifier = Modifier) {
+private fun UnresolvedStage(favorite: Favorite, scale: TabletScale, modifier: Modifier = Modifier) {
     val failed = favorite.failedReason.isNotBlank()
     Column(
         modifier = modifier

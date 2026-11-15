@@ -8,8 +8,8 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 8
-code: 9c2b5a0
-note: 9c2b5a0 那次动了 22 个文件：Room 从两张表合成 v4 单表、DTO 全换（删掉 VideoInfo/ResolveStatus）、
-      MainViewModel 整篇重写、遮罩层新增 StepEdge 手势条并把 body 换成 Row 嵌套。
-      这些都是没跑过编译的改动，本地也没有 Gradle，只能靠云端这一次把类型与 API 调用全查一遍。
+build: 9
+code: 3b719c7
+note: 上一轮（build 8，run 43749014741）红了，就两条真错：FocusOverlay 的 UnresolvedStage 用了
+      scale.gapMd/scale.gapSm，但函数签名里没有 scale 这个参数（StageArea 有，忘了往下传）。
+      同一提交里补上参数并 bump，这一次改动与 bump 一起走，不再分两个提交。
