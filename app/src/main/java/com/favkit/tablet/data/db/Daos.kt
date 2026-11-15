@@ -56,6 +56,14 @@ interface FavoritesDao {
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL")
     suspend fun cachedCount(): Int
 
+    /** 存储明细用：含墓碑的总行数，才能分清「字节是活数据占的还是没传掉的删除标记占的」 */
+    @Query("SELECT COUNT(*) FROM favorites")
+    suspend fun rowCountAll(): Int
+
+    /** 存储明细用：标了删除但还没被后台确认、因此仍留在表里的那些行 */
+    @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NOT NULL")
+    suspend fun tombstoneCount(): Int
+
     /** 同一个数的可订阅版本：计数条要跟着补页变，不能只在启动时查一次 */
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL")
     fun observeCachedCount(): Flow<Int>

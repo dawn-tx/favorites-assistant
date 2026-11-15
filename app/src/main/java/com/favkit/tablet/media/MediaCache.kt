@@ -62,6 +62,9 @@ class MediaCache(context: Context, private val settings: AppSettings) {
 
     fun mediaSourceFactory(): MediaSource.Factory = DefaultMediaSourceFactory(cachedFactory)
 
+    /** blob 落在 externalCacheDir 还是内部 cacheDir 由系统给不给外部目录决定，探针要量的是同一个路径 */
+    fun cacheRootPath(): String = cacheDir.absolutePath
+
     fun buildPlayer(): ExoPlayer = ExoPlayer.Builder(appContext)
         .setMediaSourceFactory(mediaSourceFactory())
         .build()

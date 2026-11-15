@@ -26,13 +26,16 @@ abstract class AppDatabase : RoomDatabase() {
 
     companion object {
 
+        /** 库名写在这儿，存储探针才能自己去量它的 -wal / -shm，不用调用方再抄一遍字符串 */
+        const val DB_NAME = "favorites.db"
+
         /**
          * 还在开发期，表结构改动按「清库重新从后台取」处理，不写迁移：
          * v4 把 video_info 合进 favorites，本地收藏与解析结果都能由后台一键重放，
          * 迁移反而要猜中 Room 生成的 DDL —— 云端 CI 只编译、从不跑迁移，猜错就是装机即崩。
          */
         fun build(context: Context): AppDatabase =
-            Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "favorites.db")
+            Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, DB_NAME)
                 .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
                 .fallbackToDestructiveMigration()
                 .build()

@@ -1,6 +1,7 @@
 package com.favkit.tablet.di
 
 import android.app.Application
+import com.favkit.tablet.core.StorageProbe
 import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.data.FavoritesRepository
 import com.favkit.tablet.data.TagsRepository
@@ -24,6 +25,7 @@ class AppGraph private constructor(private val app: Application) {
     val connectivity: Connectivity by lazy { Connectivity(app) }
     val media: MediaCache by lazy { MediaCache(app, settings) }
     val player: TabletPlayer by lazy { TabletPlayer(media) }
+    val storage: StorageProbe by lazy { StorageProbe(app, db, media) }
 
     val gate: SyncGate by lazy { SyncGate() }
     val api: SyncApi by lazy { SyncApi(settings, gate) }

@@ -8,8 +8,9 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 9
-code: 3b719c7
-note: 上一轮（build 8，run 43749014741）红了，就两条真错：FocusOverlay 的 UnresolvedStage 用了
-      scale.gapMd/scale.gapSm，但函数签名里没有 scale 这个参数（StageArea 有，忘了往下传）。
-      同一提交里补上参数并 bump，这一次改动与 bump 一起走，不再分两个提交。
+build: 10
+code: 49966c8
+note: 这轮加的是存储明细探针（core/StorageProbe + 设置页入口 + favorites 表两个计数查询 +
+      MediaCache.cacheRootPath），目的是让用户数据「清完缓存还剩 2MB」这件事能用设备上的真实
+      字节定位，而不是我在这儿按每行几 KB 估。Room 只做只读计数，库名挪成 AppDatabase.DB_NAME 常量，
+      schema 与 version 都没动。

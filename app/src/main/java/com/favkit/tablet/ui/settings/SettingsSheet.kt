@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -360,6 +362,46 @@ fun SettingsSheet(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    }
+                }
+
+                Cardish(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(scale.gapSm),
+                        verticalArrangement = Arrangement.spacedBy(scale.gapXs),
+                    ) {
+                        SectionTitle("存储明细")
+                        Text(
+                            "只读地量一遍本应用的私有目录，用来对着系统「设置 → 应用 → 存储」那两个数核字节。" +
+                                "每个文件两列：表观 = 文件长度，占盘 = 实际占的磁盘块，后者才是系统那个口径。" +
+                                "测量不删不改，长按结果可选中复制。",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(
+                            onClick = viewModel::measureStorage,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = scale.touchMin),
+                        ) {
+                            Text(if (state.storageReport == null) "测量存储占用" else "重新测量")
+                        }
+                        state.storageReport?.let { report ->
+                            SelectionContainer {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 380.dp)
+                                        .verticalScroll(rememberScrollState()),
+                                ) {
+                                    Text(
+                                        text = report,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

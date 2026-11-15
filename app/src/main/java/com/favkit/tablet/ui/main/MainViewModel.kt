@@ -56,6 +56,8 @@ data class MainUiState(
     val failed: Int = 0,
     val cacheBytes: Long = 0L,
     val prefetch: Map<String, Long> = emptyMap(),
+    /** 设置页「存储明细」最近一次测量的原文；null = 还没测过 */
+    val storageReport: String? = null,
     /** 上传器在等后台响应：顶栏按钮用它区分「正在排队」和「点了没用」 */
     val syncing: Boolean = false,
     /** 正在从后台取下一页收藏 */
@@ -104,6 +106,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private val messageFlow = MutableStateFlow<String?>(null)
     private val cacheBytesFlow = MutableStateFlow(0L)
     private val prefetchFlow = MutableStateFlow<Map<String, Long>>(emptyMap())
+    private val storageFlow = MutableStateFlow<String?>(null)
 
     private class PrefetchHandle {
         @Volatile
@@ -149,6 +152,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { messageFlow.collect { v -> _state.update { it.copy(message = v) } } }
         viewModelScope.launch { cacheBytesFlow.collect { v -> _state.update { it.copy(cacheBytes = v) } } }
         viewModelScope.launch { prefetchFlow.collect { v -> _state.update { it.copy(prefetch = v) } } }
+        viewModelScope.launch { storageFlow.collect { v -> _state.update { it.copy(storageReport = v) } } }
         viewModelScope.launch { graph.sync.running.collect { v -> _state.update { it.copy(syncing = v) } } }
         viewModelScope.launch { graph.player.state.collect { v -> _state.update { it.copy(player = v) } } }
         viewModelScope.launch { graph.settings.snapshot.collect { v -> _state.update { it.copy(settings = v) } } }
@@ -577,6 +581,12 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             cacheBytesFlow.value = 0L
             messageFlow.value = "本地视频缓存已清空（收藏记录不受影响）"
         }
+    }
+
+    /** 只读量一遍私有目录，结果原样铺在设置页里，用来对着系统「存储」那页核数 */
+    fun measureStorage() {
+        storageFlow.value = "测量中…"
+        viewModelScope.launch { storageFlow.value = graph.storage.report() }
     }
     // endregion
 
