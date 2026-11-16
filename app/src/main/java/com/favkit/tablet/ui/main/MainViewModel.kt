@@ -652,6 +652,13 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         graph.player.release()
         graph.media.applyLimitFromSettings()
     }
+
+    /** 图片缓存改上限会换掉整个 Coil loader，正在屏上的图会重新解码一次；不动播放器 */
+    fun setImageCacheLimitMb(value: Long) = viewModelScope.launch {
+        graph.settings.setImageCacheLimitMb(value)
+        graph.images.applyLimitFromSettings()
+        imageBytesFlow.value = graph.images.cachedBytes()
+    }
     // endregion
 
     // region 面板复用（分享入口 / 无悬浮窗权限时的主 App 内收藏）

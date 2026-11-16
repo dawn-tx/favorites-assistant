@@ -25,7 +25,7 @@ class AppGraph private constructor(private val app: Application) {
     val favorites: FavoritesRepository by lazy { FavoritesRepository(db, settings) }
     val connectivity: Connectivity by lazy { Connectivity(app) }
     val media: MediaCache by lazy { MediaCache(app, settings) }
-    val images: ImageStore by lazy { ImageStore(app) }
+    val images: ImageStore by lazy { ImageStore(app, settings) }
     val player: TabletPlayer by lazy { TabletPlayer(media) }
     val storage: StorageProbe by lazy { StorageProbe(app, db, media) }
 

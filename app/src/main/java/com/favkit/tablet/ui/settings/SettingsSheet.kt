@@ -38,7 +38,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.floating.FloatingAssistantService
-import com.favkit.tablet.media.ImageStore
 import com.favkit.tablet.ui.components.Cardish
 import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
@@ -51,6 +50,7 @@ import com.favkit.tablet.ui.main.MainUiState
 import com.favkit.tablet.ui.main.MainViewModel
 
 private val CACHE_LIMITS_MB = listOf(128L, 256L, 512L, 1024L, 2048L)
+private val IMAGE_CACHE_LIMITS_MB = listOf(32L, 64L, 128L, 256L, 512L)
 private val UPLOAD_INTERVAL_PRESETS = listOf(0L, 1_000L, 3_000L, 10_000L, 30_000L)
 
 /** 后台 setUploadIntervalMs 会再夹一次，这里先按同一个范围挡掉脏输入 */
@@ -337,9 +337,13 @@ fun SettingsSheet(
                         )
                         InfoLine(
                             "图片缓存占用",
-                            formatBytes(state.imageBytes) + " / ${ImageStore.MAX_BYTES_MB}MB",
+                            formatBytes(state.imageBytes) + " / ${settings.imageCacheLimitMb}MB",
                         )
                         SectionTitle("缓存上限")
+                        Text(
+                            "视频缓存",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
@@ -351,6 +355,24 @@ fun SettingsSheet(
                                     scale = scale,
                                     modifier = Modifier.weight(1f),
                                     onClick = { viewModel.setCacheLimitMb(limit) },
+                                )
+                            }
+                        }
+                        Text(
+                            "图片缓存",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                        ) {
+                            IMAGE_CACHE_LIMITS_MB.forEach { limit ->
+                                ChoiceButton(
+                                    label = "${limit}MB",
+                                    selected = settings.imageCacheLimitMb == limit,
+                                    scale = scale,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setImageCacheLimitMb(limit) },
                                 )
                             }
                         }
@@ -377,7 +399,8 @@ fun SettingsSheet(
                         }
                         Text(
                             "清空只删本地缓存文件，收藏记录、备注和标签都不受影响。删掉某条收藏时它自己的图片和视频段会立刻回收，" +
-                                "这两个按钮管的是剩下的：视频缓存受上面「缓存上限」约束，图片缓存固定 32MB 到量就自动淘汰最旧的。",
+                                "这两个按钮管的是剩下的：视频和图片缓存各自受上面「缓存上限」约束，到量自动淘汰最旧的。" +
+                                "改图片上限会换掉整个图片加载器，正在屏上的图会闪一下重新加载。",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
