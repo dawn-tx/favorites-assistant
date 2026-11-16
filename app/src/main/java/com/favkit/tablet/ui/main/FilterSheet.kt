@@ -213,14 +213,24 @@ fun FilterSheet(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
                 ) {
-                    Text(
-                        text = "本地缓存占用 ${formatBytes(state.cacheBytes)}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
+                    // 合计走视频 + 图片两个目录，拆开那行小字留在下面：只报一个数，用户没法知道
+                    // 是播放器存的还是封面图存的，也就不知道去设置里该点哪个「清空」
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "本地缓存占用 ${formatBytes(state.cacheBytesTotal)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "视频 ${formatBytes(state.cacheBytes)} · 图片 ${formatBytes(state.imageBytes)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     if (state.items.isEmpty()) {
                         TextButton(
                             onClick = viewModel::pullFromServer,

@@ -75,10 +75,14 @@ class MediaCache(context: Context, private val settings: AppSettings) {
      * 不用索引汇总（`keys` + `getCachedSpans`）：系统「清除缓存」或厂商清理会直接删掉 blob 文件，
      * 而 `exoplayer_internal.db` 里的 span 记录还在，按索引报数就会出现
      * 「磁盘上什么都没有、app 里显示还剩一堆」，并且只有重启后才换一个数。
+     *
+     * 遍历放在 IO 线程：启动、打开设置、打开筛选抽屉都要现量一次，主线程上走磁盘就是那一下的卡顿。
      */
-    fun totalCachedBytes(): Long = runCatching {
-        cacheDir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
-    }.getOrDefault(0L)
+    suspend fun totalCachedBytes(): Long = withContext(Dispatchers.IO) {
+        runCatching {
+            cacheDir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+        }.getOrDefault(0L)
+    }
 
     /**
      * 把一条链接留下的视频字节要回来。

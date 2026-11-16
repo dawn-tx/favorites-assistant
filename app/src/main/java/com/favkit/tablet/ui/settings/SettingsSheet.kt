@@ -331,8 +331,9 @@ fun SettingsSheet(
                                 )
                             }
                         }
+                        // 这里按目录分开报；「本地缓存占用」那个词在筛选抽屉里是两者合计，别再复用
                         InfoLine(
-                            "本地缓存占用",
+                            "视频缓存占用",
                             formatBytes(state.cacheBytes) + " / ${settings.cacheLimitMb}MB",
                         )
                         InfoLine(

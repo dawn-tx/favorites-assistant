@@ -58,6 +58,8 @@ data class MainUiState(
     val cacheBytes: Long = 0L,
     /** 图片磁盘缓存（Coil）实际占用，与视频缓存分开记：两者落在不同目录、清法也不同 */
     val imageBytes: Long = 0L,
+    /** 筛选抽屉那行说的是「一共占了多少」，所以两个目录加起来报；设置页仍按目录分开列 */
+    val cacheBytesTotal: Long get() = cacheBytes + imageBytes,
     val prefetch: Map<String, Long> = emptyMap(),
     /** 设置页「存储明细」最近一次测量的原文；null = 还没测过 */
     val storageReport: String? = null,
@@ -131,7 +133,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     init {
         viewModelScope.launch { graph.tags.ensurePresets() }
         bindFlows()
-        cacheBytesFlow.value = graph.media.totalCachedBytes()
+        viewModelScope.launch { cacheBytesFlow.value = graph.media.totalCachedBytes() }
         seedRemoteCache()
     }
 
@@ -260,9 +262,18 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         focusFlow.value = null
     }
 
-    /** 筛选与标签管理收进顶栏抽屉；遮罩层打开时顶栏收起，所以抽屉只从墙上打开 */
+    /**
+     * 筛选与标签管理收进顶栏抽屉；遮罩层打开时顶栏收起，所以抽屉只从墙上打开。
+     * 底部那行报的是两个缓存目录之和，打开时一起重新量：图片字节没有别的回调时机，冷启动也没量过。
+     */
     fun showFilters(value: Boolean) {
         filtersFlow.value = value
+        if (value) {
+            viewModelScope.launch {
+                cacheBytesFlow.value = graph.media.totalCachedBytes()
+                imageBytesFlow.value = graph.images.cachedBytes()
+            }
+        }
     }
 
     /** 分段条点击、媒体区左右滑动都走这里；[FocusUiState.playerKey] 让每段各自记住看到哪 */
