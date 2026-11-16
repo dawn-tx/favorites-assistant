@@ -58,8 +58,6 @@ data class MainUiState(
     val cacheBytes: Long = 0L,
     /** 图片磁盘缓存（Coil）实际占用，与视频缓存分开记：两者落在不同目录、清法也不同 */
     val imageBytes: Long = 0L,
-    /** 筛选抽屉那行说的是「一共占了多少」，所以两个目录加起来报；设置页仍按目录分开列 */
-    val cacheBytesTotal: Long get() = cacheBytes + imageBytes,
     val prefetch: Map<String, Long> = emptyMap(),
     /** 设置页「存储明细」最近一次测量的原文；null = 还没测过 */
     val storageReport: String? = null,
@@ -98,6 +96,9 @@ data class MainUiState(
      * 说成还没取回的话。后台没上报总数（[remoteTotal] 为 0）时同样不算部分。
      */
     val cachePartial: Boolean get() = remoteHasMore && remoteTotal > cachedTotal
+
+    /** 筛选抽屉那行说的是「一共占了多少」，所以两个目录加起来报；设置页仍按目录分开列 */
+    val cacheBytesTotal: Long get() = cacheBytes + imageBytes
 }
 
 class MainViewModel private constructor(private val graph: AppGraph) : ViewModel() {

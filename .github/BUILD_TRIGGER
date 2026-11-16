@@ -9,12 +9,15 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 15
-code: 6c5bfbf
-note: 换条的触发位置按设备实测改：竖向 pager 的嵌套滚动在信息栏滚到头时不交接（build 14 的假设错了），
+build: 16
+code: 45aa483
+note: build 15 挂在 MainViewModel：派生属性 cacheBytesTotal 被写进了 data class 的主构造函数参数表，
+      构造参数不能带 get()，解析器从那一行起把整份文件读断了（kspDebugKotlin / kspReleaseKotlin FAILED）。
+      属性挪回类体，和 cachePartial、pendingSync 那几个派生口径放一起。下面两件是 15 本来要出的内容。
+      一、换条的触发位置按设备实测改：竖向 pager 的嵌套滚动在信息栏滚到头时不交接（build 14 的假设错了），
       所以把遮罩层原来那条水平边距改成两条 StepMargin 手势带（宽 = edgeInset，内容宽度不变），
       上下抹一下只把 pager 推一页，走的是媒体区同一套吸附动画、同一个 snapshotFlow 落定装载；
       媒体区里直接抹仍然照用。淡箭头是提示不是按钮。
-      另外筛选抽屉底部的「本地缓存占用」改报视频 + 图片两个目录之和（下面小字按目录拆开），抽屉打开时
+      二、筛选抽屉底部的「本地缓存占用」改报视频 + 图片两个目录之和（下面小字按目录拆开），抽屉打开时
       一起重量两个数；为此 MediaCache.totalCachedBytes 改 suspend + Dispatchers.IO（原来启动/开设置
       都在主线程遍历目录）。设置页那行同步改名「视频缓存占用」，同一个词不再有两个意思。
