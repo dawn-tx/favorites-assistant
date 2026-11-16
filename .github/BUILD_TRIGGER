@@ -8,7 +8,12 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 11
-code: 735b879
-note: 上一轮（run 43773161476）只有一条真错：StorageProbe 里把 walkBottomUp 当属性写了
-      （dir.walkBottomUp.filter），它是函数，得带括号。同一提交里补括号并 bump，把探针真正编译过一遍。
+build: 12
+code: 6ae047b
+note: 探针出包后按实测结果改存储占用这一件事，三处一起：Room journal 从 WAL 换成 TRUNCATE
+      （实测空库也占 454,656 字节的 -wal/-shm，全应用单进程、写又被 SyncGate 串行，WAL 的并发用不上）；
+      清空视频缓存改用 SimpleCache.delete 连 media3 索引一起删，设置里的「本地缓存占用」口径改成数目录里的
+      真实字节（旧口径数索引，ROM 清过缓存后会显示一堆根本不存在的字节）；新增 ImageStore 把 Coil 图片缓存
+      上限从默认的「2% 分区、平板上等于 250MB」收到 32MB，删收藏时按 URL 精确回收图片和视频段，
+      设置页加「图片缓存占用」与「清空图片缓存」。探针里 [DataStore] 原本指向 dataDir/datastore，
+      实测在 files/datastore，一并修正。

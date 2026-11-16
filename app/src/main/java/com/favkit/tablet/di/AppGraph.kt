@@ -6,6 +6,7 @@ import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.data.FavoritesRepository
 import com.favkit.tablet.data.TagsRepository
 import com.favkit.tablet.data.db.AppDatabase
+import com.favkit.tablet.media.ImageStore
 import com.favkit.tablet.media.MediaCache
 import com.favkit.tablet.media.TabletPlayer
 import com.favkit.tablet.net.SyncApi
@@ -24,6 +25,7 @@ class AppGraph private constructor(private val app: Application) {
     val favorites: FavoritesRepository by lazy { FavoritesRepository(db, settings) }
     val connectivity: Connectivity by lazy { Connectivity(app) }
     val media: MediaCache by lazy { MediaCache(app, settings) }
+    val images: ImageStore by lazy { ImageStore(app) }
     val player: TabletPlayer by lazy { TabletPlayer(media) }
     val storage: StorageProbe by lazy { StorageProbe(app, db, media) }
 

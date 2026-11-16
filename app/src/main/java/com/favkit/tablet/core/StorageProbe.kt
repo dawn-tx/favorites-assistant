@@ -41,7 +41,8 @@ class StorageProbe(
             appendLine()
             appendLine(COLUMN_HEAD)
             dirSection("数据库", File(internalDir, "databases"))
-            dirSection("DataStore", File(internalDir, "datastore"))
+            // 实测 DataStore 落在 files/datastore 而不是 dataDir/datastore，指错了这里就永远量成「不存在」
+            dirSection("DataStore", File(app.filesDir, "datastore"))
             dirSection("files", File(internalDir, "files"))
             dirSection("no_backup", app.noBackupFilesDir)
             dirSection("shared_prefs", File(internalDir, "shared_prefs"))

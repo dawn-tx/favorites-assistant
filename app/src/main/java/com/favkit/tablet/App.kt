@@ -6,6 +6,7 @@ import androidx.work.Configuration
 import com.favkit.tablet.core.Notifications
 import com.favkit.tablet.di.AppGraph
 import com.favkit.tablet.di.GraphHolder
+import com.favkit.tablet.media.ImageStore
 
 class App : Application(), Configuration.Provider {
 
@@ -18,6 +19,8 @@ class App : Application(), Configuration.Provider {
         graph = AppGraph.of(this)
         GraphHolder.install(graph)
         Notifications.ensureChannels(this)
+        // 只登记一个工厂，真正建 loader 与碰磁盘都推到第一次图片请求，不占启动路径
+        ImageStore.install(this)
     }
 
     override val workManagerConfiguration: Configuration

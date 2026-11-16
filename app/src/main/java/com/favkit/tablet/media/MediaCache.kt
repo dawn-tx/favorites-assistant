@@ -69,10 +69,28 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         .setMediaSourceFactory(mediaSourceFactory())
         .build()
 
-    /** media3 的 Cache 只有按 key 查 span 的接口，没有总量 getter，所以逐个 key 汇总 */
+    /**
+     * 视频缓存的总量口径 = `media-v1` 目录里真实存在的字节。
+     *
+     * 不用索引汇总（`keys` + `getCachedSpans`）：系统「清除缓存」或厂商清理会直接删掉 blob 文件，
+     * 而 `exoplayer_internal.db` 里的 span 记录还在，按索引报数就会出现
+     * 「磁盘上什么都没有、app 里显示还剩一堆」，并且只有重启后才换一个数。
+     */
     fun totalCachedBytes(): Long = runCatching {
-        cache.keys.sumOf { key -> cache.getCachedSpans(key).sumOf { span -> span.length } }
+        cacheDir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
     }.getOrDefault(0L)
+
+    /**
+     * 把一条链接留下的视频字节要回来。
+     *
+     * 缓存键的来历（从 media3 1.4.1 的字节码看，不是推测）：`CacheDataSource` 用 `CacheKeyFactory.DEFAULT`
+     * 造键，它的实现是 `dataSpec.key != null ? dataSpec.key : dataSpec.uri.toString()`；本应用建 DataSpec
+     * 不设 key，播放器那条链也一样，所以键就是 URL 字符串本身。`removeResource` 只认这个键，
+     * 传收藏行里的原 URL 就正合适，别画蛇添足去 parse 一遍。
+     */
+    suspend fun evict(url: String) = withContext(Dispatchers.IO) {
+        runCatching { cache.removeResource(url) }
+    }
 
     /**
      * media3 的容量上限只能在建缓存时通过 evictor 定下，没有运行中改容量的接口，
@@ -91,11 +109,16 @@ class MediaCache(context: Context, private val settings: AppSettings) {
     }
 
     /**
-     * 清空整片视频缓存。SimpleCache 一旦 release 就不能再用，所以这里重建实例与工厂；
-     * 调用方必须先释放正在使用的播放器（见 MainViewModel.clearCache），新播放器会拿到新的工厂。
+     * 清空整片视频缓存：blob 与索引一起删。
+     *
+     * 之前只 `deleteRecursively` 缓存目录，`exoplayer_internal.db` 留在内部 storage 里，
+     * 实测清完之后它还占 8 万字节、且随每次清空继续涨 —— 那些记录指向已经不存在的文件。
+     * SimpleCache 的静态 delete 会连带删掉它建的索引库；实例 release 之后不能复用，
+     * 所以还要连同工厂一起重建，调用方必须先释放正在使用的播放器（见 MainViewModel.clearCache）。
      */
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         runCatching { cache.release() }
+        runCatching { SimpleCache.delete(cacheDir, StandaloneDatabaseProvider(appContext)) }
         runCatching { cacheDir.deleteRecursively() }
         limitBytes = settings.current().cacheLimitMb * MB
         cache = newCache(limitBytes)

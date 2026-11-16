@@ -6,6 +6,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.FavoriteFilter
+import com.favkit.tablet.data.MediaKind
 import com.favkit.tablet.data.SettingsSnapshot
 import com.favkit.tablet.data.Tag
 import com.favkit.tablet.di.AppGraph
@@ -55,6 +56,8 @@ data class MainUiState(
     /** 队列里重试耗尽/被后台拒绝、需要用户动手的那部分 */
     val failed: Int = 0,
     val cacheBytes: Long = 0L,
+    /** 图片磁盘缓存（Coil）实际占用，与视频缓存分开记：两者落在不同目录、清法也不同 */
+    val imageBytes: Long = 0L,
     val prefetch: Map<String, Long> = emptyMap(),
     /** 设置页「存储明细」最近一次测量的原文；null = 还没测过 */
     val storageReport: String? = null,
@@ -105,6 +108,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private val quickCollectFlow = MutableStateFlow(false)
     private val messageFlow = MutableStateFlow<String?>(null)
     private val cacheBytesFlow = MutableStateFlow(0L)
+    private val imageBytesFlow = MutableStateFlow(0L)
     private val prefetchFlow = MutableStateFlow<Map<String, Long>>(emptyMap())
     private val storageFlow = MutableStateFlow<String?>(null)
 
@@ -151,6 +155,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { quickCollectFlow.collect { v -> _state.update { it.copy(quickCollect = v) } } }
         viewModelScope.launch { messageFlow.collect { v -> _state.update { it.copy(message = v) } } }
         viewModelScope.launch { cacheBytesFlow.collect { v -> _state.update { it.copy(cacheBytes = v) } } }
+        viewModelScope.launch { imageBytesFlow.collect { v -> _state.update { it.copy(imageBytes = v) } } }
         viewModelScope.launch { prefetchFlow.collect { v -> _state.update { it.copy(prefetch = v) } } }
         viewModelScope.launch { storageFlow.collect { v -> _state.update { it.copy(storageReport = v) } } }
         viewModelScope.launch { graph.sync.running.collect { v -> _state.update { it.copy(syncing = v) } } }
@@ -278,8 +283,15 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         openFocus(items[target].id)
     }
 
+    /** 打开设置就把两个缓存数重新取一遍：在线边播边存的字节没有别的回调时机，等它自己刷新就是「要重启才对」 */
     fun showSettings(value: Boolean) {
         settingsFlow.value = value
+        if (value) {
+            viewModelScope.launch {
+                cacheBytesFlow.value = graph.media.totalCachedBytes()
+                imageBytesFlow.value = graph.images.cachedBytes()
+            }
+        }
     }
 
     fun consumeMessage() {
@@ -460,6 +472,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             checkedFlow.value = emptySet()
             closeFocus()
             messageFlow.value = "已删除 ${ids.size} 条，正在排队上传"
+            reclaim(ids)
         }
     }
 
@@ -469,6 +482,33 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.sync.queueDelete(listOf(id))
             closeFocus()
             messageFlow.value = "已删除，正在排队上传"
+            reclaim(listOf(id))
+        }
+    }
+
+    /**
+     * 删收藏顺手把它在本地留下的字节要回来：图片按 URL 精确删 Coil 那一份，视频段删
+     * SimpleCache 里那一份。软删的行按 id 照样读得到段信息，所以放在 markDeleted 之后调也来得及；
+     * 回收失败只影响字节，不能把删除本身挡下。
+     */
+    private suspend fun reclaim(ids: List<String>) {
+        runCatching {
+            val favorites = ids.mapNotNull { graph.favorites.byId(it) }
+            val images = favorites.flatMap { f ->
+                f.segments.flatMap { s ->
+                    listOfNotNull(
+                        s.url.takeIf { s.kind == MediaKind.IMAGE && it.isNotBlank() },
+                        s.coverUrl.takeIf { it.isNotBlank() },
+                    )
+                }
+            }
+            val videos = favorites.flatMap { f ->
+                f.segments.filter { it.kind == MediaKind.VIDEO }.map { it.url }
+            }
+            graph.images.evict(images)
+            videos.forEach { graph.media.evict(it) }
+            cacheBytesFlow.value = graph.media.totalCachedBytes()
+            imageBytesFlow.value = graph.images.cachedBytes()
         }
     }
 
@@ -580,6 +620,15 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.media.clearAll()
             cacheBytesFlow.value = 0L
             messageFlow.value = "本地视频缓存已清空（收藏记录不受影响）"
+        }
+    }
+
+    /** 图片缓存不碰播放器，Coil 自己按目录清；旧版本遗留的孤儿图只有这里能清掉 */
+    fun clearImageCache() {
+        viewModelScope.launch {
+            graph.images.clear()
+            imageBytesFlow.value = 0L
+            messageFlow.value = "图片缓存已清空（收藏记录不受影响）"
         }
     }
 

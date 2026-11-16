@@ -38,6 +38,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.floating.FloatingAssistantService
+import com.favkit.tablet.media.ImageStore
 import com.favkit.tablet.ui.components.Cardish
 import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
@@ -334,6 +335,10 @@ fun SettingsSheet(
                             "本地缓存占用",
                             formatBytes(state.cacheBytes) + " / ${settings.cacheLimitMb}MB",
                         )
+                        InfoLine(
+                            "图片缓存占用",
+                            formatBytes(state.imageBytes) + " / ${ImageStore.MAX_BYTES_MB}MB",
+                        )
                         SectionTitle("缓存上限")
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -349,16 +354,30 @@ fun SettingsSheet(
                                 )
                             }
                         }
-                        OutlinedButton(
-                            onClick = viewModel::clearCache,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = scale.touchMin),
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
                         ) {
-                            Text("清空本地视频缓存")
+                            OutlinedButton(
+                                onClick = viewModel::clearCache,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = scale.touchMin),
+                            ) {
+                                Text("清空视频缓存")
+                            }
+                            OutlinedButton(
+                                onClick = viewModel::clearImageCache,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = scale.touchMin),
+                            ) {
+                                Text("清空图片缓存")
+                            }
                         }
                         Text(
-                            "清空只删除视频缓存文件，收藏记录、备注和标签都不受影响。",
+                            "清空只删本地缓存文件，收藏记录、备注和标签都不受影响。删掉某条收藏时它自己的图片和视频段会立刻回收，" +
+                                "这两个按钮管的是剩下的：视频缓存受上面「缓存上限」约束，图片缓存固定 32MB 到量就自动淘汰最旧的。",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
