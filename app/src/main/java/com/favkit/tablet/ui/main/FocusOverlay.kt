@@ -25,10 +25,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -91,12 +91,6 @@ import kotlinx.coroutines.delay
 /** 并列放信息栏的最小宽度；再窄就把信息栏挪到媒体区下面 */
 private const val FOCUS_SIDE_BY_SIDE_MIN_WIDTH_DP = 900
 
-/** 两侧换条手势区的宽度：够拇指根按住，又窄到不啃内容区 */
-private const val STEP_EDGE_WIDTH_DP = 28
-
-/** 换一条要抹过的距离：比误碰大，比一次有意的手势小 */
-private const val STEP_TRIGGER_DP = 48
-
 /**
  * 聚焦遮罩层：把后台解析回来的内容原样摊开看。
  *
@@ -104,7 +98,7 @@ private const val STEP_TRIGGER_DP = 48
  * 已经解码好的封面都还在，不会出现「返回就从头看」的断层。
  *
  * 一条链接可能带回「图＋视频」「纯图集」「多段视频」，所以这里按 `media[]` 的顺序逐段浏览：
- * 左右滑是翻段，头部的 ‹ › 是翻到墙上相邻的另一条收藏。
+ * 媒体区左右滑是翻段；整层上下滑是翻收藏 —— 顺序在打开那一刻洗好，向上滑就是随机换一条。
  */
 @Composable
 fun FocusOverlay(
@@ -153,6 +147,19 @@ fun FocusOverlay(
         }
     }
 
+    // 换条：整层做成竖向 pager，跟手、吸附和媒体区翻段完全一样，不再要两侧手势条
+    val order = remember { buildFocusOrder(state.items.map { it.id }, favorite.id) }
+    val itemPagerState = rememberPagerState(pageCount = { order.size })
+
+    // 落定才换条：拖过三条就装载三次播放器、写三次进度，既闪又白耗电。
+    // 换上新页后 favorite 变了，这一页自动从封面换成真内容；focusFromPager 自己挡住「就是当前这条」。
+    LaunchedEffect(itemPagerState, order) {
+        snapshotFlow { itemPagerState.currentPage to itemPagerState.isScrollInProgress }
+            .collect { (page, scrolling) ->
+                if (!scrolling) viewModel.focusFromPager(order.getOrNull(page))
+            }
+    }
+
     val wide = LocalConfiguration.current.screenWidthDp >= FOCUS_SIDE_BY_SIDE_MIN_WIDTH_DP
 
     // 遮罩是深色底，强制走深色配色：否则浅色主题下的输入框、文字（onSurface 近黑）压在黑底上看不清
@@ -164,100 +171,60 @@ fun FocusOverlay(
                 .systemBarsPadding()
                 .padding(horizontal = scale.edgeInset, vertical = scale.gapXs),
         ) {
-            Column(
+            VerticalPager(
+                state = itemPagerState,
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(scale.gapXs),
-            ) {
-                FocusHeader(
-                    favorite = favorite,
-                    focus = focus,
-                    scale = scale,
-                    onDismiss = onDismiss,
-                )
-
-                // 两侧各留一条手势区，中间才是内容列：手势区在内容之外，不抢 pager 的横向翻页，
-                // 也不抢信息栏的纵向滚动
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
-                ) {
-                    StepEdge(
-                        scale = scale,
-                        onStep = viewModel::stepItem,
-                        modifier = Modifier.fillMaxHeight(),
-                    )
-
-                    if (wide) {
+                // 只有一条时不必能拖：整屏回弹看着像坏了
+                userScrollEnabled = order.size > 1,
+            ) { page ->
+                val id = order[page]
+                val item = state.items.firstOrNull { it.id == id }
+                when {
+                    // 这条在本次会话里被删掉了（删除要等后台确认才物理清除，页序不会跟着变）：
+                    // 给一页带关闭键的说明，别把人停在空白页上
+                    item == null -> Column(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(scale.gapXs),
+                    ) {
                         Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight(),
-                            horizontalArrangement = Arrangement.spacedBy(scale.gapMd),
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
                         ) {
-                            StageArea(
-                                viewModel = viewModel,
-                                favorite = favorite,
-                                focus = focus,
-                                pagerState = pagerState,
-                                graph = graph,
-                                state = state,
-                                scale = scale,
-                                modifier = Modifier
-                                    .weight(1.5f)
-                                    .fillMaxHeight(),
-                            )
-                            FocusInfo(
-                                viewModel = viewModel,
-                                state = state,
-                                favorite = favorite,
-                                focus = focus,
-                                scale = scale,
-                                onClosed = onDismiss,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
-                            )
+                            IconButton(
+                                onClick = onDismiss,
+                                modifier = Modifier.size(scale.touchMin),
+                            ) {
+                                Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
+                            }
                         }
-                    } else {
-                        Column(
+                        Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(scale.gapSm),
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            StageArea(
-                                viewModel = viewModel,
-                                favorite = favorite,
-                                focus = focus,
-                                pagerState = pagerState,
-                                graph = graph,
-                                state = state,
-                                scale = scale,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1.1f),
-                            )
-                            FocusInfo(
-                                viewModel = viewModel,
-                                state = state,
-                                favorite = favorite,
-                                focus = focus,
-                                scale = scale,
-                                onClosed = onDismiss,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
+                            Text(
+                                text = "这条已经删掉了",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color(0xFFB7BDC6),
                             )
                         }
                     }
 
-                    StepEdge(
+                    // 只有 ViewModel 认定的那条渲染完整内容，其余页给封面（理由见 PeekPage）
+                    id == favorite.id -> FocusPage(
+                        viewModel = viewModel,
+                        state = state,
+                        graph = graph,
+                        favorite = item,
+                        focus = focus,
+                        pagerState = pagerState,
+                        wide = wide,
                         scale = scale,
-                        onStep = viewModel::stepItem,
-                        modifier = Modifier.fillMaxHeight(),
+                        onDismiss = onDismiss,
                     )
+
+                    else -> PeekPage(item = item, scale = scale)
                 }
             }
         }
@@ -304,52 +271,158 @@ private fun FocusHeader(
 }
 
 /**
- * 遮罩层两侧的换条手势区：上下抹一下换一条收藏，向上是下一条。
+ * 打开遮罩时定一次换条顺序：进来那条固定在第 0 页，其余洗牌。
  *
- * 顶栏原先那对 ‹ › 摘掉了 —— 它们和标题挤在同一行，窄屏下把标题压得只剩一个字，
- * 而「换一条」本来就是个连续动作，手指在两侧抹一下比连点按钮顺手。
- * 手势区只吃纵向拖动，宽度落在内容列之外的留白里：横向留给里面的 pager（图集翻页），
- * 纵向留给信息栏自己的滚动，谁也不抢谁。淡箭头只负责让人知道这里能抹，不是按钮。
+ * 之后一路向上滑就是随机换条，向下滑能退回刚才看过的那条。顺序只在打开这一刻定、
+ * 中途不按 id 重排 —— 页码对不上条目，滑动过程中就会跳条。
+ */
+private fun buildFocusOrder(ids: List<String>, openedId: String): List<String> =
+    listOf(openedId) + ids.filterNot { it == openedId }.shuffled()
+
+/** 一屏一条：顶栏 + 内容区（宽屏左右并列、窄屏上下叠放） */
+@Composable
+private fun FocusPage(
+    viewModel: MainViewModel,
+    state: MainUiState,
+    graph: AppGraph,
+    favorite: Favorite,
+    focus: FocusUiState,
+    pagerState: PagerState,
+    wide: Boolean,
+    scale: TabletScale,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(scale.gapXs),
+    ) {
+        FocusHeader(
+            favorite = favorite,
+            focus = focus,
+            scale = scale,
+            onDismiss = onDismiss,
+        )
+
+        if (wide) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(scale.gapMd),
+            ) {
+                StageArea(
+                    viewModel = viewModel,
+                    favorite = favorite,
+                    focus = focus,
+                    pagerState = pagerState,
+                    graph = graph,
+                    state = state,
+                    scale = scale,
+                    modifier = Modifier
+                        .weight(1.5f)
+                        .fillMaxHeight(),
+                )
+                FocusInfo(
+                    viewModel = viewModel,
+                    state = state,
+                    favorite = favorite,
+                    focus = focus,
+                    scale = scale,
+                    onClosed = onDismiss,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(scale.gapSm),
+            ) {
+                StageArea(
+                    viewModel = viewModel,
+                    favorite = favorite,
+                    focus = focus,
+                    pagerState = pagerState,
+                    graph = graph,
+                    state = state,
+                    scale = scale,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1.1f),
+                )
+                FocusInfo(
+                    viewModel = viewModel,
+                    state = state,
+                    favorite = favorite,
+                    focus = focus,
+                    scale = scale,
+                    onClosed = onDismiss,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 相邻页：滑动途中只铺一张封面，落定后被换上的那条才由 ViewModel 接管、换成真内容。
+ *
+ * 这里不挂播放器、也不做逐段逻辑：一个 ExoPlayer 同时只能喂一个 `PlayerView`，
+ * 两页同时挂播放器会互相抢 surface，动画期间还会闪出上一段的画面。
  */
 @Composable
-private fun StepEdge(
+private fun PeekPage(
+    item: Favorite,
     scale: TabletScale,
-    onStep: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val hero = item.segments.firstOrNull()
+    val coverUrl = when {
+        hero == null -> ""
+        hero.kind == MediaKind.IMAGE -> hero.url
+        else -> hero.coverUrl
+    }
     Box(
         modifier = modifier
-            .width(STEP_EDGE_WIDTH_DP.dp)
-            .fillMaxHeight()
-            .pointerInput(scale) {
-                val trigger = with(density) { STEP_TRIGGER_DP.dp.toPx() }
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    var dragged = 0f
-                    while (true) {
-                        val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
-                        if (!change.pressed) break
-                        dragged += change.position.y - change.previousPosition.y
-                        change.consume()
-                        // 手指上移时 y 增量为负，和短视频里「往上滑看下一条」一致
-                        if (dragged <= -trigger) {
-                            onStep(1)
-                            dragged = 0f
-                        } else if (dragged >= trigger) {
-                            onStep(-1)
-                            dragged = 0f
-                        }
-                    }
-                }
-            },
-        contentAlignment = Alignment.Center,
+            .fillMaxSize()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFF10141B)),
     ) {
+        if (coverUrl.isNotBlank()) {
+            AsyncImage(
+                model = coverUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .background(Color(0x99000000))
+                .padding(horizontal = scale.gapSm, vertical = scale.gapXs),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Text("︿", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
-            Text("﹀", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
+            Text(
+                text = item.displayTitle,
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = item.hostLabel,
+                style = MaterialTheme.typography.labelMedium,
+                color = Color(0xFFB7BDC6),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

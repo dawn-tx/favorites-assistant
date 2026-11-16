@@ -8,10 +8,13 @@
 #     （c519da1 那次就是这样，触发器明明改了却一个 run 都没创建）。
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
-build: 13
-code: 86e13ac
-note: 设置面板的图片缓存上限从写死 32MB 改为可选 32/64/128/256/512MB。Coil 的 DiskCache.maxSize
-      是 val 没有运行期改容量的接口（对照 coil 2.7.0 源码核实），改上限走整体重建 ImageLoader：
-      ImageStore 注入 AppSettings 并新增 applyLimitFromSettings（与 MediaCache 同套路，构造时后台
-      读一次 DataStore 校准）；换 loader 只动内存缓存不动磁盘，目录不变、已缓存图片不丢；
-      DataStore 新键 image_cache_limit_mb，默认仍 32MB，旧安装无感迁移。
+# bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
+build: 14
+code: eca72f5
+note: 三个设备实测出来的问题一起修：遮罩层换条改成整层 VerticalPager（两侧 28dp 手势条整套删掉，
+      跟手/吸附和媒体区翻段同一套手感），顺序在打开遮罩那一刻洗牌、进来那条固定第一页，向上滑随机
+      游走、向下滑回上一条；非当前页只渲染封面（一个 ExoPlayer 只能喂一个画面），落定才装载，
+      MainViewModel.stepItem 换成 focusFromPager。清完视频缓存要把 favorites.locallyCached 一条
+      UPDATE 批量复位，否则卡片绿点和「已缓存，离线可直接播放」还在说假话。条数文案只在
+      remoteHasMore 为真时才引用后台 total：页取全了本地就是镜像，删一条还说「共 20 · 已取回 19」
+      是把刚删的那条说成没取回，顶栏与墙头同时改口。

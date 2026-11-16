@@ -88,10 +88,14 @@ data class MainUiState(
     val pendingSync: Int get() = (queued - failed).coerceAtLeast(0)
 
     /**
-     * 本地只缓存了滚到过的那几页 —— 这时候顶栏再说「共 N 条」就是把后台的库说成了这一屏。
-     * 后台没上报总数（[remoteTotal] 为 0）时不算部分，退回显示本地条数。
+     * 本地只缓存了还没取完的几页时才说「已取回 M / N」—— 这时候顶栏再说「共 N 条」
+     * 就是把后台的库说成了这一屏。
+     *
+     * 页取全了（[remoteHasMore] 为假）就别再报后台总数：本地就是后台的镜像，删掉一条之后
+     * 再拿那个只在翻页时刷新的总数来比，会出现「共 20 条 · 已取回 19 条」这种把刚删的那条
+     * 说成还没取回的话。后台没上报总数（[remoteTotal] 为 0）时同样不算部分。
      */
-    val cachePartial: Boolean get() = remoteTotal > cachedTotal
+    val cachePartial: Boolean get() = remoteHasMore && remoteTotal > cachedTotal
 }
 
 class MainViewModel private constructor(private val graph: AppGraph) : ViewModel() {
@@ -273,14 +277,16 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         loadSegment(favorite, index, autoPlay = true)
     }
 
-    /** 遮罩层两侧的上下滑动手势换一条：遮罩层不关，墙跟着滚到新位置 */
-    fun stepItem(delta: Int) {
-        val items = _state.value.items
-        if (items.isEmpty()) return
-        val position = items.indexOfFirst { it.id == focusFlow.value?.itemId }
-        val target = if (position < 0) 0 else (position + delta).coerceIn(0, items.lastIndex)
+    /**
+     * 遮罩层竖向 pager 滑到落定的那条：换成它。
+     *
+     * [id] 为 null（页序里的这条已被删掉）或就是当前那条时什么都不做 —— pager 落定与
+     * ViewModel 换焦点因此不会互相打转。进度先落盘再切，上一条看到哪儿不会丢。
+     */
+    fun focusFromPager(id: String?) {
+        if (id == null || id == focusFlow.value?.itemId) return
         persistProgressNow()
-        openFocus(items[target].id)
+        openFocus(id)
     }
 
     /** 打开设置就把两个缓存数重新取一遍：在线边播边存的字节没有别的回调时机，等它自己刷新就是「要重启才对」 */
@@ -618,6 +624,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             // SimpleCache release 后不能复用，必须先让播放器释放，缓存实例才会重建
             graph.player.release()
             graph.media.clearAll()
+            // 跟着把「已缓存」一起抹掉：卡片状态点和遮罩层那句提示读的就是这一列，
+            // 只删字节不动标记，清完缓存界面还在说这条能离线播
+            graph.favorites.clearLocallyCached()
             cacheBytesFlow.value = 0L
             messageFlow.value = "本地视频缓存已清空（收藏记录不受影响）"
         }

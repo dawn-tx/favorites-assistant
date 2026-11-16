@@ -268,14 +268,15 @@ private fun MainTopBar(
             Column(modifier = Modifier.weight(1f)) {
                 Text("视频收藏", style = MaterialTheme.typography.titleLarge, maxLines = 1)
                 // 本地只是后台的分页缓存：没取完时说「共 N 条」会把取回的那几页说成整库。
+                // 取完之后反过来：本地条数就是后台条数，别再报那个只在翻页时刷新的总数，
+                // 否则删掉一条会说成「共 20 条 · 已取回 19 条」——刚删的那条被说成了还没取回。
                 // 这里只报条数，不报「就绪」—— 收藏传回的那刻内容信息就同时到了，没有第二种状态可数
                 val cached = state.cachedTotal
                 Text(
                     text = when {
                         state.cachePartial -> "共 ${state.remoteTotal} 条 · 已取回 $cached 条"
-                        state.remoteTotal > 0 -> "共 ${state.remoteTotal} 条"
                         !state.online -> "本地 $cached 条 · 离线"
-                        else -> "本地 $cached 条"
+                        else -> "共 $cached 条"
                     },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

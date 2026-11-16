@@ -48,6 +48,10 @@ interface FavoritesDao {
     @Query("UPDATE favorites SET locallyCached = :cached WHERE id = :id")
     suspend fun setLocallyCached(id: String, cached: Boolean)
 
+    /** 清空视频缓存时一起把标记抹掉：字节都没了还留着「已缓存」，卡片状态点和遮罩层提示就在说假话 */
+    @Query("UPDATE favorites SET locallyCached = 0")
+    suspend fun clearLocallyCached()
+
     /** 图集段没有播放位置，只有段号，所以单独一条 UPDATE，不借用 saveProgress */
     @Query("UPDATE favorites SET lastSegmentIndex = :segmentIndex WHERE id = :id")
     suspend fun setLastSegment(id: String, segmentIndex: Int)

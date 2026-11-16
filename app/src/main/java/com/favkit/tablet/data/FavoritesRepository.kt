@@ -130,6 +130,9 @@ class FavoritesRepository(
 
     suspend fun setLocallyCached(id: String, cached: Boolean) = favoritesDao.setLocallyCached(id, cached)
 
+    /** 清空视频缓存后要跟着做的一次性批量复位（逐条 setLocallyCached 白写几十条 UPDATE） */
+    suspend fun clearLocallyCached() = favoritesDao.clearLocallyCached()
+
     /**
      * 后台响应入库：每条收藏都自带解析结果。
      *
