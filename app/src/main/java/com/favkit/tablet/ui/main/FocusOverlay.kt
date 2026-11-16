@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
@@ -51,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -87,9 +89,13 @@ import com.favkit.tablet.ui.components.formatClock
 import com.favkit.tablet.ui.components.formatDate
 import com.favkit.tablet.ui.components.syncBadgeLabel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** 并列放信息栏的最小宽度；再窄就把信息栏挪到媒体区下面 */
 private const val FOCUS_SIDE_BY_SIDE_MIN_WIDTH_DP = 900
+
+/** 留白上抹过多少距离算一次换条：比误碰大，比一次有意的手势小 */
+private const val STEP_TRIGGER_DP = 48
 
 /**
  * 聚焦遮罩层：把后台解析回来的内容原样摊开看。
@@ -98,7 +104,8 @@ private const val FOCUS_SIDE_BY_SIDE_MIN_WIDTH_DP = 900
  * 已经解码好的封面都还在，不会出现「返回就从头看」的断层。
  *
  * 一条链接可能带回「图＋视频」「纯图集」「多段视频」，所以这里按 `media[]` 的顺序逐段浏览：
- * 媒体区左右滑是翻段；整层上下滑是翻收藏 —— 顺序在打开那一刻洗好，向上滑就是随机换一条。
+ * 媒体区左右滑是翻段；上下滑是翻收藏 —— 媒体区里直接抹、两侧留白里抹都算，走的是同一个竖向 pager，
+ * 顺序在打开那一刻洗好，向上滑就是随机换一条。
  */
 @Composable
 fun FocusOverlay(
@@ -147,9 +154,21 @@ fun FocusOverlay(
         }
     }
 
-    // 换条：整层做成竖向 pager，跟手、吸附和媒体区翻段完全一样，不再要两侧手势条
+    // 换条：竖向 pager 是唯一的换条来源，媒体区里直接抹、两侧留白里抹都推它走同一套吸附动画
     val order = remember { buildFocusOrder(state.items.map { it.id }, favorite.id) }
     val itemPagerState = rememberPagerState(pageCount = { order.size })
+    val stepScope = rememberCoroutineScope()
+
+    // 留白上的纵向拖动不自己换收藏，只把 pager 往前/往后推一页 —— 走的还是媒体区那套吸附动画，
+    // 落定后由下面那个 snapshotFlow 统一装载，两个入口因此不会各说各话。
+    val stepByPage: (Int) -> Unit = { delta ->
+        if (order.size > 1 && !itemPagerState.isScrollInProgress) {
+            val target = (itemPagerState.currentPage + delta).coerceIn(0, order.lastIndex)
+            if (target != itemPagerState.currentPage) {
+                stepScope.launch { itemPagerState.animateScrollToPage(target) }
+            }
+        }
+    }
 
     // 落定才换条：拖过三条就装载三次播放器、写三次进度，既闪又白耗电。
     // 换上新页后 favorite 变了，这一页自动从封面换成真内容；focusFromPager 自己挡住「就是当前这条」。
@@ -169,63 +188,82 @@ fun FocusOverlay(
                 .fillMaxSize()
                 .background(Color(0xF2070A0F))
                 .systemBarsPadding()
-                .padding(horizontal = scale.edgeInset, vertical = scale.gapXs),
+                .padding(vertical = scale.gapXs),
         ) {
-            VerticalPager(
-                state = itemPagerState,
-                modifier = Modifier.fillMaxSize(),
-                // 只有一条时不必能拖：整屏回弹看着像坏了
-                userScrollEnabled = order.size > 1,
-            ) { page ->
-                val id = order[page]
-                val item = state.items.firstOrNull { it.id == id }
-                when {
-                    // 这条在本次会话里被删掉了（删除要等后台确认才物理清除，页序不会跟着变）：
-                    // 给一页带关闭键的说明，别把人停在空白页上
-                    item == null -> Column(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(scale.gapXs),
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
+            // 原来那条水平边距改成两条能抹的留白：内容宽度不变，但这点空白现在是换条的触发区
+            Row(modifier = Modifier.fillMaxSize()) {
+                StepMargin(
+                    scale = scale,
+                    onStep = stepByPage,
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(scale.edgeInset),
+                )
+
+                VerticalPager(
+                    state = itemPagerState,
+                    modifier = Modifier.weight(1f),
+                    // 只有一条时不必能拖：整屏回弹看着像坏了
+                    userScrollEnabled = order.size > 1,
+                ) { page ->
+                    val id = order[page]
+                    val item = state.items.firstOrNull { it.id == id }
+                    when {
+                        // 这条在本次会话里被删掉了（删除要等后台确认才物理清除，页序不会跟着变）：
+                        // 给一页带关闭键的说明，别把人停在空白页上
+                        item == null -> Column(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(scale.gapXs),
                         ) {
-                            IconButton(
-                                onClick = onDismiss,
-                                modifier = Modifier.size(scale.touchMin),
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
                             ) {
-                                Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
+                                IconButton(
+                                    onClick = onDismiss,
+                                    modifier = Modifier.size(scale.touchMin),
+                                ) {
+                                    Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
+                                }
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "这条已经删掉了",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color(0xFFB7BDC6),
+                                )
                             }
                         }
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = "这条已经删掉了",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color(0xFFB7BDC6),
-                            )
-                        }
+
+                        // 只有 ViewModel 认定的那条渲染完整内容，其余页给封面（理由见 PeekPage）
+                        id == favorite.id -> FocusPage(
+                            viewModel = viewModel,
+                            state = state,
+                            graph = graph,
+                            favorite = item,
+                            focus = focus,
+                            pagerState = pagerState,
+                            wide = wide,
+                            scale = scale,
+                            onDismiss = onDismiss,
+                        )
+
+                        else -> PeekPage(item = item, scale = scale)
                     }
-
-                    // 只有 ViewModel 认定的那条渲染完整内容，其余页给封面（理由见 PeekPage）
-                    id == favorite.id -> FocusPage(
-                        viewModel = viewModel,
-                        state = state,
-                        graph = graph,
-                        favorite = item,
-                        focus = focus,
-                        pagerState = pagerState,
-                        wide = wide,
-                        scale = scale,
-                        onDismiss = onDismiss,
-                    )
-
-                    else -> PeekPage(item = item, scale = scale)
                 }
+
+                StepMargin(
+                    scale = scale,
+                    onStep = stepByPage,
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(scale.edgeInset),
+                )
             }
         }
     }
@@ -266,6 +304,55 @@ private fun FocusHeader(
         }
         IconButton(onClick = onDismiss, modifier = Modifier.size(scale.touchMin)) {
             Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
+        }
+    }
+}
+
+/**
+ * 遮罩层两侧留白上的换条手势区：上下抹一下 = 让整层那个竖向 pager 走一页。
+ *
+ * 为什么要这两条：媒体区里直接抹是能换条的，但右侧信息栏那一列自己就在竖向滚，子节点先拿到
+ * 事件、pager 的嵌套滚动实测不交接（设备上滚到头也换不了条）。这两条本来就点不到任何东西的
+ * 空白就是原来的水平边距，拿来当触发区，内容宽度一点没少。
+ * 它不自己换收藏，只推 pager —— 跟手与吸附因此和媒体区里一模一样，换条也只有一个来源。
+ */
+@Composable
+private fun StepMargin(
+    scale: TabletScale,
+    onStep: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier.pointerInput(scale) {
+            val trigger = with(density) { STEP_TRIGGER_DP.dp.toPx() }
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                var dragged = 0f
+                while (true) {
+                    val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                    if (!change.pressed) break
+                    dragged += change.position.y - change.previousPosition.y
+                    change.consume()
+                    // 手指上移时 y 增量为负 = 下一条，和媒体区里往上滑同一个方向语义
+                    if (dragged <= -trigger) {
+                        onStep(1)
+                        dragged = 0f
+                    } else if (dragged >= trigger) {
+                        onStep(-1)
+                        dragged = 0f
+                    }
+                }
+            }
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        // 淡箭头只负责让人知道这里能抹，不是按钮
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text("︿", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
+            Text("﹀", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
         }
     }
 }
