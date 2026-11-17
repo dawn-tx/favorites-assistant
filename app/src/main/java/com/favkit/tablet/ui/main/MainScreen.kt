@@ -63,7 +63,6 @@ import com.favkit.tablet.ui.components.TabletIconButton
 import com.favkit.tablet.ui.components.rememberDialogWidth
 import com.favkit.tablet.ui.settings.SettingsSheet
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 
 /**
  * 主界面只有两层：视频墙 + 盖在墙上的聚焦遮罩。
@@ -105,20 +104,11 @@ fun MainScreen(
         viewModel.consumeMessage()
     }
 
-    // 全屏播放时遮罩层不在组合里，进度 tick 改由这里驱动
-    LaunchedEffect(state.fullscreen) {
-        if (!state.fullscreen) return@LaunchedEffect
-        while (isActive) {
-            viewModel.tick()
-            delay(500)
-        }
-    }
+    // 遮罩层自己就是全屏：进度 tick 由 FocusOverlay 驱动，这里不再另起一份
+    ImmersiveWhileFocused(focus != null)
 
-    ImmersiveWhileFullscreen(state.fullscreen)
-
-    BackHandler(enabled = state.fullscreen || focus != null || state.selectionActive) {
+    BackHandler(enabled = focus != null || state.selectionActive) {
         when {
-            state.fullscreen -> viewModel.setFullscreen(false)
             focus != null -> {
                 flashId = focus.itemId
                 viewModel.closeFocus()
@@ -128,8 +118,8 @@ fun MainScreen(
         }
     }
 
-    // 遮罩层和全屏都自己管顶部空间，此时不再留顶栏的位置
-    val chromeVisible = !state.fullscreen && focus == null
+    // 遮罩层自己管顶部空间（进层连系统栏一起隐掉），此时不再留顶栏的位置
+    val chromeVisible = focus == null
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -155,45 +145,32 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            if (state.fullscreen) {
-                // 全屏层按当前段的素材分派：图集段铺满整屏翻着看，视频段仍走播放器
-                FullscreenLayer(
+            VideoWall(
+                viewModel = viewModel,
+                state = state,
+                scale = scale,
+                gridState = gridState,
+                flashId = flashId,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = scale.edgeInset),
+            )
+
+            // 遮罩层是墙的兄弟节点：墙不退出组合，返回时浏览位置与已解码封面都还在
+            if (focus != null && focusFavorite != null) {
+                FocusOverlay(
                     viewModel = viewModel,
                     state = state,
                     graph = graph,
                     favorite = focusFavorite,
                     focus = focus,
                     scale = scale,
+                    onDismiss = {
+                        flashId = focus.itemId
+                        viewModel.closeFocus()
+                    },
+                    modifier = Modifier.fillMaxSize(),
                 )
-            } else {
-                VideoWall(
-                    viewModel = viewModel,
-                    state = state,
-                    scale = scale,
-                    gridState = gridState,
-                    flashId = flashId,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = scale.edgeInset),
-                )
-
-                // 遮罩层是墙上的兄弟节点：墙不退出组合，返回时浏览位置与已解码封面都还在。
-                // 全屏播放时它要让位，退出全屏后由这里的 focus 状态把它重新盖回来
-                if (focus != null && focusFavorite != null) {
-                    FocusOverlay(
-                        viewModel = viewModel,
-                        state = state,
-                        graph = graph,
-                        favorite = focusFavorite,
-                        focus = focus,
-                        scale = scale,
-                        onDismiss = {
-                            flashId = focus.itemId
-                            viewModel.closeFocus()
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
             }
         }
     }
@@ -462,14 +439,14 @@ private fun AssistantAction(
     }
 }
 
-/** 全屏播放时临时接管系统栏，退出或离开组合即恢复，避免把用户困在沉浸式里 */
+/** 遮罩层开着时临时接管系统栏，退出或离开组合即恢复，避免把用户困在沉浸式里 */
 @Composable
-private fun ImmersiveWhileFullscreen(fullscreen: Boolean) {
+private fun ImmersiveWhileFocused(focused: Boolean) {
     val view = LocalView.current
     val window = (LocalContext.current as? Activity)?.window ?: return
-    DisposableEffect(fullscreen, window) {
+    DisposableEffect(focused, window) {
         val controller = WindowInsetsControllerCompat(window, view)
-        if (fullscreen) {
+        if (focused) {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {

@@ -50,7 +50,6 @@ data class MainUiState(
     val showFilters: Boolean = false,
     val checked: Set<String> = emptySet(),
     val player: PlayerUiState = PlayerUiState(),
-    val fullscreen: Boolean = false,
     val online: Boolean = true,
     val queued: Int = 0,
     /** 队列里重试耗尽/被后台拒绝、需要用户动手的那部分 */
@@ -110,7 +109,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private val focusFlow = MutableStateFlow<FocusUiState?>(null)
     private val filtersFlow = MutableStateFlow(false)
     private val checkedFlow = MutableStateFlow<Set<String>>(emptySet())
-    private val fullscreenFlow = MutableStateFlow(false)
     private val settingsFlow = MutableStateFlow(false)
     private val quickCollectFlow = MutableStateFlow(false)
     private val messageFlow = MutableStateFlow<String?>(null)
@@ -157,7 +155,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { focusFlow.collect { v -> _state.update { it.copy(focus = v) } } }
         viewModelScope.launch { filtersFlow.collect { v -> _state.update { it.copy(showFilters = v) } } }
         viewModelScope.launch { checkedFlow.collect { v -> _state.update { it.copy(checked = v) } } }
-        viewModelScope.launch { fullscreenFlow.collect { v -> _state.update { it.copy(fullscreen = v) } } }
         viewModelScope.launch { settingsFlow.collect { v -> _state.update { it.copy(showSettings = v) } } }
         viewModelScope.launch { quickCollectFlow.collect { v -> _state.update { it.copy(quickCollect = v) } } }
         viewModelScope.launch { messageFlow.collect { v -> _state.update { it.copy(message = v) } } }
@@ -344,10 +341,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun setSpeed(speed: Float) {
         graph.player.setSpeed(speed)
         viewModelScope.launch { graph.settings.setDefaultPlaybackSpeed(speed) }
-    }
-
-    fun setFullscreen(value: Boolean) {
-        fullscreenFlow.value = value
     }
 
     /** 遮罩层每约 500ms 调用一次，进度每 6 次回写一次，避免频繁落盘 */

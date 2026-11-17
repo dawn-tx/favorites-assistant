@@ -78,6 +78,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.foundation:foundation")
+    // 遮罩层详情抽屉的滑入淡出（AnimatedVisibility + slide/fade）；版本由 BOM 给
+    implementation("androidx.compose.animation:animation")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // 数据

@@ -9,15 +9,19 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 17
-code: 53ef117
-note: 遮罩层按抖音式 feed 排版重构（页面元素还是项目现有这些，只换布局结构与交互）。
-      一、竖屏：竖向 pager 一屏一条铺满整屏，段号/标题/作者/文案（两行折叠 + 展开）连「详情」入口
-      叠在画面底部渐变上，详情改成 material3 ModalBottomSheet 三档（隐藏 · 半屏 · 内容 fillMaxHeight(0.96f)
-      给出的 96% 全开档），抽屉开着时竖向手势归抽屉；旧的三栏与上下叠放两套排版一起删了。
-      二、横屏（可用宽度 ≥ 840dp 且宽 > 高）：9:16 画面居中在左栏、四周纯黑，右栏 max(220dp, 25%) 常驻详情、
-      可 › 收起成右缘竖排把手；栏左边一条 40dp StepBand 推竖向 pager（右栏自己在竖向滚、嵌套滚动不交接）。
-      三、播放器：遮罩里不再挂控制条，点画面 = 暂停/继续，底边 2dp 进度条（18dp 热区，拖动只改指针、松手才 seek，
-      按下第一下自己消费掉不会顺手停播）；倍速与全屏搬进详情「播放」一行，全屏那层控制条照旧。
-      四、翻段到头/换条到头走 pager 默认 overscroll + 1.2s 边界文案；吸附动画统一 tween(340ms, 0.22,0.61,0.36,1)。
-      参考稿的 3 实例播放器池没采纳（80MB 常驻预算），图集段仍是 Fit 整张不裁。
+build: 18
+code: 78ceeee
+note: 按设备实测体验整改遮罩层（上一包强制裁切 + 独立全屏 + 常驻右栏三件事都不顺手）。
+      一、画面不再分形态：PlayerStage 只剩 PlayerView + 一层只吃轻点的点击面 + 缓冲转圈，一律
+      RESIZE_MODE_FIT 完整显示、不裁切；竖屏 RESIZE_MODE_ZOOM 与 ⛶ 全屏层（FullscreenLayer/
+      FullscreenImages）一起删了，点卡片进的那一层自己就是全屏（进层隐系统栏、退出即恢复）。
+      二、控件全搬进盖在画面上的控制层：点画面唤出，播放中 3.5s 自收、暂停常显；层里是段条 +
+      段号/标题/作者/文案 +「详情 ›」+ 播放条（Slider 松手才 seek、尾部当前/总时长、倍速选择器），
+      视频段正中另给 ▶/⏸，图集段只给段号与文案。详情里那个「播放」一行（PlayControls）删除，
+      只在播放报错时留一句原因。
+      三、横屏详情从常驻右栏改成模态右侧抽屉：AnimatedVisibility + slideInHorizontally，
+      宽 = 可用宽度 45% 夹在 320~560dp，背后遮罩点它收回；FeedRail/RailHandle/StepBand 全删，
+      抽屉开着 userScrollEnabled=false 让竖向手势归抽屉，换条仍只有竖向 pager 一个来源。
+      竖屏底部三档 ModalBottomSheet 不变。返回键先收抽屉再关遮罩。
+      四、依赖补 androidx.compose.animation:animation（BOM 管版本，AnimatedVisibility 直接 import）；
+      遮罩层的吸附动画回到 pager 默认，SNAP_MS/SNAP_EASING 随 StepBand 一起去了。

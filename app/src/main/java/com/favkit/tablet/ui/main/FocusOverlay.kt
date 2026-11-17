@@ -1,7 +1,11 @@
 package com.favkit.tablet.ui.main
 
-import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.tween
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,7 +47,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +57,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -63,7 +68,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -78,7 +82,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -106,39 +109,29 @@ import com.favkit.tablet.ui.components.formatDate
 import com.favkit.tablet.ui.components.formatSpeed
 import com.favkit.tablet.ui.components.syncBadgeLabel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 
-/** 两栏断点：宽度够、且确实比高度宽，才把信息栏常驻在右边；平板竖屏仍按单栏铺满 */
-private const val FEED_TWO_PANE_MIN_WIDTH_DP = 840
+/** 详情走右侧抽屉的门槛：可用宽度够、且确实比高度宽（平板横屏）；其余一律底部抽屉 */
+private const val SIDE_DETAILS_MIN_WIDTH_DP = 840
 
-/** 右栏取宽度的 25%，但不低于这个数 —— 再窄备注和标签就挤成竖条了 */
-private const val RAIL_FRACTION = 0.25f
-private const val RAIL_MIN_WIDTH_DP = 220
-
-/** 画面框比例 9:16（写成常量小数：二进制下 0.5625 就是 9/16，没有舍入）：竖屏整屏铺满，横屏按高度撑满并居中在左栏 */
-private const val FRAME_RATIO = 0.5625f
-
-/** 手势带上抹过多少距离算一次换条：比误碰大，比一次有意的手势小 */
-private const val STEP_TRIGGER_DP = 48
-
-/** 横屏信息栏旁边那条换条手势带的宽度 */
-private const val STEP_BAND_DP = 40
+/** 右侧抽屉取可用宽度的 45%，夹在 320~560dp：再窄备注和标签挤成竖条，再宽就把画面全挡了 */
+private const val DRAWER_FRACTION = 0.45f
+private const val DRAWER_MIN_WIDTH_DP = 320
+private const val DRAWER_MAX_WIDTH_DP = 560
 
 /** 文案折叠行数与字号：超过两行才给「展开」 */
 private const val CAPTION_MAX_LINES = 2
 
-/** 抽屉全开档的可视高度 = 屏高 × 0.96：material3 的全开档贴着内容顶部，所以由内容高度决定这一档 */
+/** 底部抽屉的全开档 = 屏高 × 0.96：material3 的全开档贴着内容顶部，所以这一档由内容高度决定 */
 private const val SHEET_FULL_FRACTION = 0.96f
+
+/** 点画面唤起的控制层：播放中隔这么久自己收起；暂停时留着，人随时要拖进度 */
+private const val CONTROLS_AUTO_HIDE_MS = 3_500L
 
 /** 滑到首/末条还继续抹时的提示停留时长 */
 private const val EDGE_HINT_MS = 1_200L
 
-/** 手势带推页时的吸附动画：和整层的手感对齐，不用 animateScrollToPage 默认的弹性 */
-private const val SNAP_MS = 340
-private val SNAP_EASING = CubicBezierEasing(0.22f, 0.61f, 0.36f, 1f)
-
-/** 底部渐变：底部压到 82% 黑、60% 高度处 34%、再往上透明，文案压在画面上才读得清 */
+/** 控制层背后那层渐变：底部压到 82% 黑、60% 高度处 34%、再往上透明，文案压在画面上才读得清 */
 private val FEED_BOTTOM_SCRIM = Brush.verticalGradient(
     0f to Color.Transparent,
     0.58f to Color.Transparent,
@@ -152,11 +145,15 @@ private val FEED_BOTTOM_SCRIM = Brush.verticalGradient(
  * 它是盖在视频墙上的**一层**，不是另一个页面 —— 墙始终留在组合里，所以关掉之后滚动位置、
  * 已经解码好的封面都还在，不会出现「返回就从头看」的断层。
  *
- * 版式按「可用宽度 + 方向」分两种：
- * - 单栏（手机、平板竖屏）：画面整屏铺满，段号 / 标题 / 作者 / 文案连「详情」入口一起叠在画面底部，
- *   详情本身收进底部抽屉（隐藏 · 半屏 · 全屏三档，遮罩点一下就收回）。
- * - 两栏（平板横屏）：9:16 画面居中在左栏，右栏常驻信息（可收起，收起后右缘留一个把手），
- *   栏与画面之间那条留白是换条手势带。
+ * 版式：
+ * - 这一层自己就是全屏 —— 进层把系统栏一起隐掉（见 MainScreen 的 `ImmersiveWhileFocused`），
+ *   所以画面不再分「内嵌」与「全屏」两种形态，也不再单独给图片或视频一个 ⛶：
+ *   画面铺满整屏，图片与视频一律 Fit 完整显示、不裁切，横竖屏同一条路径。
+ * - 段号角标 / 标题 / 作者 / 文案连「详情」入口与播放条一起叠在画面底部，跟着控制层显隐：
+ *   点画面唤出，播放中隔 3.5s 自己收起，暂停时留着。视频段正中另给一颗 ▶/⏸。
+ * - 详情按「可用宽度 + 方向」挑容器：够宽且确实横着（平板横屏）从右侧拉出可用宽度 45% 的抽屉，
+ *   其余（手机、平板竖屏）用底部三档抽屉（隐藏 · 半屏 · 96%）。两种都是模态的 ——
+ *   开着时竖向手势归抽屉，画面里的换条与翻段一并停手，所以不再需要额外的换条触发区。
  *
  * 一条链接可能带回「图＋视频」「纯图集」「多段视频」，所以按 `media[]` 的顺序逐段浏览：
  * 画面里左右滑是翻段；上下滑是翻收藏 —— 走的是同一个竖向 pager，顺序在打开那一刻洗好，
@@ -202,7 +199,7 @@ fun FocusOverlay(
             }
     }
 
-    // 进度回写只有这一个驱动方；进入全屏后由 MainScreen 接管
+    // 进度回写只有这一个驱动方：遮罩层自己就是全屏，没有第二处播放器画面要供
     LaunchedEffect(favorite.id) {
         while (true) {
             viewModel.tick()
@@ -210,23 +207,9 @@ fun FocusOverlay(
         }
     }
 
-    // 换条：竖向 pager 是唯一的换条来源，画面里直接抹、横屏手势带上抹都推它走同一套吸附动画
+    // 换条：竖向 pager 是唯一的换条来源，跟手、回弹与吸附都由它自己管，这里不另写一套
     val order = remember { buildFocusOrder(state.items.map { it.id }, favorite.id) }
     val itemPagerState = rememberPagerState(pageCount = { order.size })
-    val stepScope = rememberCoroutineScope()
-
-    // 手势带上的纵向拖动不自己换收藏，只把 pager 往前/往后推一页 —— 走的还是画面里那套吸附与落定装载，
-    // 两个入口因此不会各说各话。
-    val stepByPage: (Int) -> Unit = { delta ->
-        if (order.size > 1 && !itemPagerState.isScrollInProgress) {
-            val target = (itemPagerState.currentPage + delta).coerceIn(0, order.lastIndex)
-            if (target != itemPagerState.currentPage) {
-                stepScope.launch {
-                    itemPagerState.animateScrollToPage(target, animationSpec = tween(SNAP_MS, easing = SNAP_EASING))
-                }
-            }
-        }
-    }
 
     // 落定才换条：拖过三条就装载三次播放器、写三次进度，既闪又白耗电。
     // 换上新页后 favorite 变了，这一页自动从封面换成真内容；focusFromPager 自己挡住「就是当前这条」。
@@ -237,9 +220,9 @@ fun FocusOverlay(
             }
     }
 
-    // 竖屏的详情抽屉、横屏右栏的收起态：纯 UI 状态，不进 ViewModel，也不落盘
+    // 详情的两种容器共用这一个开关：竖屏底部三档抽屉、横屏右侧抽屉，都是模态的。
+    // 纯 UI 状态，不进 ViewModel，也不落盘（Activity 不因转屏重建，所以它天然活过一次旋转）
     var detailsOpen by remember { mutableStateOf(false) }
-    var railCollapsed by remember { mutableStateOf(false) }
 
     // 遮罩是深色底，强制走深色配色：否则浅色主题下的输入框、文字（onSurface 近黑）压在黑底上看不清
     FavoritesTheme(dark = true) {
@@ -249,80 +232,48 @@ fun FocusOverlay(
                 .background(Color(0xFF000000))
                 .systemBarsPadding(),
         ) {
-            // 两栏只给「够宽且真的横着」的屏：平板竖屏仍按单栏铺满，不给右栏
-            val twoPane = maxWidth >= FEED_TWO_PANE_MIN_WIDTH_DP.dp && maxWidth > maxHeight
-            // 抽屉只在单栏存在：竖屏开着抽屉转成横屏，右栏本身就是详情，
-            // 手势不能再被一个已经不存在的抽屉扣住
-            val sheetOpen = detailsOpen && !twoPane
-            val railFractionWidth = maxWidth * RAIL_FRACTION
-            val railWidth = if (railFractionWidth < RAIL_MIN_WIDTH_DP.dp) {
-                RAIL_MIN_WIDTH_DP.dp
-            } else {
-                railFractionWidth
+            // 详情走右边还是走底下：够宽且真的横着才给侧抽屉，平板竖屏与手机仍用底部抽屉
+            val sideDetails = maxWidth >= SIDE_DETAILS_MIN_WIDTH_DP.dp && maxWidth > maxHeight
+            val drawerWidth = (maxWidth * DRAWER_FRACTION).let { w ->
+                when {
+                    w < DRAWER_MIN_WIDTH_DP.dp -> DRAWER_MIN_WIDTH_DP.dp
+                    w > DRAWER_MAX_WIDTH_DP.dp -> DRAWER_MAX_WIDTH_DP.dp
+                    else -> w
+                }
             }
             val itemHint = rememberBoundaryHint(itemPagerState, "已经是第一条", "已经是最后一条")
 
-            Row(modifier = Modifier.fillMaxSize()) {
-                // 竖向 pager 占满左边：竖屏就是整屏，横屏是画面 + 画面两侧的纯黑留白
-                VerticalPager(
-                    state = itemPagerState,
-                    modifier = Modifier.weight(1f),
-                    // 只有一条时不必能拖（整屏回弹看着像坏了）；抽屉开着时竖向手势归抽屉
-                    userScrollEnabled = order.size > 1 && !sheetOpen,
-                ) { page ->
-                    val id = order[page]
-                    val item = state.items.firstOrNull { it.id == id }
-                    when {
-                        // 这条在本次会话里被删掉了（删除要等后台确认才物理清除，页序不会跟着变）
-                        item == null -> DeletedPage()
+            // 一屏一条，画面铺满整屏：既没有 9:16 框，也没有常驻栏来吃掉任何一条宽度
+            VerticalPager(
+                state = itemPagerState,
+                modifier = Modifier.fillMaxSize(),
+                // 只有一条时不必能拖（整屏回弹看着像坏了）；详情抽屉开着时竖向手势归抽屉
+                userScrollEnabled = order.size > 1 && !detailsOpen,
+            ) { page ->
+                val id = order[page]
+                val item = state.items.firstOrNull { it.id == id }
+                when {
+                    // 这条在本次会话里被删掉了（删除要等后台确认才物理清除，页序不会跟着变）
+                    item == null -> DeletedPage()
 
-                        // 只有 ViewModel 认定的那条渲染完整内容，其余页给封面（理由见 PeekPage）
-                        id == favorite.id -> FeedPage(
-                            viewModel = viewModel,
-                            state = state,
-                            graph = graph,
-                            favorite = item,
-                            focus = focus,
-                            pagerState = pagerState,
-                            scale = scale,
-                            twoPane = twoPane,
-                            gesturesEnabled = !sheetOpen,
-                            onOpenDetails = { detailsOpen = true },
-                        )
-
-                        else -> PeekPage(item = item)
-                    }
-                }
-
-                // 右栏自己就在竖向滚，接不住换条手势（嵌套滚动不交接，build 14 实测过），
-                // 所以栏左边留一条能抹的带子；栏收起后画面铺回整栏，带子跟着撤
-                if (twoPane && !railCollapsed) {
-                    StepBand(
-                        onStep = stepByPage,
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .width(STEP_BAND_DP.dp),
-                    )
-                    FeedRail(
-                        width = railWidth,
+                    // 只有 ViewModel 认定的那条渲染完整内容，其余页给封面（理由见 PeekPage）
+                    id == favorite.id -> FeedPage(
+                        viewModel = viewModel,
+                        state = state,
+                        graph = graph,
+                        favorite = item,
+                        focus = focus,
+                        pagerState = pagerState,
                         scale = scale,
-                        onCollapse = { railCollapsed = true },
-                        modifier = Modifier.fillMaxHeight(),
-                    ) {
-                        FocusInfo(
-                            viewModel = viewModel,
-                            state = state,
-                            favorite = favorite,
-                            focus = focus,
-                            scale = scale,
-                            onClosed = onDismiss,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+                        gesturesEnabled = !detailsOpen,
+                        onOpenDetails = { detailsOpen = true },
+                    )
+
+                    else -> PeekPage(item = item)
                 }
             }
 
-            // 关闭键浮在左上：右上是图集段的全屏按钮，横屏收起右栏后这边也得留个出口
+            // 控制层收起之后，左上这颗关闭键是这一层唯一常驻的出口
             IconButton(
                 onClick = onDismiss,
                 modifier = Modifier
@@ -333,16 +284,67 @@ fun FocusOverlay(
                 Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
             }
 
-            if (twoPane && railCollapsed) {
-                RailHandle(onClick = { railCollapsed = false }, modifier = Modifier.align(Alignment.CenterEnd))
-            }
-
             itemHint?.let { FeedHint(it, Modifier.align(Alignment.Center)) }
 
-            // 竖屏的详情收进底部三档抽屉（隐藏 / 半屏 / 全屏）；横屏右栏常驻，不叠遮罩也不给拖拽手柄
-            if (sheetOpen) {
-                // material3 把抽屉宽度封在 640dp（sheetMaxWidth 不在这份公开签名里），
-                // 比 840dp 断点窄的竖屏窗口里最多就是两侧留白，不影响内容可读
+            if (sideDetails) {
+                // 返回键先收抽屉再关遮罩：这条比 MainScreen 那条注册得晚，压得住
+                BackHandler(enabled = detailsOpen) { detailsOpen = false }
+                AnimatedVisibility(
+                    visible = detailsOpen,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.matchParentSize(),
+                ) {
+                    // 遮罩吃掉画面上的全部手势：抽屉开着时不该还能抹着换条
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0x99000000))
+                            .clickable(onClickLabel = "关闭详情") { detailsOpen = false },
+                    )
+                }
+                AnimatedVisibility(
+                    visible = detailsOpen,
+                    enter = slideInHorizontally { it },
+                    exit = slideOutHorizontally { it },
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .width(drawerWidth)
+                            .background(Color(0xFF15151D)),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 8.dp, top = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "详情",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { detailsOpen = false }) { Text("关闭") }
+                        }
+                        FocusInfo(
+                            viewModel = viewModel,
+                            state = state,
+                            favorite = favorite,
+                            focus = focus,
+                            scale = scale,
+                            onClosed = onDismiss,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                        )
+                    }
+                }
+            } else if (detailsOpen) {
+                // 底部三档抽屉（隐藏 / 半屏 / 96%）。material3 把抽屉宽度封在 640dp
+                // （sheetMaxWidth 不在这份公开签名里），比断点窄的窗口里最多就是两侧留白
                 ModalBottomSheet(
                     onDismissRequest = { detailsOpen = false },
                     sheetState = rememberModalBottomSheetState(),
@@ -425,137 +427,6 @@ private fun rememberBoundaryHint(state: PagerState, firstLabel: String, lastLabe
 }
 
 /**
- * 横屏信息栏左边那条换条手势带：上下抹一下 = 让整层那个竖向 pager 走一页。
- *
- * 为什么要这条：右栏那一列自己就在竖向滚，子节点先拿到事件、pager 的嵌套滚动实测不交接
- * （设备上滚到头也换不了条）。栏收起之后画面铺回整栏，这条带子也就没必要存在了。
- * 它不自己换收藏，只推 pager —— 跟手与吸附因此和画面里直接抹一模一样，换条也只有一个来源。
- */
-@Composable
-private fun StepBand(
-    onStep: (Int) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier.pointerInput(Unit) {
-            val trigger = with(density) { STEP_TRIGGER_DP.dp.toPx() }
-            awaitEachGesture {
-                val down = awaitFirstDown(requireUnconsumed = false)
-                var dragged = 0f
-                while (true) {
-                    val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
-                    if (!change.pressed) break
-                    dragged += change.position.y - change.previousPosition.y
-                    change.consume()
-                    // 手指上移时 y 增量为负 = 下一条，和媒体区里往上滑同一个方向语义
-                    if (dragged <= -trigger) {
-                        onStep(1)
-                        dragged = 0f
-                    } else if (dragged >= trigger) {
-                        onStep(-1)
-                        dragged = 0f
-                    }
-                }
-            }
-        },
-        contentAlignment = Alignment.Center,
-    ) {
-        // 淡箭头只负责让人知道这里能抹，不是按钮
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text("︿", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
-            Text("﹀", style = MaterialTheme.typography.titleMedium, color = Color(0x40FFFFFF))
-        }
-    }
-}
-
-/**
- * 横屏常驻右栏：装的正是竖屏抽屉里那一套内容，只是不用拉。
- *
- * 顶部只放收起键 —— 关闭键浮在画面左上，两个键不必抢同一个角。
- */
-@Composable
-private fun FeedRail(
-    width: Dp,
-    scale: TabletScale,
-    onCollapse: () -> Unit,
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
-) {
-    Row(modifier = modifier.width(width)) {
-        // 1dp 分隔线：栏和纯黑的画面区之间得有条边，不然收起时看不出这里原来站着东西
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .width(1.dp)
-                .background(Color(0x12FFFFFF)),
-        )
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .background(Color(0xFF101017)),
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 14.dp, end = 6.dp, top = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "详情",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = Color.White,
-                    modifier = Modifier.weight(1f),
-                )
-                // 参考稿这颗收起键 26dp，平板上够不到触摸下限，按 scale 给
-                Box(
-                    modifier = Modifier
-                        .size(scale.touchMin)
-                        .clip(CircleShape)
-                        .background(Color(0x14FFFFFF))
-                        .clickable(onClickLabel = "收起详情栏", onClick = onCollapse),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(text = "›", style = MaterialTheme.typography.titleMedium, color = Color.White)
-                }
-            }
-            // 标题行以外全部留给正文：栏内自己竖向滚，滚不动了也不该把整栏顶走
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-            ) {
-                content()
-            }
-        }
-    }
-}
-
-/** 右栏收起后贴在右缘的把手：竖排两个字，点一下把栏放回来 */
-@Composable
-private fun RailHandle(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    // 参考稿宽 12dp：中文 11sp 一个字就 15dp，放不下，只能按能点到的宽度给
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp))
-            .background(Color(0xFF101017))
-            .clickable(onClickLabel = "展开详情栏", onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        Text(text = "详", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB7BDC6))
-        Text(text = "情", style = MaterialTheme.typography.labelSmall, color = Color(0xFFB7BDC6))
-    }
-}
-
-/**
  * 打开遮罩时定一次换条顺序：进来那条固定在第 0 页，其余洗牌。
  *
  * 之后一路向上滑就是随机换条，向下滑能退回刚才看过的那条。顺序只在打开这一刻定、
@@ -564,7 +435,13 @@ private fun RailHandle(
 private fun buildFocusOrder(ids: List<String>, openedId: String): List<String> =
     listOf(openedId) + ids.filterNot { it == openedId }.shuffled()
 
-/** 一屏一条：画面（竖屏整屏铺满、横屏居中 9:16 框）+ 压在画面底部的信息块 */
+/**
+ * 一屏一条：画面铺满整屏 + 浮在画面上的控制层。
+ *
+ * 控制层（底部渐变、段条、文案、「详情」入口、播放条、居中的 ▶/⏸）整体显隐：点画面唤出，
+ * 播放中隔 [CONTROLS_AUTO_HIDE_MS] 自己收起，暂停时留着 —— 停在那儿就是要拖进度、要换倍速。
+ * 这些信息原先有一截常驻在画面底下、有一截长在右栏里，收进同一层之后横竖屏就是同一套东西。
+ */
 @Composable
 private fun FeedPage(
     viewModel: MainViewModel,
@@ -574,24 +451,22 @@ private fun FeedPage(
     focus: FocusUiState,
     pagerState: PagerState,
     scale: TabletScale,
-    twoPane: Boolean,
     gesturesEnabled: Boolean,
     onOpenDetails: () -> Unit,
 ) {
-    val frame: @Composable (Modifier) -> Unit = { frameModifier ->
-        FeedFrame(
-            viewModel = viewModel,
-            state = state,
-            graph = graph,
-            favorite = favorite,
-            focus = focus,
-            pagerState = pagerState,
-            scale = scale,
-            twoPane = twoPane,
-            gesturesEnabled = gesturesEnabled,
-            onOpenDetails = onOpenDetails,
-            modifier = frameModifier,
-        )
+    val player = state.player
+    val segments = favorite.segments
+    val current = segments.getOrNull(focus.segmentIndex)
+    // 图集段没有时间进度、也没有倍速可言：播放条与居中那颗键都只给视频段
+    val isVideo = current != null && current.kind != MediaKind.IMAGE
+    var controlsVisible by remember(favorite.id) { mutableStateOf(true) }
+
+    // 翻段也算「刚动过」：重新给一轮 3.5s，免得刚抹过来控制层就收走
+    LaunchedEffect(controlsVisible, player.isPlaying, favorite.id, focus.segmentIndex) {
+        if (controlsVisible && player.isPlaying) {
+            delay(CONTROLS_AUTO_HIDE_MS)
+            controlsVisible = false
+        }
     }
 
     Box(
@@ -599,16 +474,64 @@ private fun FeedPage(
             .fillMaxSize()
             .background(Color(0xFF000000)),
     ) {
-        if (twoPane) {
-            // 框按高度撑满、宽度算出来正好 9:16，居中在左栏，两侧留纯黑
-            frame(
-                Modifier
-                    .align(Alignment.Center)
-                    .fillMaxHeight()
-                    .aspectRatio(FRAME_RATIO, matchHeightConstraintsFirst = true),
+        StageArea(
+            viewModel = viewModel,
+            favorite = favorite,
+            focus = focus,
+            pagerState = pagerState,
+            graph = graph,
+            state = state,
+            scale = scale,
+            gesturesEnabled = gesturesEnabled,
+            // 点画面只负责唤出/收起控制层；播放/暂停交给正中那颗键，两件事不抢同一下
+            onTap = { controlsVisible = !controlsVisible },
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        if (controlsVisible) {
+            // 渐变只是让底部读得清，一个手势都不吃：点它还落回画面去收起控制层
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(FEED_BOTTOM_SCRIM),
             )
-        } else {
-            frame(Modifier.fillMaxSize())
+            if (isVideo) {
+                PlayPauseButton(
+                    isPlaying = player.isPlaying,
+                    onClick = viewModel::togglePlay,
+                    size = scale.touchMin,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                if (segments.isNotEmpty()) {
+                    SegmentStrip(
+                        segments = segments,
+                        current = focus.segmentIndex,
+                        tileHeight = scale.touchMin,
+                        onClick = viewModel::showSegment,
+                    )
+                }
+                FeedInfoBlock(
+                    favorite = favorite,
+                    focus = focus,
+                    onOpenDetails = onOpenDetails,
+                )
+                if (isVideo) {
+                    FeedScrubBar(
+                        player = player,
+                        onSeek = viewModel::seekTo,
+                        onSpeed = viewModel::setSpeed,
+                        scale = scale,
+                    )
+                }
+            }
         }
 
         // 翻段到头的手势在画面上，提示就贴着画面顶；换条的提示在正中，两条各说各的手势
@@ -623,87 +546,142 @@ private fun FeedPage(
     }
 }
 
-/**
- * 一条内容的那个「框」：逐段浏览的画面 + 底部渐变 + 段条与信息块。
- *
- * 竖屏它就是整屏，横屏它只是居中的 9:16 —— 渐变和文案都跟着框走，横屏时文字仍压在画面上，
- * 不会飘进旁边的纯黑里。
- */
+/** 画面正中的播放/暂停键：点画面那一下已经用来显隐控制层了，开关播放得有个专门的落点 */
 @Composable
-private fun FeedFrame(
-    viewModel: MainViewModel,
-    state: MainUiState,
-    graph: AppGraph,
-    favorite: Favorite,
-    focus: FocusUiState,
-    pagerState: PagerState,
-    scale: TabletScale,
-    twoPane: Boolean,
-    gesturesEnabled: Boolean,
-    onOpenDetails: () -> Unit,
+private fun PlayPauseButton(
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    size: Dp,
     modifier: Modifier = Modifier,
 ) {
-    val segments = favorite.segments
-    Box(modifier = modifier.background(Color(0xFF000000))) {
-        StageArea(
-            viewModel = viewModel,
-            favorite = favorite,
-            focus = focus,
-            pagerState = pagerState,
-            graph = graph,
-            state = state,
-            scale = scale,
-            // 竖屏把画面裁满整屏，横屏在框内完整显示不裁；图集段两种形态都整张显示
-            crop = !twoPane,
-            gesturesEnabled = gesturesEnabled,
-            modifier = Modifier.fillMaxSize(),
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Color(0x4D000000))
+            .clickable(onClickLabel = if (isPlaying) "暂停" else "播放", onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
+            contentDescription = if (isPlaying) "暂停" else "播放",
+            tint = Color.White,
+            modifier = Modifier.size(size * 0.42f),
         )
-        // 底部渐变只是让文案读得清，不吃点击：点画面还得是暂停/继续
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-                .background(FEED_BOTTOM_SCRIM),
+    }
+}
+
+/**
+ * 播放条：进度滑块 + 尾部「当前 / 总时长」+ 倍速。
+ *
+ * 跟手期间只改显示，松手才 seek（拖动中反复 seek 会把缓冲打散）。时长未知时
+ * （`TIME_UNSET` 是 -1）滑块不可拖、时间按 00:00 报，不拿 -1 去算出个负数。
+ */
+@Composable
+private fun FeedScrubBar(
+    player: PlayerUiState,
+    onSeek: (Long) -> Unit,
+    onSpeed: (Float) -> Unit,
+    scale: TabletScale,
+) {
+    val durationMs = player.durationMs
+    val canScrub = durationMs > 0L
+    var scrubbing by remember { mutableStateOf(false) }
+    var scrubValue by remember { mutableStateOf(0f) }
+    val fraction = if (!canScrub) {
+        0f
+    } else {
+        (if (scrubbing) scrubValue else player.positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+    ) {
+        Slider(
+            value = fraction,
+            onValueChange = {
+                scrubbing = true
+                scrubValue = it
+            },
+            onValueChangeFinished = {
+                scrubbing = false
+                if (canScrub) onSeek((scrubValue * durationMs).toLong())
+            },
+            enabled = canScrub,
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White,
+                inactiveTrackColor = Color(0x66FFFFFF),
+            ),
+            modifier = Modifier.weight(1f),
         )
-        Column(
+        Text(
+            text = "${formatClock((fraction * durationMs).toLong())} / ${formatClock(durationMs)}",
+            style = MaterialTheme.typography.labelLarge,
+            color = Color.White,
+            maxLines = 1,
+        )
+        SpeedMenu(speed = player.speed, onSpeed = onSpeed, scale = scale)
+    }
+}
+
+/** 倍速那颗 pill：五档平铺会挤掉滑块也容易误触，所以点当前倍速弹选择器 */
+@Composable
+private fun SpeedMenu(
+    speed: Float,
+    onSpeed: (Float) -> Unit,
+    scale: TabletScale,
+) {
+    var open by remember { mutableStateOf(false) }
+    val offNormal = abs(speed - 1f) > 0.01f
+    Box {
+        Text(
+            text = formatSpeed(speed),
+            style = MaterialTheme.typography.labelLarge,
+            color = if (offNormal) Color(0xFF8AB4F8) else Color.White,
             modifier = Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .padding(
-                    start = 16.dp,
-                    end = 16.dp,
-                    // 让开贴在框底边的进度条热区，免得拖进度时误点到「详情」
-                    bottom = (FEED_PROGRESS_HIT_DP + 8).dp,
-                ),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            if (segments.isNotEmpty()) {
-                SegmentStrip(
-                    segments = segments,
-                    current = focus.segmentIndex,
-                    tileHeight = scale.touchMin,
-                    onClick = viewModel::showSegment,
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (offNormal) Color(0x338AB4F8) else Color(0x33FFFFFF))
+                .heightIn(min = scale.touchMin)
+                .padding(horizontal = scale.gapSm)
+                .clickable(onClickLabel = "选择倍速") { open = true },
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            PLAYBACK_SPEEDS.forEach { option ->
+                val active = abs(speed - option) < 0.01f
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = formatSpeed(option),
+                            color = if (active) Color(0xFF8AB4F8) else Color.Unspecified,
+                        )
+                    },
+                    trailingIcon = if (active) {
+                        { Icon(Icons.Filled.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                    onClick = {
+                        onSpeed(option)
+                        open = false
+                    },
                 )
             }
-            FeedInfoBlock(
-                favorite = favorite,
-                focus = focus,
-                twoPane = twoPane,
-                onOpenDetails = onOpenDetails,
-            )
         }
     }
 }
 
 /**
- * 画面底部那几行：段号角标 → 标题 → 作者/站点 → 文案（两行折叠）→ 详情入口。
+ * 控制层底部那几行：段号角标 → 标题 → 作者/站点 → 文案（两行折叠）→ 详情入口。
  *
- * 详情入口只在竖屏给：横屏右栏本身就是详情，再放一个入口就是两个地方说同一件事。
+ * 横竖屏都是这一套：详情两种容器都要靠「详情」这行字进去，不再为横屏单留一个常驻栏。
  */
 @Composable
 private fun FeedInfoBlock(
     favorite: Favorite,
     focus: FocusUiState,
-    twoPane: Boolean,
     onOpenDetails: () -> Unit,
 ) {
     var expanded by remember(favorite.id) { mutableStateOf(false) }
@@ -764,19 +742,17 @@ private fun FeedInfoBlock(
                 )
             }
         }
-        if (!twoPane) {
-            val entry = listOf("详情", favorite.compositionLabel)
-                .filter { it.isNotBlank() }
-                .joinToString(" · ")
-            Text(
-                text = "$entry ›",
-                style = MaterialTheme.typography.labelMedium,
-                color = Color(0xC7FFFFFF),
-                modifier = Modifier
-                    .clickable(onClickLabel = "打开详情", onClick = onOpenDetails)
-                    .padding(vertical = 6.dp),
-            )
-        }
+        val entry = listOf("详情", favorite.compositionLabel)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        Text(
+            text = "$entry ›",
+            style = MaterialTheme.typography.labelMedium,
+            color = Color(0xC7FFFFFF),
+            modifier = Modifier
+                .padding(vertical = 6.dp)
+                .clickable(onClickLabel = "打开详情", onClick = onOpenDetails),
+        )
     }
 }
 
@@ -815,7 +791,7 @@ private fun PeekPage(
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
                 .background(FEED_BOTTOM_SCRIM)
-                .padding(start = 16.dp, end = 16.dp, bottom = (FEED_PROGRESS_HIT_DP + 8).dp),
+                .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
@@ -850,9 +826,8 @@ private fun FocusStage(
     pagerState: PagerState,
     graph: AppGraph,
     state: MainUiState,
-    scale: TabletScale,
-    crop: Boolean,
     gesturesEnabled: Boolean,
+    onTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val segments = favorite.segments
@@ -866,10 +841,7 @@ private fun FocusStage(
         when {
             segment.kind == MediaKind.IMAGE && segment.viewable -> ImageStage(
                 segment = segment,
-                fullscreen = false,
-                label = "",
-                scale = scale,
-                onToggleFullscreen = { viewModel.setFullscreen(true) },
+                onTap = onTap,
             )
 
             !segment.playable -> EmptySegmentPage(segment)
@@ -877,13 +849,7 @@ private fun FocusStage(
             page == focus.segmentIndex -> PlayerStage(
                 player = state.player,
                 graph = graph,
-                fullscreen = false,
-                feed = true,
-                crop = crop,
-                onTogglePlay = viewModel::togglePlay,
-                onSeek = viewModel::seekTo,
-                onSpeed = viewModel::setSpeed,
-                onToggleFullscreen = { viewModel.setFullscreen(true) },
+                onTap = onTap,
                 modifier = Modifier.fillMaxSize(),
             )
 
@@ -893,18 +859,15 @@ private fun FocusStage(
 }
 
 /**
- * 图集段：Fit 完整显示，双指缩放、双击复原，没放大时单指横滑翻页。
+ * 图集段：整屏 Fit 完整显示、不裁切，双指缩放、双击复原，没放大时单指横滑翻页。
  *
- * [fullscreen] 为真时图片铺满整屏（连遮罩的内边距也不留），右上角按钮换成退出全屏。
  * 缩放与位移按 `segment.index` 记忆，翻到下一张不会把上一张的放大带过去。
+ * 点画面那一下（[onTap]）显隐控制层，与视频段同一个语义：画面已经铺满整屏，没有第二种尺寸可切。
  */
 @Composable
 private fun ImageStage(
     segment: MediaSegment,
-    fullscreen: Boolean,
-    label: String,
-    scale: TabletScale,
-    onToggleFullscreen: () -> Unit,
+    onTap: () -> Unit,
 ) {
     val stage = remember(segment.index) { ImageStageState() }
     Box(
@@ -927,37 +890,19 @@ private fun ImageStage(
                 }
                 .pointerInput(segment.index) { imageStageGestures(stage) }
                 .pointerInput(segment.index) {
+                    // 单击显隐控制层、双击复原缩放，共用一个探测器；
                     // onDoubleTap 的签名是 (Offset) -> Unit，方法引用 stage::reset 是 () -> Unit，对不上
-                    detectTapGestures(onDoubleTap = { stage.reset() })
+                    detectTapGestures(onTap = { onTap() }, onDoubleTap = { stage.reset() })
                 },
         )
         if (stage.zoom <= 1f) {
-            val hint = listOf(
-                label.takeIf { it.isNotBlank() },
-                "双指缩放 · 双击复原",
-            ).filterNotNull().joinToString(" · ")
             Text(
-                text = hint,
+                text = "双指缩放 · 双击复原",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0x99FFFFFF),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .then(if (fullscreen) Modifier.systemBarsPadding() else Modifier)
                     .padding(top = 12.dp),
-            )
-        }
-        IconButton(
-            onClick = onToggleFullscreen,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .then(if (fullscreen) Modifier.systemBarsPadding() else Modifier)
-                .padding(6.dp)
-                .size(scale.touchMin),
-        ) {
-            Icon(
-                painter = painterResource(if (fullscreen) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen),
-                contentDescription = if (fullscreen) "退出全屏" else "全屏看这张图",
-                tint = Color.White,
             )
         }
     }
@@ -1007,81 +952,6 @@ private suspend fun PointerInputScope.imageStageGestures(state: ImageStageState)
 }
 
 private const val MAX_IMAGE_ZOOM = 4f
-
-/**
- * 全屏层按当前段的素材决定怎么铺满：图集段放大整屏、可以在图片之间左右翻；
- * 视频段（以及还没有解析结果的段）仍交给播放器那条路。
- *
- * 段号始终写在 [MainViewModel] 的 focus 里，所以退出全屏后遮罩层停在同一张图、同一段视频。
- */
-@Composable
-internal fun FullscreenLayer(
-    viewModel: MainViewModel,
-    state: MainUiState,
-    graph: AppGraph,
-    favorite: Favorite?,
-    focus: FocusUiState?,
-    scale: TabletScale,
-) {
-    val segments = favorite?.segments.orEmpty()
-    val current = focus?.segmentIndex ?: -1
-    val image = segments.getOrNull(current)?.takeIf { it.viewable }
-    if (favorite != null && image != null) {
-        FullscreenImages(
-            segments = segments,
-            current = current,
-            scale = scale,
-            onExit = { viewModel.setFullscreen(false) },
-            onSegment = viewModel::showSegment,
-        )
-    } else {
-        PlayerStage(
-            player = state.player,
-            graph = graph,
-            fullscreen = true,
-            onTogglePlay = viewModel::togglePlay,
-            onSeek = viewModel::seekTo,
-            onSpeed = viewModel::setSpeed,
-            onToggleFullscreen = { viewModel.setFullscreen(false) },
-            modifier = Modifier.fillMaxSize(),
-        )
-    }
-}
-
-/** 整屏看图：只在图集段之间翻页，翻到哪一张就回写哪一段的编号 */
-@Composable
-private fun FullscreenImages(
-    segments: List<MediaSegment>,
-    current: Int,
-    scale: TabletScale,
-    onExit: () -> Unit,
-    onSegment: (Int) -> Unit,
-) {
-    val images = remember(segments) { segments.filter { it.viewable } }
-    val pagerState = rememberPagerState(
-        initialPage = images.indexOfFirst { it.index == current }.coerceAtLeast(0),
-        pageCount = { images.size },
-    )
-    // 手势停下来才回写：拖过 5 张就写 5 次段号、5 次落盘，白做功
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.currentPage to pagerState.isScrollInProgress }
-            .collect { (page, scrolling) ->
-                if (!scrolling) images.getOrNull(page)?.let { onSegment(it.index) }
-            }
-    }
-    HorizontalPager(
-        state = pagerState,
-        modifier = Modifier.fillMaxSize(),
-    ) { page ->
-        ImageStage(
-            segment = images[page],
-            fullscreen = true,
-            label = "第 ${page + 1}/${images.size} 张",
-            scale = scale,
-            onToggleFullscreen = onExit,
-        )
-    }
-}
 
 /** 还没装进播放器的视频段：封面 + 时长，点击翻过来就开始播 */
 @Composable
@@ -1212,8 +1082,8 @@ private fun StageArea(
     graph: AppGraph,
     state: MainUiState,
     scale: TabletScale,
-    crop: Boolean,
     gesturesEnabled: Boolean,
+    onTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (favorite.segments.isEmpty()) {
@@ -1226,9 +1096,8 @@ private fun StageArea(
             pagerState = pagerState,
             graph = graph,
             state = state,
-            scale = scale,
-            crop = crop,
             gesturesEnabled = gesturesEnabled,
+            onTap = onTap,
             modifier = modifier,
         )
     }
@@ -1274,9 +1143,9 @@ private fun UnresolvedStage(favorite: Favorite, scale: TabletScale, modifier: Mo
 }
 
 /**
- * 详情正文：播放控制、summary 全文、当前段位置、后台信息、备注、标签与本地操作。
+ * 详情正文：summary 全文、当前段位置、后台信息、备注、标签与本地操作。
  *
- * 底色与圆角都不在这份内容里 —— 横屏由右栏铺 #101017、竖屏由抽屉铺 #15151D，
+ * 底色与圆角都不在这份内容里 —— 横屏由侧边抽屉铺 #15151D、竖屏由底部抽屉铺同一色，
  * 同一套控件放在两种容器中，不必各抄一份。
  */
 @Composable
@@ -1304,7 +1173,10 @@ private fun FocusInfo(
             .padding(horizontal = 14.dp, vertical = scale.gapXs),
         verticalArrangement = Arrangement.spacedBy(scale.gapXs),
     ) {
-        PlayControls(viewModel = viewModel, player = state.player, scale = scale)
+        // 播放的控件全在画面上的控制层里，详情只留一句播放失败的原因
+        state.player.error?.let {
+            Text(text = it, style = MaterialTheme.typography.bodySmall, color = FOCUS_ERROR)
+        }
 
         SectionDark("内容说明")
         Text(
@@ -1497,84 +1369,6 @@ private fun FocusInfo(
             },
             onDismiss = { showDeleteConfirm = false },
         )
-    }
-}
-
-/**
- * 播放那一行：时间、倍速、全屏。
- *
- * 这三样原来长在画面底部的控制条上。改版后进度条只剩贴边 2dp、控制条撤了，
- * 倍速与全屏得有个常驻的落点，就并进详情里，跟「当前段」挨着；播放出错也报在这一段。
- */
-@Composable
-private fun PlayControls(
-    viewModel: MainViewModel,
-    player: PlayerUiState,
-    scale: TabletScale,
-) {
-    SectionDark("播放")
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
-    ) {
-        Text(
-            text = "${formatClock(player.positionMs)} / ${formatClock(player.durationMs)}",
-            style = MaterialTheme.typography.labelLarge,
-            color = FOCUS_TEXT,
-            maxLines = 1,
-            modifier = Modifier.weight(1f),
-        )
-        Box {
-            var speedMenuOpen by remember { mutableStateOf(false) }
-            val offNormal = abs(player.speed - 1f) > 0.01f
-            Text(
-                text = formatSpeed(player.speed),
-                style = MaterialTheme.typography.labelLarge,
-                color = if (offNormal) Color(0xFF8AB4F8) else Color.White,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (offNormal) Color(0x338AB4F8) else Color(0x33FFFFFF))
-                    .heightIn(min = scale.touchMin)
-                    .padding(horizontal = scale.gapSm)
-                    .clickable(onClickLabel = "选择倍速") { speedMenuOpen = true },
-            )
-            DropdownMenu(expanded = speedMenuOpen, onDismissRequest = { speedMenuOpen = false }) {
-                PLAYBACK_SPEEDS.forEach { speed ->
-                    val active = abs(player.speed - speed) < 0.01f
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = formatSpeed(speed),
-                                color = if (active) Color(0xFF8AB4F8) else Color.Unspecified,
-                            )
-                        },
-                        trailingIcon = if (active) {
-                            { Icon(Icons.Filled.Check, contentDescription = null) }
-                        } else {
-                            null
-                        },
-                        onClick = {
-                            viewModel.setSpeed(speed)
-                            speedMenuOpen = false
-                        },
-                    )
-                }
-            }
-        }
-        IconButton(
-            onClick = { viewModel.setFullscreen(true) },
-            modifier = Modifier.size(scale.touchMin),
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_fullscreen),
-                contentDescription = "全屏播放",
-                tint = Color.White,
-            )
-        }
-    }
-    player.error?.let {
-        Text(text = it, style = MaterialTheme.typography.bodySmall, color = FOCUS_ERROR)
     }
 }
 
