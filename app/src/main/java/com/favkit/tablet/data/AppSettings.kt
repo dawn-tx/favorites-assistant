@@ -125,8 +125,8 @@ class AppSettings(context: Context) {
     suspend fun setSinceRev(rev: Long) {
         val stamp = cursorStamp(current())
         update {
-            it[Keys.SINCE_REV] = rev
-            it[Keys.SINCE_REV_ACCT] = stamp
+            this[Keys.SINCE_REV] = rev
+            this[Keys.SINCE_REV_ACCT] = stamp
         }
     }
 

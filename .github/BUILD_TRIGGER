@@ -9,20 +9,10 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 19
-code: 60342e1
-note: 多设备与多写入者同步这条链路整体换语义（协议、参考实现、App 三面同批，App 面是这次要出包的改动）。
-      一、Room 版本 4→5：favorites 行加 rev / updatedAt / hlcSeq 三列，pending_ops 独立成表。
-      AppDatabase 挂的是 fallbackToDestructiveMigration()，所以**装着旧版直接升级会把本机收藏表清空**，
-      这一包请当新装看待，或先手动清数据；这不是回归，是既有迁移策略的既定代价。
-      二、发号器换成 HLC：新增 data/SyncClock.kt + net/Hlc.kt（状态落 DataStore，不放 Room），
-      出站带 write_hlc 与 changed_fields（只报这次真改的列），后台逐列 LWW 决胜。
-      三、对账通道打通：SyncApi.fetchChanges + FavoritesRepository.applyChanges 按后台顺序逐条落，
-      since_rev 存进 AppSettings 并绑「账号指纹 + 端点」游标戳（换令牌或换后台自动退回从头对）；
-      触发点两个 —— worker 把队列排空后顺带对一次，以及进前台补一次（离线或空表让路），
-      truncated 时退回全量翻页，跑满一轮 PAGE_CAP 后在同一次 worker 里续跑一次。
-      四、账号隔离在 App 侧只体现为一件事：设置里存了一串不同的令牌 = 换账号，本机在同一条事务里
-      清掉未上传的改动（pending_ops 整表 + QUEUED/FAILED 归 SYNCED + 物理删墓碑），只改端点不清。
-      五、一致性收口：后台收下但本机没写进去时**留队标红**而不是静默确认，所有 badge 写入按
-      「这一笔还在队列里」门控；被 op_errors 点名的条目留在队列、把后台那句中文原因写进 lastError，
-      顶栏「失败 N」点开可见。联网回调按裁决只补传、不对账，零轮询零定时器这条没破。
+build: 20
+code: 576cb53
+note: 修 build 19 的编译失败：AppSettings.setSinceRev 在 settings.update { } 里写 it[Keys...]，
+      而 update 的 lambda 形参是 MutablePreferences.() -> Unit（接收者式，没有隐式 it），
+      两个 e: 都是 Unresolved reference 'it'（:128 :129）。改成 this[Keys...]，与同文件其余 setter 同一写法；
+      全库 grep 'it\[' 只有这两行，别的 update 调用点本来就是接收者式。
+      同步这条链路的改动本身（协议 + Room v5 + HLC + 对账）已在 6c822aa 里，这次只是让它编得过。
