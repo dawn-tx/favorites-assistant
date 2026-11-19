@@ -9,10 +9,22 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 20
-code: 576cb53
-note: 修 build 19 的编译失败：AppSettings.setSinceRev 在 settings.update { } 里写 it[Keys...]，
-      而 update 的 lambda 形参是 MutablePreferences.() -> Unit（接收者式，没有隐式 it），
-      两个 e: 都是 Unresolved reference 'it'（:128 :129）。改成 this[Keys...]，与同文件其余 setter 同一写法；
-      全库 grep 'it\[' 只有这两行，别的 update 调用点本来就是接收者式。
-      同步这条链路的改动本身（协议 + Room v5 + HLC + 对账）已在 6c822aa 里，这次只是让它编得过。
+build: 21
+code: 24065ae
+note: 按「个人助手」定位把同步与内容链路整体瘦身（多写者那一套按 2026-11-20 裁决下线）。
+      一、后台：一张 favorites 表以 url 为主键，无账号/rev/墓碑/revision_log/HLC；接口缩到
+      /sync（一次一条、按 url 增删）、/favorites 两档（整行 / fields=min 清单）、/favorites/lookup
+      批量取内容、/resolve 按 url 重排、/health 与 /meta；新增 B 的固定格式回调（只增不改、
+      不收时间、坏链接跳过、处理完就 2xx）。内容改为异步就绪：收到链接后排转存任务
+      （解析→下载→大视频切片→上传存储→拿回 id），按源 url 缓存、失败退避 3 次、重启续跑，
+      状态走 media_state（pending/ready/failed）。
+      二、App 同步层：删掉 HLC/SyncClock/changed_fields/base_rev/merged_into/op_errors 与
+      /favorites/changes 整套；对账改成「翻完整份清单做差集」，中途失败一律不删、脏行不删；
+      上传判据回到 applied==1；打开待就绪条目时单条查询一次，失败只提示不写库。
+      三、UI：全局状态收进屏幕底部居中悬浮提示条（临时回执 3.5s、同步失败带重试、离线、上传失败），
+      顶栏只留待同步与转圈，Snackbar 与两处状态胶囊删除；内容边距与 20mm 物理边距解耦
+      （新增 content_inset 20/24/28dp，墙在 1280dp 宽平板上因此多出一列）；占位文案统一
+      「内容还在后台准备」；切片视频不给整片缓存按钮。
+      四、Room v6（destructive）：删 rev/hlcSeq、加 serverUpdatedAt/mediaState、url 唯一索引。
+      五、文档：两份作废设计稿删除，口径合并进「同步后台接口说明」（含 B 回调一节）。
+      mock 测试重写为三套 26 例（协议 17 / 回调 7 / 转存 2），本地全绿。

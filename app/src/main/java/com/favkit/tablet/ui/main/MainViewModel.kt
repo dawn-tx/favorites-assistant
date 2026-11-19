@@ -7,7 +7,9 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.FavoriteFilter
 import com.favkit.tablet.data.MediaKind
+import com.favkit.tablet.data.MediaState
 import com.favkit.tablet.data.SettingsSnapshot
+import com.favkit.tablet.data.SyncBadge
 import com.favkit.tablet.data.Tag
 import com.favkit.tablet.di.AppGraph
 import com.favkit.tablet.floating.FloatingDraftStore
@@ -15,9 +17,8 @@ import com.favkit.tablet.floating.FloatingSaveUseCase
 import com.favkit.tablet.floating.PanelStatus
 import com.favkit.tablet.floating.SaveOutcome
 import com.favkit.tablet.media.PlayerUiState
-import com.favkit.tablet.net.ChangedFields
+import com.favkit.tablet.net.LookupOutcome
 import com.favkit.tablet.net.PullOutcome
-import com.favkit.tablet.sync.Reconcile
 import com.favkit.tablet.util.VideoLinkDetector
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -76,6 +77,10 @@ data class MainUiState(
     val showSettings: Boolean = false,
     val quickCollect: Boolean = false,
     val message: String? = null,
+    /** 对账失败的原因（底部悬浮提示条读它）；null = 上次对账成功 */
+    val sweepError: String? = null,
+    /** 打开待就绪条目时那次单条查询失败了：只影响提示，不动库里任何状态 */
+    val contentRefreshError: String? = null,
 ) {
     val selectionActive: Boolean get() = checked.isNotEmpty()
     val allChecked: Boolean get() = items.isNotEmpty() && checked.size == items.size
@@ -146,41 +151,30 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     /**
-     * 进前台对一次账（`GET /favorites/changes`）。
+     * 进前台对一次账（翻一遍后台清单做差集）。
      *
      * 为什么要这第二条触发路：worker 那一档只在「本机刚把自己攒的改动传完」时跑，用户不写任何东西
-     * 就永远不触发 —— 新设备登录、闲置很久后回到界面，这些纯接收场景里别的设备的删除根本落不下来。
-     * 单飞不另加标志：[com.favkit.tablet.sync.SyncManager.reconcile] 里那个 AtomicBoolean 已经保证
+     * 就永远不触发 —— 换设备、闲置很久后回到界面、另一个 App 推了新链接，这些纯接收场景里
+     * 后台的变化根本落不下来。
+     * 单飞不另加标志：[com.favkit.tablet.sync.SyncManager.sweep] 里那个 AtomicBoolean 已经保证
      * 同一时刻只有一笔在跑，撞上了直接回 BUSY，什么都不做。
-     * 离线不试：这条链的唯一出口是 SyncGate 的出站时隙，一次注定失败的请求不该把它占掉（也不弹任何东西）。
-     * 冷启动那一次由 MainActivity 用 `window.decorView.post` 推到首帧之后再跑，所以这里不构成「首帧之前新增网络请求」。
+     * 离线不试：一次注定失败的请求不该占出站时隙（失败也不弹任何东西）。
+     * 冷启动那一次由 MainActivity 用 `window.decorView.post` 推到首帧之后再跑，所以不构成「首帧之前新增网络请求」。
      *
-     * **镜像空着就退让**：这跟 [seedRemoteCache] 用的是同一个判据、走的是相反的分支。表空 = 换机或清了数据，
-     * 那条路已经去后台取第一页了，本机既没有行等墓碑来删、游标也本来就是 0，再叠一次全量日志重放
-     * 等于一次进前台把「把后台现状搬到本机」做两遍。
+     * **镜像空着就退让**：表空 = 换机或清了数据，[seedRemoteCache] 已经去后台取第一页；
+     * 那一趟本身就是全量的，再叠一次扫描等于把同一件事做两遍。
      */
     fun onEnterForeground() {
         if (!_state.value.online) return
         viewModelScope.launch {
             if (graph.favorites.cachedCount() == 0) return@launch
-            // 界面这一档只消费 TRUNCATED；PAGE_CAP 由 worker 那一档接（SyncWorker.reconcileQuietly 落定即续跑一次）
-            if (graph.sync.reconcile() == Reconcile.TRUNCATED) rebuildMirrorFromFirstPage()
+            graph.sync.sweep()
         }
     }
 
-    /**
-     * `truncated` 的善后：后台已经把 `since_rev` 那段日志 GC 掉了，缺的那一段永远补不回来，
-     * 游标 [com.favkit.tablet.sync.SyncManager.reconcile] 归零，剩下的只能按「服务端为准」重建镜像。
-     *
-     * 做法是把翻页游标退回第一页再取一页，走的还是 [loadRemotePage] 那条既有路，不新写第二份翻页：
-     * 这个 App 的本地表本来就只缓存「滚到过的那几页」（README 的镜像口径），所以这里不追求一次拉完整库，
-     * 剩下的页仍由「列表离底两屏补一页」那条路继续接。
-     */
-    private fun rebuildMirrorFromFirstPage() {
-        remoteCursor = null
-        // 用户可能已经滚到底、remoteHasMore 被写成假，不扶正的话这次自动补页会被自己那条判据挡掉
-        _state.update { it.copy(remoteHasMore = true) }
-        loadRemotePage(announce = false)
+    /** 底部提示条上的「重试」：用户手点，不构成定时重试 */
+    fun retrySweep() {
+        viewModelScope.launch { graph.sync.sweep() }
     }
 
     private fun bindFlows() {
@@ -203,6 +197,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { prefetchFlow.collect { v -> _state.update { it.copy(prefetch = v) } } }
         viewModelScope.launch { storageFlow.collect { v -> _state.update { it.copy(storageReport = v) } } }
         viewModelScope.launch { graph.sync.running.collect { v -> _state.update { it.copy(syncing = v) } } }
+        viewModelScope.launch { graph.sync.sweepError.collect { v -> _state.update { it.copy(sweepError = v) } } }
         viewModelScope.launch { graph.player.state.collect { v -> _state.update { it.copy(player = v) } } }
         viewModelScope.launch { graph.settings.snapshot.collect { v -> _state.update { it.copy(settings = v) } } }
         viewModelScope.launch { graph.sync.queuedCount.collect { v -> _state.update { it.copy(queued = v) } } }
@@ -261,16 +256,12 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     /**
-     * 标签本身变了（改名或从库里删掉）：受影响条目的标签快照要重新排队，否则云端停在旧标签名。
-     * 这次改动动的是标签，所以 changed_fields 只报 tags，不能顺手报全字段。
-     *
-     * 排队前先让 repository 给这几条推一个新的 HLC 读数：改名对它们就是一次写入，
-     * 戳不推新，发出去的 `write_hlc` 还是上一次编辑的时刻，后台据此把改名判成旧改动丢掉。
+     * 标签本身变了（改名或从库里删掉）：受影响条目的标签快照要重新排队，否则后台停在旧标签名。
      */
     private suspend fun resync(favorites: List<Favorite>) {
         if (favorites.isEmpty()) return
         val restamped = graph.favorites.stampTagRewrite(favorites.map { it.id })
-        restamped.forEach { graph.sync.queueUpsert(it, ChangedFields.TAGS) }
+        restamped.forEach { graph.sync.queueUpsert(it) }
         messageFlow.value = "标签已更新，${restamped.size} 条收藏重新排队同步"
     }
 
@@ -279,12 +270,14 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
      *
      * 落在上次看的那一段（老数据没有段号就第 0 段），因为后台给的 `media[]` 顺序就是阅读顺序，
      * 中途退出再进来不该从第一张重看。没解析出素材也照样打开 —— 遮罩层要能说清这条链接怎么了，
-     * 并且把「重新解析」放在用户看得见的位置。
+     * 并且把「重新准备」放在用户看得见的位置。
      */
     fun openFocus(id: String) {
         val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
         focusFlow.value = FocusUiState(id, 0)
         filtersFlow.value = false
+        // 内容还没就绪：用户点开的那一下就是最合理的询问时机，问一次就走，不做轮询
+        if (favorite.contentPending) peekContent(id)
         if (favorite.segments.isEmpty()) {
             graph.player.pausePlayback()
             return
@@ -293,6 +286,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         focusFlow.value = FocusUiState(id, start)
         loadSegment(favorite, start, autoPlay = false)
     }
+
+    /** 关掉遮罩层时把那次单条查询的失败提示一起收掉：它只属于刚才打开的那一条 */
+    private fun clearContentRefreshError() = _state.update { it.copy(contentRefreshError = null) }
 
     /**
      * 关闭遮罩层：停下播放。
@@ -304,6 +300,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         graph.player.pausePlayback()
         persistProgressNow()
         focusFlow.value = null
+        clearContentRefreshError()
     }
 
     /**
@@ -407,28 +404,50 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     // region 后台读写
     /**
-     * 遮罩层「重新解析」：让后台丢弃旧结果重算这一条。
+     * 遮罩层「重新准备」：让后台丢弃旧结果，重新解析、下载并把素材再转存一次。
      *
-     * 这是全站唯一主动要解析结果的入口，必须由用户点：同一条链接的解析结果由链接决定，
-     * 自动重试只会多占一个出站时隙。
+     * 后台立刻返回、把这条置回 `pending`，内容稍后再就绪 —— 所以这里只回一句「已重新排队」，
+     * 不假装已经拿到内容。这是全站唯一主动重建内容的入口，必须由用户点。
      */
     fun resolveNow(id: String) {
         viewModelScope.launch {
-            val outcome = graph.api.resolve(listOf(id))
-            if (outcome.error != null) {
-                messageFlow.value = "重新解析失败：${outcome.error}"
+            val favorite = graph.favorites.byId(id) ?: return@launch
+            val result = graph.api.resolve(listOf(favorite.url))
+            if (result.error != null) {
+                messageFlow.value = "重新准备失败：${result.error}"
                 return@launch
             }
-            if (outcome.unknownIds.isNotEmpty()) {
+            if (result.unknownUrls.isNotEmpty()) {
                 messageFlow.value = "后台没有这条收藏，请先把它重新上传"
                 return@launch
             }
-            if (outcome.favorites.isEmpty()) {
-                messageFlow.value = "后台没有返回这条的解析结果"
-                return@launch
+            graph.favorites.importRemote(result.favorites)
+            messageFlow.value = "已重新排队，内容准备好会自动出现"
+        }
+    }
+
+    /**
+     * 打开一条内容还没就绪的收藏时，单独问一次它的状态。
+     *
+     * 只在用户点开那条时发一次（不进任何定时器）：用户正盯着一条还在转存的大视频，
+     * 他点开的那一下就是最合理的询问时机。失败时**不动库里任何东西**，
+     * 只在界面上说一句「刷新失败」，库里那行继续停在原来的 pending/ready 状态。
+     */
+    fun peekContent(id: String) {
+        viewModelScope.launch {
+            val favorite = graph.favorites.byId(id) ?: return@launch
+            // 还没传上去的条目后台根本没有，问也问不出来
+            if (favorite.badge != SyncBadge.SYNCED) return@launch
+            if (favorite.resolved || favorite.mediaState == MediaState.FAILED) return@launch
+            when (val outcome = graph.api.peek(favorite.url)) {
+                is LookupOutcome.Failed -> {
+                    _state.update { it.copy(contentRefreshError = "刷新失败：${outcome.reason}") }
+                }
+                is LookupOutcome.Loaded -> {
+                    graph.favorites.importRemote(outcome.favorites)
+                    _state.update { it.copy(contentRefreshError = null) }
+                }
             }
-            graph.favorites.importRemote(outcome.favorites)
-            messageFlow.value = "已重新解析"
         }
     }
 
@@ -524,8 +543,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         val ids = checkedFlow.value.toList()
         if (ids.isEmpty()) return
         viewModelScope.launch {
+            val targets = ids.mapNotNull { graph.favorites.byId(it) }
             graph.favorites.markDeleted(ids)
-            graph.sync.queueDelete(ids)
+            graph.sync.queueDelete(targets)
             checkedFlow.value = emptySet()
             closeFocus()
             messageFlow.value = "已删除 ${ids.size} 条，正在排队上传"
@@ -535,8 +555,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     fun deleteOne(id: String) {
         viewModelScope.launch {
+            val target = graph.favorites.byId(id)
             graph.favorites.markDeleted(listOf(id))
-            graph.sync.queueDelete(listOf(id))
+            target?.let { graph.sync.queueDelete(listOf(it)) }
             closeFocus()
             messageFlow.value = "已删除，正在排队上传"
             reclaim(listOf(id))
@@ -572,7 +593,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun saveNote(id: String, note: String) {
         viewModelScope.launch {
             val updated = graph.favorites.updateNote(id, note)
-            updated?.let { graph.sync.queueUpsert(it, ChangedFields.NOTE) }
+            updated?.let { graph.sync.queueUpsert(it) }
             messageFlow.value = "备注已保存，已排入上传队列"
         }
     }
@@ -580,7 +601,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun saveTags(id: String, tagIds: List<Long>) {
         viewModelScope.launch {
             graph.favorites.updateTags(id, tagIds)
-            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it, ChangedFields.TAGS) }
+            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it) }
         }
     }
 
@@ -594,7 +615,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             val ids = favorite.tags.map { it.id }.toMutableList()
             if (!ids.remove(tagId)) ids.add(tagId)
             graph.favorites.updateTags(id, ids)
-            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it, ChangedFields.TAGS) }
+            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it) }
         }
     }
 
@@ -639,11 +660,21 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
-    /** 手动把某条视频缓存到本地，离线也能播 */
+    /**
+     * 手动把某条视频缓存到本地，离线也能播。
+     *
+     * 只对**单文件**素材做整片预取。切片过的视频（`.m3u8`）由后台按大视频切出来，
+     * 整片预取要一套播放列表解析 + 逐片下载的管理器，换来的只是「省一次边播边存」——
+     * 所以这里明确不做，播放时照常边播边存，只是不标「已缓存」。
+     */
     fun prefetch(id: String) {
         val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
         val url = favorite.segments.firstOrNull { it.playable }?.url ?: return
         if (url.isBlank() || prefetches.containsKey(id)) return
+        if (isPlaylist(url)) {
+            messageFlow.value = "这条是切片视频，播放时会边看边存，不支持整片缓存"
+            return
+        }
         val handle = PrefetchHandle()
         val job = viewModelScope.launch {
             val written = graph.media.prefetch(
@@ -661,6 +692,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
         prefetches[id] = handle to job
     }
+
+    /** 切片清单（HLS）当资源读只会读到几 KB 的播放列表，不能算「已缓存」 */
+    private fun isPlaylist(url: String): Boolean =
+        url.substringBefore('?').lowercase().endsWith(".m3u8")
 
     fun cancelPrefetch(id: String) {
         prefetches.remove(id)?.let { (handle, job) ->
@@ -702,20 +737,11 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     // region 设置
     fun setSyncEndpoint(value: String) = viewModelScope.launch { graph.settings.setSyncEndpoint(value) }
 
-    /**
-     * 令牌换了值 = 换了一个账号，未上传的写要先作废再谈新账号（判据与理由见
-     * [com.favkit.tablet.data.FavoritesRepository.dropUnsentEdits]）。
-     * 判据只看 trim 之后的值是否不同：同一份配置重复保存不该把用户刚攒的改动清掉。
-     *
-     * 只改端点不作废队列：后台的账号身份只由 bearer 算（`acct-<sha1(令牌)[:16]>`），同一串令牌指到
-     * 另一台后台还是同一个账号，把待发队列清了等于替用户否定他刚换上的那台后台；
-     * 那边真正会错的是游标，而 [com.favkit.tablet.data.AppSettings.sinceRev] 的游标戳已经把端点算进去了，
-     * 换后台之后自动归 0 从头对。
-     */
+    /** 换令牌只换后台身份：队列里的 op 按 url 落库，推过去最多把这几条也建到新后台，无害，所以不清队列 */
     fun setSyncToken(value: String) = viewModelScope.launch {
         val previous = graph.settings.current().syncToken
         graph.settings.setSyncToken(value)
-        if (previous != value.trim()) graph.favorites.dropUnsentEdits()
+        if (previous != value.trim()) graph.favorites.settlePendingBadges()
     }
     fun setAssistantEnabled(value: Boolean) = viewModelScope.launch { graph.settings.setAssistantEnabled(value) }
     fun setPasteSuggestion(value: Boolean) = viewModelScope.launch { graph.settings.setPasteSuggestion(value) }

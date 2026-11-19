@@ -6,6 +6,7 @@
 -->
 <resources>
     <dimen name="touch_target_min">56dp</dimen>
+    <dimen name="content_inset">20dp</dimen>
     <dimen name="edge_inset">20dp</dimen>
     <dimen name="gap_xs">6dp</dimen>
     <dimen name="gap_sm">12dp</dimen>

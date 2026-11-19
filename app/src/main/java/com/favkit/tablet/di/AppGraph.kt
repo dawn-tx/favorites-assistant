@@ -4,7 +4,6 @@ import android.app.Application
 import com.favkit.tablet.core.StorageProbe
 import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.data.FavoritesRepository
-import com.favkit.tablet.data.SyncClock
 import com.favkit.tablet.data.TagsRepository
 import com.favkit.tablet.data.db.AppDatabase
 import com.favkit.tablet.media.ImageStore
@@ -24,9 +23,7 @@ class AppGraph private constructor(private val app: Application) {
     val db: AppDatabase by lazy { AppDatabase.build(app) }
     val tags: TagsRepository by lazy { TagsRepository(db) }
 
-    /** 本机 HLC 状态，落在 settings 那个 DataStore 里；见 [SyncClock] 为什么不能放 Room */
-    val clock: SyncClock by lazy { SyncClock(settings) }
-    val favorites: FavoritesRepository by lazy { FavoritesRepository(db, settings, clock) }
+    val favorites: FavoritesRepository by lazy { FavoritesRepository(db) }
     val connectivity: Connectivity by lazy { Connectivity(app) }
     val media: MediaCache by lazy { MediaCache(app, settings) }
     val images: ImageStore by lazy { ImageStore(app, settings) }
@@ -34,9 +31,9 @@ class AppGraph private constructor(private val app: Application) {
     val storage: StorageProbe by lazy { StorageProbe(app, db, media) }
 
     val gate: SyncGate by lazy { SyncGate() }
-    val api: SyncApi by lazy { SyncApi(settings, gate, clock) }
-    // 对账要读游标、发请求、落库，三样都是别人已经建好的对象；sync 不反过来被它们持有，无环
-    val sync: SyncManager by lazy { SyncManager(app, db, settings, favorites, api) }
+    val api: SyncApi by lazy { SyncApi(settings, gate) }
+    // 对账要发请求、落库，两样都是别人已经建好的对象；sync 不反过来被它们持有，无环
+    val sync: SyncManager by lazy { SyncManager(app, db, favorites, api) }
 
     companion object {
         @Volatile

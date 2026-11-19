@@ -2,7 +2,6 @@ package com.favkit.tablet.floating
 
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.di.AppGraph
-import com.favkit.tablet.net.ChangedFields
 import com.favkit.tablet.util.VideoLinkDetector
 
 sealed interface SaveOutcome {
@@ -63,7 +62,7 @@ class FloatingSaveUseCase(private val graph: AppGraph) {
             tagIds = finalTagIds.distinct(),
         )
         if (reopened != null) {
-            graph.sync.queueUpsert(reopened, ChangedFields.CREATE)
+            graph.sync.queueUpsert(reopened)
             return SaveOutcome.Queued(reopened, "这条之前删过，已重新收藏并按队列上传")
         }
 
@@ -73,7 +72,7 @@ class FloatingSaveUseCase(private val graph: AppGraph) {
             sourceApp = VideoLinkDetector.sourceLabel(cleanUrl),
             tagIds = finalTagIds.distinct(),
         )
-        graph.sync.queueUpsert(favorite, ChangedFields.CREATE)
+        graph.sync.queueUpsert(favorite)
         return SaveOutcome.Queued(favorite, "已保存，正在按队列上传")
     }
 }

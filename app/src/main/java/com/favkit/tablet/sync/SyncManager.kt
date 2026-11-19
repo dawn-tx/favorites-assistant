@@ -8,24 +8,24 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
-import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.FavoritesRepository
 import com.favkit.tablet.data.db.AppDatabase
 import com.favkit.tablet.data.db.PendingOpRow
-import com.favkit.tablet.net.ChangesOutcome
+import com.favkit.tablet.net.FavoriteDto
+import com.favkit.tablet.net.LookupOutcome
 import com.favkit.tablet.net.OpDto
+import com.favkit.tablet.net.PullOutcome
 import com.favkit.tablet.net.SyncApi
-import com.favkit.tablet.net.targetId
 import com.favkit.tablet.net.toDeleteOp
 import com.favkit.tablet.net.toUpsertOp
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -36,16 +36,14 @@ import kotlinx.serialization.json.Json
 /**
  * 上传编排：
  * 1) 任何本地改动都先写 Room（离线也能立刻看到结果），再投递一条 pending_ops；
- * 2) [SyncWorker] 串行消费队列；两条之间的等待由 [com.favkit.tablet.net.SyncGate] 在出站口统一把控，
- *    失败重试与取解析结果这些旁路走同一个闸门，用户设的节奏才对得上；
+ * 2) [SyncWorker] 串行消费队列；两条之间的等待由 [com.favkit.tablet.net.SyncGate] 在出站口统一把控；
  * 3) 网络类失败静默退避重试 [MAX_ATTEMPTS] 次，用尽后留在队列里，靠联网回调或下次改动自动补传；
  * 4) 后台明确拒绝（4xx 或确认条数对不上）的条目保留在队列并标 FAILED，绝不静默丢弃；
- * 5) 队列排空后由 [reconcile] 与后台对一次账（`GET /favorites/changes`），把别的设备写进来的改动落到本机。
+ * 5) 队列排空后由 [sweep] 翻一遍后台清单做差集：补进新增、刷新变更、删掉后台已经没有的活行。
  */
 class SyncManager(
     context: Context,
     db: AppDatabase,
-    private val settings: AppSettings,
     private val favorites: FavoritesRepository,
     private val api: SyncApi,
 ) {
@@ -74,14 +72,10 @@ class SyncManager(
     /**
      * 同一时刻只允许一笔对账在跑。
      *
-     * 判据放在这里而不是靠调用方自觉：对账现在有两档触发 —— [SyncWorker] 排空队列那一档（worker 本身是
-     * unique work，已经串了）与进前台那一档（`MainActivity.onResume` → `decorView.post` →
-     * [com.favkit.tablet.ui.main.MainViewModel.onEnterForeground]），两条链路并发是常态而不是将来时。
-     * 不用 [enqueueScope] 排它：那条单许可线程是「用户动作顺序 = 提交顺序」的地基，而对账一跑是几十秒的
-     * 网络翻页，排在它上面就等于让一次后台对账挡住用户随后的每一次入队提交。
-     * 也不用 Mutex：这里要的不是等待而是「已有在跑就不重复」，一次改一个布尔就能表达。
+     * 对账有两档触发 —— [SyncWorker] 排空队列那一档（worker 本身是 unique work，已经串了）与
+     * 进前台那一档（`MainActivity.onResume`），两条链路并发是常态而不是将来时。
      */
-    private val reconciling = AtomicBoolean(false)
+    private val sweeping = AtomicBoolean(false)
     private val _running = MutableStateFlow(false)
 
     val queuedCount: Flow<Int> = pendingOps.observeCount()
@@ -97,6 +91,16 @@ class SyncManager(
      */
     val running: StateFlow<Boolean> = _running.asStateFlow()
 
+    /**
+     * 最近一次对账的失败原因，null = 上次对账成功或还没对过。
+     *
+     * 这条**要**在界面上说出来：对账是唯一能把别的设备/另一个 App 写进来的东西带回来的路，
+     * 它一直失败而界面只显示「待同步 0」，用户会以为一切正常。界面那条底部悬浮提示条读它，
+     * 下一次对账成功就自动消失。
+     */
+    private val _sweepError = MutableStateFlow<String?>(null)
+    val sweepError: StateFlow<String?> = _sweepError.asStateFlow()
+
     fun markRunning(value: Boolean) {
         _running.value = value
     }
@@ -109,36 +113,34 @@ class SyncManager(
         }
     }
 
-    /**
-     * 把一条收藏的当前状态排进上传队列。
-     * [changedFields] 由调用点给出这次真正改的字段（口径见 [com.favkit.tablet.net.ChangedFields]）——
-     * 后台按它做字段级合并，填错等于把没碰过的字段宣告成自己写的。
-     */
-    fun queueUpsert(favorite: Favorite, changedFields: List<String>) {
-        queue(favorite.toUpsertOp(favorite.tags.map { it.name }, changedFields))
+    /** 把一条收藏的当前状态排进上传队列（整行覆盖，后台按 url 落库） */
+    fun queueUpsert(favorite: Favorite) {
+        queue(favorite.toUpsertOp(favorite.tags.map { it.name }), favorite.id)
     }
 
-    fun queueDelete(ids: List<String>) {
-        ids.forEach { queue(it.toDeleteOp()) }
+    /** 删除按 url 排队：收藏链接就是后台那张表的键 */
+    fun queueDelete(favorites: List<Favorite>) {
+        favorites.forEach { queue(it.url.toDeleteOp(), it.id) }
     }
 
     /**
-     * 入队：同一 id 只留最后一次动作，UPSERT 与 DELETE 都参与替换 —— 判据不看新 op 是哪一类，
+     * 入队：同一链接只留最后一次动作，UPSERT 与 DELETE 都参与替换 —— 判据不看新 op 是哪一类，
      * 只看「这是这条收藏最近的一次用户动作」。
      *
      * 被换掉的那笔连同它的 `attempts` 与 `lastError` 一起作废，所以卡片上 badge 从 FAILED 回到
      * QUEUED 是诚实的结果：失败的是那份已经不存在的载荷，现在排队的是这次的新改动，重试本就该从 0 开始。
+     *
+     * `pending_ops.favoriteId` 这一列存的是**本机行的 id**（不是 url）：它是本机句柄，
+     * 用来把队列里那条对应回卡片、以及删除回执落地时清掉同一条的 op。真正出站的身份在载荷里的 url。
      */
-    private fun queue(op: OpDto) {
+    private fun queue(op: OpDto, ownerId: String) {
         enqueueScope.launch {
-            val targetId = op.targetId().orEmpty()
             // 清旧 op 与插新 op 必须落在同一个事务里：分开跑，SyncWorker 的 nextDue 能插在中间看到
             // 「旧的已删、新的未入」而白跑一轮，两个动作并发时还能双双读到同一条再各插一笔。
-            // badge 不在这里写：它跟用户字段本来就是同一条 UPDATE 落库的（Daos 里 updateNote/
-            // stampLocalEdit/markDeleted/reopen 都带 badge = :badge），再补一次同值写只是多一次磁盘 IO。
+            // badge 不在这里写：它跟用户字段本来就是同一条 UPDATE 落库的。
             database.withTransaction {
-                pendingOps.clearSameFavorite(targetId)
-                insertOp(op)
+                pendingOps.clearSameFavorite(ownerId)
+                insertOp(op, ownerId)
             }
             // flush 留在事务外：WorkManager 入队自己也要写库，压在 Room 事务里就是两条连接互相等
             flush()
@@ -147,61 +149,100 @@ class SyncManager(
 
     /**
      * 扫尾补投的落库（载荷由 [com.favkit.tablet.data.FavoritesRepository.unqueuedOps] 组，编码与用户动作共用
-     * [insertOp]）。只多两个判断：不 clearSameFavorite —— 调用方那个事务从 SELECT 覆盖到 INSERT，事务提交之后
-     * 才落的用户动作会按「同 id 只留最后一次」把这条换掉，反过来先清就把人家那笔连如实的 `changed_fields`
-     * 一起丢了；不走 [enqueueScope] —— worker 要等它落完再进 nextDue，异步投赶不上本轮。
+     * [insertOp]）。不 clearSameFavorite —— 调用方那个事务从 SELECT 覆盖到 INSERT，事务提交之后
+     * 才落的用户动作会按「同一条只留最后一次」把这条换掉，反过来先清就把人家那笔丢了；
+     * 不走 [enqueueScope] —— worker 要等它落完再进 nextDue，异步投赶不上本轮。
      */
-    suspend fun enqueueRecovered(ops: List<OpDto>) {
-        ops.forEach { insertOp(it) }
+    suspend fun enqueueRecovered(ops: List<Pair<OpDto, String>>) {
+        ops.forEach { (op, ownerId) -> insertOp(op, ownerId) }
     }
 
     /** 载荷编码与插队只有这一处：补投和用户动作之间不该有第二份编码口径。nextRetryAt 用实体默认值 0 = 立刻可跑 */
-    private suspend fun insertOp(op: OpDto) {
+    private suspend fun insertOp(op: OpDto, ownerId: String) {
         val payload = json.encodeToString(OpDto.serializer(), op)
-        pendingOps.insert(PendingOpRow(favoriteId = op.targetId().orEmpty(), opType = op.type, payload = payload))
+        pendingOps.insert(PendingOpRow(favoriteId = ownerId, opType = op.type, payload = payload))
     }
 
     /**
-     * 与后台对一次账：从存的 `since_rev` 起翻页，每批 [FavoritesRepository.applyChanges] 落成功后才推游标。
+     * 与后台对一次账：**先翻完整份清单，再算差集**。
      *
-     * 停止条件有两个、都要：`items` 空 = 账号里没有比游标新的写入（契约不带「还有没有下一批」那个键，
-     * 判据见 [ChangesOutcome.Loaded]），[MAX_PAGES] 则兜住每批都回同样内容的坏后台把这一轮挂死。
-     * 不重排也不去重：同一条收藏一批里先删后复活是账号里真发生过的顺序，就是事实。
-     * 游标只在批落完之后写，中途失败停在上一批末尾，下次从同一处重来。
+     * 为什么是差集而不是增量游标：这个后台没有墓碑表，增量一旦跳过没变的行，就再也发现不了
+     * 「别的设备删了这条」。而清单档只有 160 字节左右（内容占一条的七成以上），
+     * 一万条翻一遍是 1.5MB / 10 个请求，比带内容的 10MB 便宜得多。
+     *
+     * 三条硬规则：
+     * 1. **整份清单翻完才做删除判断**。中途任何一页失败 → [Sweep.FAILED] 且什么都不删 ——
+     *    拉不全就当成「后台把剩下的都删了」，是这套方案唯一可能丢数据的路。
+     * 2. **脏行不删**：有未上传改动（badge 不是 SYNCED）的行只可能被自己的上传链路收敛，
+     *    对账是读操作，没资格替它下结论。
+     * 3. **新增与变更分批 lookup**：按 `updatedAt` 比对，只对差异取内容，一次最多 [LOOKUP_BATCH] 个。
      */
-    suspend fun reconcile(): Reconcile {
-        if (!reconciling.compareAndSet(false, true)) return Reconcile.BUSY
+    suspend fun sweep(): Sweep {
+        if (!sweeping.compareAndSet(false, true)) return Sweep.BUSY
         try {
-            var cursor = settings.sinceRev()
-            repeat(MAX_PAGES) {
-                when (val outcome = api.fetchChanges(cursor, CHANGE_PAGE)) {
-                    // 老后台没这条接口 / 网络与拒绝：读操作没有可补救的，静默退出且游标不动
-                    ChangesOutcome.Unsupported -> return Reconcile.UNSUPPORTED
-                    is ChangesOutcome.Failed -> return Reconcile.FAILED
-                    is ChangesOutcome.Loaded -> {
-                        if (outcome.truncated) {
-                            // 起点被后台 GC 掉，这批不完整：游标留着等于把半截账当对过。
-                            // 退回全量翻页是界面那台状态机的事，本轮只交出这个结果位
-                            settings.setSinceRev(0L)
-                            return Reconcile.TRUNCATED
-                        }
-                        if (outcome.items.isEmpty()) return Reconcile.CONVERGED
-                        // broken 与 skipped 不是一个性质：前者是 runGuarded 吃掉的一次真实库操作，
-                        // 后者是后台这一笔本机落不了地（例如只有 rev 没带内容），重对一遍也不会多出东西。
-                        // 所以 skipped 照推游标，broken 不推、也不再拉下一批：推了就是把这一笔永久跳过 ——
-                        // 后台不会再发 rev ≤ 游标的东西。重来这一批是安全的：逐条应用、不开整批事务，
-                        // 活条目走 importRemote 的判据幂等，墓碑走 deleteForever 落在已经不存在的行上就是 no-op。
-                        val report = favorites.applyChanges(outcome.items)
-                        if (report.broken > 0) return Reconcile.RETRY_LATER
-                        settings.setSinceRev(outcome.nextRev)
-                        cursor = outcome.nextRev
+            val result = runSweep()
+            _sweepError.value = when (result) {
+                is Sweep.DONE -> null
+                is Sweep.FAILED -> result.reason
+                is Sweep.PARTIAL -> result.reason
+                else -> _sweepError.value
+            }
+            return result
+        } finally {
+            sweeping.set(false)
+        }
+    }
+
+    private suspend fun runSweep(): Sweep {
+        // 先翻完整份清单；任何一页失败都直接退出，什么都不动
+        val manifest = mutableListOf<FavoriteDto>()
+        var cursor: String? = null
+        var pages = 0
+        var complete = false
+        while (pages < MAX_MANIFEST_PAGES) {
+            when (val page = api.pullManifest(cursor, MANIFEST_PAGE)) {
+                is PullOutcome.Failed -> return Sweep.FAILED(page.reason)
+                is PullOutcome.Loaded -> {
+                    manifest += page.favorites
+                    pages += 1
+                    if (!page.hasMore || page.nextCursor.isBlank()) {
+                        complete = true
+                        break
                     }
+                    cursor = page.nextCursor
                 }
             }
-            return Reconcile.PAGE_CAP
-        } finally {
-            reconciling.set(false)
         }
+        // 翻到上限还没到底：清单不完整，这一轮不许判删除（宁可少删，不能误删）
+        if (!complete) return Sweep.FAILED("清单页数超过上限，这一轮放弃删除判断")
+
+        val local = favorites.localIndex()
+        val remoteUrls = manifest.mapTo(HashSet()) { it.url }
+
+        // 需要取内容的：本地没有的（新增），或后台更新时刻变了的（内容/备注变了）
+        val needContent = manifest.filter { row ->
+            val known = local[row.url]
+            known == null || row.updatedAt == 0L || row.updatedAt != known.serverUpdatedAt
+        }.map { it.url }
+
+        var refreshed = 0
+        var broken = 0
+        for (batch in needContent.distinct().chunked(LOOKUP_BATCH)) {
+            when (val outcome = api.lookup(batch)) {
+                // 内容没取到就不继续：这一轮到此为止，删也先不删（下面那句只在完整走完后执行）
+                is LookupOutcome.Failed -> return Sweep.PARTIAL(outcome.reason, refreshed)
+                is LookupOutcome.Loaded -> {
+                    val report = favorites.importRemote(outcome.favorites)
+                    refreshed += report.imported + report.refreshed
+                    broken += report.broken
+                }
+            }
+        }
+
+        // 到这里清单完整、内容也取齐了，才允许判删除：本地有、远端没有、而且这行没有未上传的改动
+        val deleted = local.filter { (url, mark) -> !mark.dirty && url !in remoteUrls }.keys.toList()
+        val removed = favorites.dropByUrls(deleted)
+        return Sweep.DONE(rows = manifest.size, refreshed = refreshed, removed = removed, broken = broken)
     }
 
     /** 立即入队一次上传（唯一任务，重复调用不会堆积） */
@@ -238,22 +279,33 @@ class SyncManager(
         const val MAX_ATTEMPTS = 3
         const val RETRY_SECONDS = 4L
 
-        /** 对账一页的条数：后台按 rev 升序发到 limit 为止，200 笔足够把一轮常态对账压进一页 */
-        private const val CHANGE_PAGE = 200
+        /** 清单一页的条数。清单只有四列（约 160 字节/条），一页大一点能把请求数压下来 */
+        private const val MANIFEST_PAGE = 300
 
-        /**
-         * 对账的硬页数上限，也是它唯一的时间上界：每页最坏一次 callTimeout，
-         * 到顶就收口（游标停在已落完的那批末尾），剩下的账留给下次队列排空接着对。
-         */
-        private const val MAX_PAGES = 3
+        /** 一轮最多翻这么多页：兜住「后台每页都回同样内容」那种坏实现，不给自己留死循环 */
+        private const val MAX_MANIFEST_PAGES = 40
+
+        /** lookup 一次最多 200 个 url：与后台契约同值，超出的在这里分批，不指望后台静默截断 */
+        private const val LOOKUP_BATCH = 200
     }
 }
 
 /**
- * 一次对账的收口。本轮调用方只接走 [TRUNCATED] 那档要改走全量翻页的信号，其余几档界面此刻没有可展示的：
- * 对账不是用户动作，「老后台没这条接口」和「这次没连上」都只值一次静默。
+ * 一次差集对账的收口。
  *
- * [RETRY_LATER] 说的是**本机落库抛错**（[com.favkit.tablet.data.ChangesReport.broken]）而不是后台报错：
- * 后台那批已经发全了，是这台设备没接住，所以游标停在批次起点、下次排空整批重来。
+ * [FAILED] 是「清单一页都没翻完」：什么都没动，下次再对。
+ * [PARTIAL] 是「清单翻完了，但取内容时失败」：已落库的保留，**删除判断没有执行** ——
+ * 这是刻意的，宁可多留一轮旧行，也不能在内容没取齐时把行删掉。
  */
-enum class Reconcile { CONVERGED, TRUNCATED, UNSUPPORTED, FAILED, BUSY, PAGE_CAP, RETRY_LATER }
+sealed interface Sweep {
+    data class DONE(
+        val rows: Int,
+        val refreshed: Int,
+        val removed: Int,
+        val broken: Int,
+    ) : Sweep
+
+    data class PARTIAL(val reason: String, val refreshed: Int = 0) : Sweep
+    data class FAILED(val reason: String) : Sweep
+    data object BUSY : Sweep
+}

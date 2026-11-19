@@ -10,13 +10,16 @@ import com.favkit.tablet.data.SyncBadge
 /**
  * 一条收藏 = 一张表里的一行：用户产生的数据 ＋ 后台解析回来的内容信息。
  *
- * 后台保存与解析是同一次调用完成的，解析结果本来就来在收藏响应里，没有理由再拆一张表、
- * 再让界面去数「有没有解析完」。早期版本拆成 favorites/video_info 两张，是因为那时以为
- * 解析是异步的 —— 那个前提不成立，两侧就各多出一套状态、一套计数、一个轮询接口。
+ * [url] 是同步身份（后台那张表也用它当主键），所以本机对它建唯一索引：同一个链接只能有一条。
+ * [id] 只是本地句柄，卡片、标签外键、播放队列都用它，永不出站。
+ *
+ * 内容信息是异步就绪的：后台要先解析、下载、把素材转存到存储服务器，所以 [mediaState] 会经历
+ * `pending → ready`（或 `failed`）。这与最早那版「content_status 列 + 轮询接口」不是同一件事 ——
+ * 那时以为要另开一条取结果的通道，现在结果走的是同一条列表/回执，只是可能晚一点到。
  */
 @Entity(
     tableName = "favorites",
-    indices = [Index("favoriteAt"), Index("badge")],
+    indices = [Index("favoriteAt"), Index("badge"), Index(value = ["url"], unique = true)],
 )
 data class FavoriteRow(
     @PrimaryKey val id: String,
@@ -39,25 +42,22 @@ data class FavoriteRow(
     val failedReason: String = "",
     val resolvedAt: Long = 0L,
 
-    // —— 后台发的行版本号，本地只读（0 表示这条还没从后台拿到过 rev）——
-    /** 账号内单调递增，由后台落库时 +1。本地编辑**不**动它，上传时作为 `base_rev` 的起点 */
-    val rev: Long = 0L,
+    // —— 后台回传的行状态 ——
+    /**
+     * 后台这一行最后一次变化的时刻（`updated_at`）。对账拿它判断「这条要不要重新取内容」：
+     * 清单档只带它和状态、不带内容，省掉把 media 全搬一遍的流量。
+     */
+    val serverUpdatedAt: Long = 0L,
+    /**
+     * 内容就绪状态：`pending`（后台正在解析/下载/切片转存）、`ready`、`failed`。
+     *
+     * 空串表示这台设备还没从后台拿到过状态（刚保存、还没上传）。
+     */
+    val mediaState: String = "",
 
     // —— 以下是纯本地状态，不参与上传 ——
     val badge: String = SyncBadge.QUEUED.name,
     val locallyCached: Boolean = false,
-    /**
-     * 本行最后一次**本地**编辑的 HLC `wall_ms`（见 [com.favkit.tablet.data.SyncClock]）。
-     *
-     * 不是随手取的墙钟：字段级合并拿它当决胜键的一部分，写错一次这台设备就长期被判旧。
-     * 0 表示这行从后台来、本机还没编辑过。
-     */
-    val updatedAt: Long = 0L,
-    /**
-     * [updatedAt] 那次写入的 HLC `seq`。墙钟只到毫秒，同一毫秒内的两次编辑靠它分先后，
-     * 所以它得和墙钟记在同一行里：只留墙钟，这一行的写入时刻就永远是个残缺读数。
-     */
-    val hlcSeq: Int = 0,
     /** 软删除时间：非空表示已标记删除，等待后台补传后物理清除 */
     val deletedAt: Long? = null,
     /** 「段号:毫秒」逗号分隔的段级进度；见 SegmentProgressCodec */

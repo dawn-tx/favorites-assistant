@@ -23,6 +23,10 @@ interface FavoritesDao {
     @Query("SELECT * FROM favorites WHERE url = :url AND deletedAt IS NULL ORDER BY favoriteAt DESC LIMIT 1")
     suspend fun byUrl(url: String): FavoriteRow?
 
+    /** 连墓碑一起找：后台回来说这条是活的，本机那个软删标记就该清掉，而不是另建一行 */
+    @Query("SELECT * FROM favorites WHERE url = :url ORDER BY deletedAt DESC LIMIT 1")
+    suspend fun byUrlIncludingDeleted(url: String): FavoriteRow?
+
     /**
      * 只认墓碑的 url 查询：给「删掉之后又收藏同一链接」那条路复用旧行用。
      *
@@ -36,47 +40,31 @@ interface FavoritesDao {
     @Upsert
     suspend fun upsert(row: FavoriteRow)
 
-    @Query("UPDATE favorites SET note = :note, badge = :badge, updatedAt = :wallMs, hlcSeq = :seq WHERE id = :id")
-    suspend fun updateNote(id: String, note: String, badge: String, wallMs: Long, seq: Int)
+    @Query("UPDATE favorites SET note = :note, badge = :badge WHERE id = :id")
+    suspend fun updateNote(id: String, note: String, badge: String)
 
-    /**
-     * 标签这类「关系表改了、favorites 里只有时间戳要跟着动」的本地编辑。
-     *
-     * 分开写是因为 [updateBadge] 只服务上传回执那几条路径：后台确认回来只翻 badge，
-     * 那种时刻本机什么都没改，把 updatedAt 一起翻新等于凭空报一次写入。
-     *
-     * 戳要成对写：`updatedAt` 只是 HLC 的墙钟那一半，少了 `hlcSeq`，同一毫秒内的两次编辑
-     * 在后台就看成同一个读数，胜负退化成谁先到。
-     */
-    @Query("UPDATE favorites SET badge = :badge, updatedAt = :wallMs, hlcSeq = :seq WHERE id = :id")
-    suspend fun stampLocalEdit(id: String, badge: String, wallMs: Long, seq: Int)
-
+    /** 标签这类「关系表改了、favorites 里只有 badge 要跟着动」的本地编辑 */
     @Query("UPDATE favorites SET badge = :badge WHERE id = :id")
     suspend fun updateBadge(id: String, badge: String)
 
     /**
-     * 把还挂着「待传/失败」的行一次性归到某个终态，只翻 badge 不推时间戳：
-     * 这不是本机的一次编辑，推了就是向后台宣告一次没发生过的写入。
-     *
-     * 换账号时用它把旧账号攒的未上传改动连同 [PendingOpsDao.deleteAll] 一起作废 ——
-     * 只清队列不改 badge，扫尾那条路（[queuedWithoutOp] 认的正是 QUEUED）下一轮会把它们重新铸成 op。
+     * 把还挂着「待传/失败」的行一次性归到某个终态，只翻 badge 不推别的：
+     * 这不是本机的一次编辑。
      */
     @Query("UPDATE favorites SET badge = :to WHERE badge IN (:from)")
     suspend fun rebadgeAll(from: List<String>, to: String)
 
-    @Query("UPDATE favorites SET deletedAt = :wallMs, updatedAt = :wallMs, hlcSeq = :seq, badge = :badge WHERE id IN (:ids) AND deletedAt IS NULL")
-    suspend fun markDeleted(ids: List<String>, badge: String, wallMs: Long, seq: Int)
+    @Query("UPDATE favorites SET deletedAt = :at, badge = :badge WHERE id IN (:ids) AND deletedAt IS NULL")
+    suspend fun markDeleted(ids: List<String>, at: Long, badge: String)
 
     /**
      * [markDeleted] 的反向：把一行从墓碑变回活行，同时写入这一次重新收藏的内容。
      *
-     * 主键不动是这套做法的全部意义 —— 后台那边这一行本来就还在（墓碑），本机换个新 id 就会
-     * 和它长期分叉；沿用旧 id 连后台发的那个 `rev` 都还是对的，`base_rev` 不用重新积累。
-     * 内容列（标题/segments）也不动：本机存的那份就是后台解析出来的，重藏同一条链接不该先空一阵。
-     * 时间戳照 [stampLocalEdit] 的口径成对换新读数，少了 `seq` 同一毫秒内的两次写入就分不出先后。
+     * 主键不动是这套做法的全部意义：后台那张表以 url 为键，这条链接本来就在，
+     * 本机换个新 id 只会让标签与播放进度各自分叉。内容列不动 —— 本机存的那份就是后台做好的。
      */
-    @Query("UPDATE favorites SET deletedAt = NULL, note = :note, sourceApp = :sourceApp, favoriteAt = :favoriteAt, badge = :badge, updatedAt = :wallMs, hlcSeq = :seq WHERE id = :id")
-    suspend fun reopen(id: String, note: String, sourceApp: String, favoriteAt: Long, badge: String, wallMs: Long, seq: Int)
+    @Query("UPDATE favorites SET deletedAt = NULL, note = :note, sourceApp = :sourceApp, favoriteAt = :favoriteAt, badge = :badge WHERE id = :id")
+    suspend fun reopen(id: String, note: String, sourceApp: String, favoriteAt: Long, badge: String)
 
     @Query("DELETE FROM favorites WHERE id IN (:ids)")
     suspend fun deleteForever(ids: List<String>)
@@ -94,14 +82,6 @@ interface FavoritesDao {
      */
     @Query("DELETE FROM favorites WHERE id IN (:ids) AND deletedAt IS NOT NULL")
     suspend fun deleteTombstone(ids: List<String>)
-
-    /**
-     * 整批清掉墓碑：换账号那一路用（判据见
-     * [com.favkit.tablet.data.FavoritesRepository.dropUnsentEdits]）。
-     * 跟 [deleteTombstone] 一样只认 `deletedAt IS NOT NULL`，活行一条都不碰。
-     */
-    @Query("DELETE FROM favorites WHERE deletedAt IS NOT NULL")
-    suspend fun deleteAllTombstones()
 
     /**
      * 播放进度属于本地数据，不上传：看了多少由这台设备自己记，换台设备不该被远端覆盖。
@@ -142,8 +122,23 @@ interface FavoritesDao {
      * 进程夹在两笔之间被杀就留下这种行 —— 卡片一直是待同步，队列里却没有可传的东西，它不会自己复活。
      * 一次 LEFT JOIN 查完（badge 与 favoriteId 都有索引），活行和墓碑一起返回、按 deletedAt 分流在调用方。
      */
-    @Query("SELECT favorites.* FROM favorites LEFT JOIN pending_ops ON pending_ops.favoriteId = favorites.id WHERE favorites.badge = :badge AND pending_ops.id IS NULL ORDER BY favorites.updatedAt ASC LIMIT :limit")
+    @Query("SELECT favorites.* FROM favorites LEFT JOIN pending_ops ON pending_ops.favoriteId = favorites.id WHERE favorites.badge = :badge AND pending_ops.id IS NULL ORDER BY favorites.favoriteAt ASC LIMIT :limit")
     suspend fun queuedWithoutOp(badge: String, limit: Int): List<FavoriteRow>
+
+    /**
+     * 对账的本地一侧：所有活行（url + 后台更新时刻 + 状态），一条 SQL 取完。
+     * 差集在内存里算 —— 千条量级一次比对是微秒级的事，不值得为它写游标协议。
+     */
+    @Query("SELECT * FROM favorites WHERE deletedAt IS NULL")
+    suspend fun liveRows(): List<FavoriteRow>
+
+    /** 差集里被后台删掉的那些行；带 `deletedAt IS NULL` 是为了不误伤已经在等补传的墓碑 */
+    @Query("DELETE FROM favorites WHERE id IN (:ids) AND deletedAt IS NULL")
+    suspend fun deleteLive(ids: List<String>): Int
+
+    /** 后台已确认删除的墓碑：物理清掉 */
+    @Query("SELECT * FROM favorites WHERE deletedAt IS NOT NULL")
+    suspend fun tombstones(): List<FavoriteRow>
 }
 
 @Dao
@@ -265,7 +260,7 @@ interface PendingOpsDao {
     @Query("UPDATE pending_ops SET attempts = 0, nextRetryAt = 0, lastError = '' WHERE attempts >= 3")
     suspend fun resetFailedAttempts()
 
-    /** 换账号时整批作废未上传的写（配套 [FavoritesDao.rebadgeAll]，理由在那条的注释里） */
+    /** 清空整个上传队列（换后台/清数据时用） */
     @Query("DELETE FROM pending_ops")
     suspend fun deleteAll()
 

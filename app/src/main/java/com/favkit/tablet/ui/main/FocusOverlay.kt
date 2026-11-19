@@ -44,11 +44,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -125,11 +122,12 @@ private const val CAPTION_MAX_LINES = 2
 /** 底部抽屉的全开档 = 屏高 × 0.96：material3 的全开档贴着内容顶部，所以这一档由内容高度决定 */
 private const val SHEET_FULL_FRACTION = 0.96f
 
-/** 点画面唤起的控制层：播放中隔这么久自己收起；暂停时留着，人随时要拖进度 */
-private const val CONTROLS_AUTO_HIDE_MS = 3_500L
-
 /** 滑到首/末条还继续抹时的提示停留时长 */
 private const val EDGE_HINT_MS = 1_200L
+
+/** 控制层左右与底部的内边距：倍速竖列要贴着播放条右边对齐，两处必须用同一组值 */
+private val CONTROLS_SIDE_PAD = 16.dp
+private val CONTROLS_BOTTOM_PAD = 12.dp
 
 /** 控制层背后那层渐变：底部压到 82% 黑、60% 高度处 34%、再往上透明，文案压在画面上才读得清 */
 private val FEED_BOTTOM_SCRIM = Brush.verticalGradient(
@@ -150,7 +148,7 @@ private val FEED_BOTTOM_SCRIM = Brush.verticalGradient(
  *   所以画面不再分「内嵌」与「全屏」两种形态，也不再单独给图片或视频一个 ⛶：
  *   画面铺满整屏，图片与视频一律 Fit 完整显示、不裁切，横竖屏同一条路径。
  * - 段号角标 / 标题 / 作者 / 文案连「详情」入口与播放条一起叠在画面底部，跟着控制层显隐：
- *   点画面唤出，播放中隔 3.5s 自己收起，暂停时留着。视频段正中另给一颗 ▶/⏸。
+ *   点画面唤出、再点收起（不做定时自动隐藏，拖进度拖到一半不会自己消失）。视频段正中另给一颗 ▶/⏸。
  * - 详情按「可用宽度 + 方向」挑容器：够宽且确实横着（平板横屏）从右侧拉出可用宽度 45% 的抽屉，
  *   其余（手机、平板竖屏）用底部三档抽屉（隐藏 · 半屏 · 96%）。两种都是模态的 ——
  *   开着时竖向手势归抽屉，画面里的换条与翻段一并停手，所以不再需要额外的换条触发区。
@@ -438,8 +436,8 @@ private fun buildFocusOrder(ids: List<String>, openedId: String): List<String> =
 /**
  * 一屏一条：画面铺满整屏 + 浮在画面上的控制层。
  *
- * 控制层（底部渐变、段条、文案、「详情」入口、播放条、居中的 ▶/⏸）整体显隐：点画面唤出，
- * 播放中隔 [CONTROLS_AUTO_HIDE_MS] 自己收起，暂停时留着 —— 停在那儿就是要拖进度、要换倍速。
+ * 控制层（底部渐变、段条、文案、「详情」入口、播放条、居中的 ▶/⏸）只由**点击**控制显隐：
+ * 点画面唤出、再点收起。不做定时自动隐藏 —— 看长片时控制层不会在拖动进度到一半时自己消失。
  * 这些信息原先有一截常驻在画面底下、有一截长在右栏里，收进同一层之后横竖屏就是同一套东西。
  */
 @Composable
@@ -460,14 +458,8 @@ private fun FeedPage(
     // 图集段没有时间进度、也没有倍速可言：播放条与居中那颗键都只给视频段
     val isVideo = current != null && current.kind != MediaKind.IMAGE
     var controlsVisible by remember(favorite.id) { mutableStateOf(true) }
-
-    // 翻段也算「刚动过」：重新给一轮 3.5s，免得刚抹过来控制层就收走
-    LaunchedEffect(controlsVisible, player.isPlaying, favorite.id, focus.segmentIndex) {
-        if (controlsVisible && player.isPlaying) {
-            delay(CONTROLS_AUTO_HIDE_MS)
-            controlsVisible = false
-        }
-    }
+    // 倍速选项展开时不许点画面把它一起收走：那一下应该只收菜单（见下面的 onTap 分支）
+    var speedMenuOpen by remember(favorite.id) { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -483,8 +475,15 @@ private fun FeedPage(
             state = state,
             scale = scale,
             gesturesEnabled = gesturesEnabled,
-            // 点画面只负责唤出/收起控制层；播放/暂停交给正中那颗键，两件事不抢同一下
-            onTap = { controlsVisible = !controlsVisible },
+            // 点画面只负责唤出/收起控制层；播放/暂停交给正中那颗键，两件事不抢同一下。
+            // 倍速菜单展开时，这一下先收菜单 —— 否则点一下屏幕整层都消失，像点错了
+            onTap = {
+                when {
+                    speedMenuOpen -> speedMenuOpen = false
+                    controlsVisible -> controlsVisible = false
+                    else -> controlsVisible = true
+                }
+            },
             modifier = Modifier.fillMaxSize(),
         )
 
@@ -503,11 +502,25 @@ private fun FeedPage(
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
+            if (speedMenuOpen) {
+                // 选倍速时压一层轻遮罩：点空白处只收菜单，不动控制层（这一下的归属要在遮罩上就定死，
+                // 否则它会穿透到画面的点击层去把整层关掉）
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Color(0x33000000))
+                        .clickable(onClickLabel = "收起倍速") { speedMenuOpen = false },
+                )
+            }
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    .padding(
+                        start = CONTROLS_SIDE_PAD,
+                        end = CONTROLS_SIDE_PAD,
+                        bottom = CONTROLS_BOTTOM_PAD,
+                    ),
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
                 if (segments.isNotEmpty()) {
@@ -527,10 +540,30 @@ private fun FeedPage(
                     FeedScrubBar(
                         player = player,
                         onSeek = viewModel::seekTo,
-                        onSpeed = viewModel::setSpeed,
                         scale = scale,
+                        speedOpen = speedMenuOpen,
+                        onSpeedOpenChange = { speedMenuOpen = it },
                     )
                 }
+            }
+            if (isVideo && speedMenuOpen) {
+                // 档位竖列浮在倍速按钮正上方：同一个 Compose 层里画（不是 DropdownMenu 那种独立弹窗，
+                // 弹窗不带沉浸式标记，一弹系统栏就回来了）。放在这一层而不是播放条内部 ——
+                // 那一列有五个档位高，塞进 Row 里会把整条播放条顶上去。
+                SpeedColumn(
+                    current = player.speed,
+                    scale = scale,
+                    onPick = { picked ->
+                        viewModel.setSpeed(picked)
+                        speedMenuOpen = false
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(
+                            end = CONTROLS_SIDE_PAD,
+                            bottom = CONTROLS_BOTTOM_PAD + scale.touchMin + scale.gapXs,
+                        ),
+                )
             }
         }
 
@@ -581,8 +614,9 @@ private fun PlayPauseButton(
 private fun FeedScrubBar(
     player: PlayerUiState,
     onSeek: (Long) -> Unit,
-    onSpeed: (Float) -> Unit,
     scale: TabletScale,
+    speedOpen: Boolean,
+    onSpeedOpenChange: (Boolean) -> Unit,
 ) {
     val durationMs = player.durationMs
     val canScrub = durationMs > 0L
@@ -623,50 +657,89 @@ private fun FeedScrubBar(
             color = Color.White,
             maxLines = 1,
         )
-        SpeedMenu(speed = player.speed, onSpeed = onSpeed, scale = scale)
+        SpeedPill(
+            speed = player.speed,
+            open = speedOpen,
+            scale = scale,
+            onClick = { onSpeedOpenChange(!speedOpen) },
+        )
     }
 }
 
-/** 倍速那颗 pill：五档平铺会挤掉滑块也容易误触，所以点当前倍速弹选择器 */
+/**
+ * 倍速那颗方块按钮：**宽高相同**、文字居中。
+ *
+ * 之前是个 `Text` 直接加 `heightIn(min = touchMin)` 当按钮：高度被撑到 68~72dp、宽度只有文字宽，
+ * 于是显示成一根竖条，文字还贴着顶。这里用固定边长的 Box + 居中，形状才跟播放条上的其它控件一致。
+ */
 @Composable
-private fun SpeedMenu(
+private fun SpeedPill(
     speed: Float,
-    onSpeed: (Float) -> Unit,
+    open: Boolean,
     scale: TabletScale,
+    onClick: () -> Unit,
 ) {
-    var open by remember { mutableStateOf(false) }
     val offNormal = abs(speed - 1f) > 0.01f
-    Box {
+    Box(
+        modifier = Modifier
+            .size(scale.touchMin)
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                when {
+                    open -> Color(0x4D8AB4F8)
+                    offNormal -> Color(0x338AB4F8)
+                    else -> Color(0x33FFFFFF)
+                },
+            )
+            .clickable(onClickLabel = if (open) "收起倍速" else "选择倍速", onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
         Text(
             text = formatSpeed(speed),
             style = MaterialTheme.typography.labelLarge,
-            color = if (offNormal) Color(0xFF8AB4F8) else Color.White,
-            modifier = Modifier
-                .clip(RoundedCornerShape(10.dp))
-                .background(if (offNormal) Color(0x338AB4F8) else Color(0x33FFFFFF))
-                .heightIn(min = scale.touchMin)
-                .padding(horizontal = scale.gapSm)
-                .clickable(onClickLabel = "选择倍速") { open = true },
+            color = if (offNormal || open) Color(0xFF8AB4F8) else Color.White,
+            maxLines = 1,
         )
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            PLAYBACK_SPEEDS.forEach { option ->
-                val active = abs(speed - option) < 0.01f
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = formatSpeed(option),
-                            color = if (active) Color(0xFF8AB4F8) else Color.Unspecified,
-                        )
-                    },
-                    trailingIcon = if (active) {
-                        { Icon(Icons.Filled.Check, contentDescription = null) }
-                    } else {
-                        null
-                    },
-                    onClick = {
-                        onSpeed(option)
-                        open = false
-                    },
+    }
+}
+
+/**
+ * 档位竖列：浮在倍速按钮**正上方**，一列五个，当前档高亮。
+ *
+ * 它画在遮罩层自己的组合里，不是 `DropdownMenu` 那种独立弹窗窗口 —— 弹窗不带沉浸式标记，
+ * 一弹出来系统栏（底部导航条）就会重新出现，这正是旧实现「点倍速会冒出屏幕底部操作条」的原因。
+ *
+ * 顺序从上到下由快到慢，最常用的 1x 落在靠近按钮的下半段，手指不用抬太高。
+ */
+@Composable
+private fun SpeedColumn(
+    current: Float,
+    scale: TabletScale,
+    onPick: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xE6202124))
+            .padding(scale.gapXs / 2),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        PLAYBACK_SPEEDS.sortedDescending().forEach { option ->
+            val active = abs(current - option) < 0.01f
+            Box(
+                modifier = Modifier
+                    .size(width = scale.touchMin * 1.2f, height = scale.touchMin * 0.86f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (active) Color(0x4D8AB4F8) else Color.Transparent)
+                    .clickable(onClickLabel = "切换到 ${formatSpeed(option)}") { onPick(option) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = formatSpeed(option),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (active) Color(0xFF8AB4F8) else Color.White,
+                    maxLines = 1,
                 )
             }
         }
@@ -1005,7 +1078,7 @@ private fun EmptySegmentPage(segment: MediaSegment) {
             color = Color.White,
         )
         Text(
-            text = segment.title.ifBlank { "后台可以重新解析这条链接，通常稍后就能拿到地址。" },
+            text = segment.title.ifBlank { "后台可以重新准备这条内容，通常稍后就能拿到地址。" },
             style = MaterialTheme.typography.bodyMedium,
             color = Color(0xFFB7BDC6),
             textAlign = TextAlign.Center,
@@ -1104,9 +1177,9 @@ private fun StageArea(
 }
 
 /**
- * 没有素材清单时占掉内容位：把后台给的原因原话说出来。
+ * 没有素材清单时占掉内容位：把后台给的原因原话说出来，或者说明内容还在准备。
  *
- * 「重新解析」不在这里 —— 这颗按钮在详情里（横屏右栏、竖屏抽屉），任何时候都看得见：
+ * 「重新准备」不在这里 —— 那颗按钮在详情里（横屏抽屉、竖屏抽屉），任何时候都看得见：
  * 只有失败时才冒出来的入口，用户根本不知道自己错过了它。
  */
 @Composable
@@ -1120,14 +1193,15 @@ private fun UnresolvedStage(favorite: Favorite, scale: TabletScale, modifier: Mo
         verticalArrangement = Arrangement.spacedBy(scale.gapSm),
     ) {
         Text(
-            text = if (failed) "后台没能解析这条链接" else "内容信息还在后台解析",
+            text = if (failed) "后台没能准备这条内容" else "内容还在后台准备",
             style = MaterialTheme.typography.titleMedium,
             color = Color.White,
         )
         Text(
             text = when {
                 failed -> favorite.failedReason
-                else -> "链接还没上传到后台，或后台还没给出结果。封面、标题、素材清单都由后台返回。"
+                else -> "后台正在解析链接、下载素材并转存到存储服务器，大视频还要切片，所以会慢一会儿。" +
+                    "准备好后会自动出现在这里。"
             },
             style = MaterialTheme.typography.bodyMedium,
             color = Color(0xFFB7BDC6),
@@ -1211,7 +1285,7 @@ private fun FocusInfo(
                 color = FOCUS_ERROR,
             )
         }
-        // 这颗按钮永远在位：解析失败只在条目上说话，用户要有一个不用猜就能找到的出口
+        // 这颗按钮永远在位：内容没做出来只在条目上说话，用户要有一个不用猜就能找到的出口
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -1227,7 +1301,7 @@ private fun FocusInfo(
                 onClick = { viewModel.resolveNow(favorite.id) },
                 modifier = Modifier.heightIn(min = scale.touchMin),
             ) {
-                Text("重新解析")
+                Text("重新准备")
             }
         }
 
@@ -1325,20 +1399,32 @@ private fun FocusInfo(
                     Text("取消")
                 }
             } else {
-                Button(
-                    onClick = { viewModel.prefetch(favorite.id) },
-                    enabled = favorite.segments.any { it.playable },
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = scale.touchMin),
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_download),
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                // 切片过的视频只有播放列表，整片缓存要另建一套管理器；不给按钮，只留一句说明
+                val sliced = favorite.segments.firstOrNull { it.playable }
+                    ?.url?.substringBefore('?')?.lowercase()?.endsWith(".m3u8") == true
+                if (sliced) {
+                    Text(
+                        text = "切片视频，播放时边看边存",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFFB7BDC6),
+                        modifier = Modifier.weight(1f),
                     )
-                    Spacer(Modifier.size(6.dp))
-                    Text(if (favorite.locallyCached) "重新缓存" else "缓存到本地")
+                } else {
+                    Button(
+                        onClick = { viewModel.prefetch(favorite.id) },
+                        enabled = favorite.segments.any { it.playable },
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = scale.touchMin),
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_download),
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.size(6.dp))
+                        Text(if (favorite.locallyCached) "重新缓存" else "缓存到本地")
+                    }
                 }
                 TextButton(
                     onClick = { showDeleteConfirm = true },

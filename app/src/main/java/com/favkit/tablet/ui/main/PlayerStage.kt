@@ -24,7 +24,7 @@ import com.favkit.tablet.media.PlayerUiState
  * 一律 [AspectRatioFrameLayout.RESIZE_MODE_FIT] 完整显示、不裁切，横竖屏同一条路径。
  *
  * [onTap] = 唤出/收起控制层。播放/暂停、进度与倍速都长在控制层上（见 FocusOverlay 的 `FeedPage`），
- * 暂停时控制层常显，▶ 因此就是「从这里开始播」那颗键。
+ * 控制层只由点击控制显隐（不自动隐藏），▶ 因此就是「从这里开始播」那颗键。
  */
 @Composable
 fun PlayerStage(

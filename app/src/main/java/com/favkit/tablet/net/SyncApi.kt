@@ -2,14 +2,11 @@ package com.favkit.tablet.net
 
 import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.data.SettingsSnapshot
-import com.favkit.tablet.data.SyncClock
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -17,19 +14,17 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
- * 与收藏后台的唯一出口：明文 JSON，一条请求就是一批 ops。
+ * 与收藏后台的唯一出口：明文 JSON，一次请求一条上传操作、或一次读请求。
  *
- * 成功判据只认后台明确确认的条数，由 [com.favkit.tablet.sync.SyncWorker] 核对
- * `applied + unknown_ops + op_errors == 送出条数`。早期版本走信封加密，后台解不开时仍回 200 + applied=0，
+ * 成功判据只认后台明确确认的条数（`applied == 1`）。早期版本走信封加密，后台解不开仍回 200 + applied=0，
  * App 误判成功并清空本地队列，数据被静默丢弃 —— 所以宁可后台回 4xx，也不接受「看起来成功的空响应」。
  *
- * 每条带 `server_time` 的响应（上传、取列表、重新解析、对账都算）都会喂给 [SyncClock] 抬升本机 HLC 的
- * 时间下界：这是后台时间在客户端唯一有后果的用途，而且不需要为此多发任何请求。
+ * 出站全部排在同一条 [SyncGate] 上：上传按设置里的间隔走，读请求（对账、lookup）只串行、不等 ——
+ * 对账一次要翻十几页，让每页都等 3 秒是没法用的。
  */
 class SyncApi(
     private val settings: AppSettings,
     private val gate: SyncGate,
-    private val clock: SyncClock,
 ) {
 
     private val json = Json {
@@ -47,7 +42,7 @@ class SyncApi(
             .build()
     }
 
-    /** 上传一批操作；后台在同一次调用里保存并解析，回执直接带回解析后的收藏 */
+    /** 上传一条操作；后台收下后回执带回这条的最新状态（内容多半还是 pending） */
     suspend fun push(ops: List<OpDto>): SyncOutcome {
         val config = settings.current()
         val body = json.encodeToString(
@@ -58,15 +53,13 @@ class SyncApi(
                 ops = ops,
             ),
         )
-        return exchange(config, "/sync", body, ::mapSyncError) { text, code ->
+        return exchange(config, "/sync", body, pacing = true, ::mapSyncError) { text, code ->
             when {
                 code == 429 -> {
                     val throttled = runCatching {
                         json.decodeFromString(SyncResponse.serializer(), text)
                     }.getOrNull()
                     gate.noteServerWait(throttled?.nextWaitMs)
-                    // 被限速也是收到了一次响应：下界照样要抬，否则本机之后的写入会停在旧时间里
-                    throttled?.let { clock.absorbServerTime(it.serverTime) }
                     SyncOutcome.Retryable("后台限速：HTTP 429", retryAfterMs = throttled?.nextWaitMs)
                 }
 
@@ -75,17 +68,13 @@ class SyncApi(
                 else -> {
                     val parsed = json.decodeFromString(SyncResponse.serializer(), text)
                     gate.noteServerWait(parsed.nextWaitMs)
-                    clock.absorbServerTime(parsed.serverTime)
                     if (!parsed.ok) {
-                        SyncOutcome.Rejected(parsed.error.ifBlank { "后台未应用任何改动（applied=0）" })
+                        SyncOutcome.Rejected(parsed.error.ifBlank { "后台未应用这次改动" })
                     } else {
                         SyncOutcome.Success(
                             applied = parsed.applied,
                             serverTime = parsed.serverTime,
-                            unknownOps = parsed.unknownOps,
-                            opErrors = parsed.opErrors,
                             favorites = parsed.favorites,
-                            mergedInto = parsed.mergedInto,
                             nextWaitMs = parsed.nextWaitMs,
                         )
                     }
@@ -95,9 +84,25 @@ class SyncApi(
     }
 
     /**
-     * 拉一页收藏。后台按 `favorite_at` 倒序发，游标是上一页最后那条的时间戳，
-     * 所以中途新增的收藏不会被分页跨过，重复的那几条由入库时按 id 去掉。
+     * 拉一页**清单**（`fields=min`）：只有 url、收藏时间、后台更新时刻与内容状态，不带内容。
+     *
+     * 对账先翻完整的清单做差集，再只为差异的那几条取内容 —— 内容占一条字节的七成以上，
+     * 千条量级翻一遍清单比翻一遍整行便宜一个数量级。
      */
+    suspend fun pullManifest(cursor: String?, limit: Int): PullOutcome {
+        val config = settings.current()
+        val query = buildString {
+            append("/favorites?fields=min&limit=").append(limit)
+            if (!cursor.isNullOrBlank()) {
+                append("&cursor=").append(URLEncoder.encode(cursor, "UTF-8"))
+            }
+        }
+        return exchange(config, query, null, pacing = false, { reason -> PullOutcome.Failed(reason) }) { text, code ->
+            parsePage(text, code)
+        }
+    }
+
+    /** 取整行页：冷启动/滚到底补页用，每条自带内容 */
     suspend fun pull(cursor: String?, limit: Int): PullOutcome {
         val config = settings.current()
         val query = buildString {
@@ -106,100 +111,86 @@ class SyncApi(
                 append("&cursor=").append(URLEncoder.encode(cursor, "UTF-8"))
             }
         }
-        return exchange(config, query, null, { reason -> PullOutcome.Failed(reason) }) { text, code ->
+        return exchange(config, query, null, pacing = false, { reason -> PullOutcome.Failed(reason) }) { text, code ->
+            parsePage(text, code)
+        }
+    }
+
+    private fun parsePage(text: String, code: Int): PullOutcome {
+        if (code in 400..499) return PullOutcome.Failed("后台拒绝：HTTP $code")
+        val parsed = json.decodeFromString(PullResponse.serializer(), text)
+        return if (!parsed.ok) {
+            PullOutcome.Failed(parsed.error.ifBlank { "后台没有返回这一页" })
+        } else {
+            PullOutcome.Loaded(parsed.favorites, parsed.nextCursor, parsed.hasMore, parsed.total)
+        }
+    }
+
+    /**
+     * 只为这些 url 取内容（差集算完之后的第二趟）。
+     *
+     * 后台一次最多 200 个，超出的由调用方分批 —— 这里不静默截断：截断等于把用户看不见的那批
+     * 永远停在旧内容上。失败就是失败，交给调用方下次再试。
+     */
+    suspend fun lookup(urls: List<String>): LookupOutcome {
+        if (urls.isEmpty()) return LookupOutcome.Loaded(emptyList())
+        val body = json.encodeToString(LookupRequest.serializer(), LookupRequest(urls))
+        val config = settings.current()
+        return exchange(config, "/favorites/lookup", body, pacing = false, { reason -> LookupOutcome.Failed(reason) }) { text, code ->
             if (code in 400..499) {
-                PullOutcome.Failed("后台拒绝：HTTP $code")
+                LookupOutcome.Failed("后台拒绝：HTTP $code")
             } else {
-                val parsed = json.decodeFromString(PullResponse.serializer(), text)
-                clock.absorbServerTime(parsed.serverTime)
-                if (!parsed.ok) {
-                    PullOutcome.Failed(parsed.error.ifBlank { "后台没有返回这一页" })
-                } else {
-                    PullOutcome.Loaded(parsed.favorites, parsed.nextCursor, parsed.hasMore, parsed.total)
-                }
+                val parsed = json.decodeFromString(LookupResponse.serializer(), text)
+                if (!parsed.ok) LookupOutcome.Failed(parsed.error.ifBlank { "后台没有返回内容" })
+                else LookupOutcome.Loaded(parsed.favorites)
             }
         }
     }
 
     /**
-     * 拉一段对账增量：`since_rev` 之后后台落过的每一笔写入，里面既有被改过的已有收藏，也有墓碑。
+     * 打开一条还没就绪的收藏时，单独问一次它的状态。
      *
-     * [sinceRev] 就是上次拿到的 `next_rev`，本机不解释它、只原样回传；0 表示这个后台还没对过、从头起。
-     * 与 [pull] 走的是同一个 [SyncGate] 出站时隙，所以它不会额外打断上传，也不自带任何定时器。
+     * 这是**用户动作**触发的：点开那条才问一下。不做轮询、不做定时器 —— 用户盯着一条正在转存的
+     * 大视频时，他点开的那一下就是最合理的询问时机。
      */
-    suspend fun fetchChanges(sinceRev: Long, limit: Int): ChangesOutcome {
-        val config = settings.current()
-        val query = buildString {
-            append("/favorites/changes?limit=").append(limit)
-            if (sinceRev > 0L) {
-                append("&since_rev=").append(sinceRev)
-            }
-        }
-        return exchange(config, query, null, { reason -> ChangesOutcome.Failed(reason) }) { text, code ->
-            when {
-                // 404 要先于 4xx：这条接口在老后台上就是不存在，不是这台设备做错了什么
-                code == 404 -> ChangesOutcome.Unsupported
-                code in 400..499 -> ChangesOutcome.Failed("后台拒绝：HTTP $code")
-                else -> {
-                    val parsed = json.decodeFromString(ChangesResponse.serializer(), text)
-                    clock.absorbServerTime(parsed.serverTime)
-                    if (!parsed.ok) {
-                        ChangesOutcome.Failed(parsed.error.ifBlank { "后台没有返回这一批增量" })
-                    } else {
-                        ChangesOutcome.Loaded(
-                            items = parsed.items,
-                            // 后台没带 next_rev 时保住本机这次的起点：写成 0 会让下一轮从头再对一整段，
-                            // 那正是 GC 之外最容易被重复应用的场景
-                            nextRev = if (parsed.nextRev > 0L) parsed.nextRev else sinceRev,
-                            truncated = parsed.truncated,
-                        )
-                    }
-                }
-            }
-        }
-    }
+    suspend fun peek(url: String): LookupOutcome = lookup(listOf(url))
 
     /**
-     * 手动重新解析这几条收藏：后台重算内容信息并原样带回，`favorite_at` 不变。
-     *
-     * 只有用户在遮罩层点「重新解析」时才发这一条请求 —— 自动重试没有意义，
-     * 同一条链接的解析结果由链接本身决定，再问一遍只会多占一个出站时隙。
+     * 重建内容：后台丢弃旧结果重排一次转存，立刻返回（这条回到 pending）。
+     * [urls] 为空直接返回成功，不发请求。
      */
-    suspend fun resolve(ids: List<String>): ResolveOutcome {
-        if (ids.isEmpty()) return ResolveOutcome()
-        val body = json.encodeToString(ResolveRequest.serializer(), ResolveRequest(favoriteIds = ids))
+    suspend fun resolve(urls: List<String>): ResolveOutcome {
+        if (urls.isEmpty()) return ResolveOutcome()
+        val body = json.encodeToString(ResolveRequest.serializer(), ResolveRequest(urls = urls))
         val config = settings.current()
-        return exchange(config, "/resolve", body, { reason -> ResolveOutcome(error = reason) }) { text, code ->
+        return exchange(config, "/resolve", body, pacing = true, { reason -> ResolveOutcome(error = reason) }) { text, code ->
             if (code in 400..499) {
                 val parsed = runCatching { json.decodeFromString(ResolveResponse.serializer(), text) }.getOrNull()
                 ResolveOutcome(error = parsed?.error?.ifBlank { null } ?: "后台拒绝：HTTP $code")
             } else {
                 val parsed = json.decodeFromString(ResolveResponse.serializer(), text)
                 gate.noteServerWait(parsed.nextWaitMs)
-                clock.absorbServerTime(parsed.serverTime)
                 if (!parsed.ok) {
-                    ResolveOutcome(error = parsed.error.ifBlank { "后台没有返回解析结果" })
+                    ResolveOutcome(error = parsed.error.ifBlank { "后台没有受理这次重建" })
                 } else {
-                    ResolveOutcome(parsed.favorites, parsed.unknownIds, null)
+                    ResolveOutcome(parsed.favorites, parsed.unknownUrls, null)
                 }
             }
         }
     }
 
-    @Serializable
-    private data class ResolveRequest(@SerialName("favorite_ids") val favoriteIds: List<String>)
-
     /**
-     * 统一出口。[parse] 收到响应体与状态码；[onFailure] 负责把传输层/解析层失败映射成各自的失败类型，
-     * 这样新增接口时不用再抄一遍 OkHttp 的错误分支。
+     * 统一出口。[pacing] 为真时吃上传间隔（一次上传占一个时隙），读请求只排队不等待。
+     * [parse] 收到响应体与状态码；[onFailure] 把传输层/解析层失败映射成各自的失败类型。
      */
     private suspend fun <R> exchange(
         config: SettingsSnapshot,
         path: String,
         body: String?,
+        pacing: Boolean,
         onFailure: (String) -> R,
         parse: suspend (String, Int) -> R,
-    ): R = gate.run(config.uploadIntervalMs) {
+    ): R = gate.run(if (pacing) config.uploadIntervalMs else 0L) {
         withContext(Dispatchers.IO) {
             val url = buildUrl(config.syncEndpoint, path)
                 ?: return@withContext onFailure("同步地址无效，请在设置里填写 http(s):// 开头的后台地址")
@@ -224,7 +215,7 @@ class SyncApi(
     private fun mapSyncError(reason: String): SyncOutcome =
         if (reason.startsWith("同步地址无效")) SyncOutcome.Rejected(reason) else SyncOutcome.Retryable(reason)
 
-    /** 后台 4xx 的中文原因优先于状态码展示，方便在设置页直接看懂 */
+    /** 后台 4xx 的中文原因优先于状态码展示 */
     private fun rejectionReason(text: String): String? = runCatching {
         json.decodeFromString(SyncResponse.serializer(), text).error
     }.getOrNull()?.takeIf { it.isNotBlank() }
@@ -238,7 +229,7 @@ class SyncApi(
 
 sealed interface PullOutcome {
     data class Loaded(
-        /** 这一页的收藏，每条都已带后台的解析结果 */
+        /** 这一页的收藏；清单档里 `media` 为空、只有状态 */
         val favorites: List<FavoriteDto>,
         /** 下一页的游标；空串表示后台没有更多了 */
         val nextCursor: String = "",
@@ -250,36 +241,7 @@ sealed interface PullOutcome {
     data class Failed(val reason: String) : PullOutcome
 }
 
-/**
- * 一次对账拉取的结果。
- *
- * [Loaded.items] 按后台给的顺序原样交出（rev 升序），不在出站口拆成「收藏」与「墓碑」两份：
- * 同一条收藏在一批里可能先被删、又被重新收藏（软删的行被同一个 url 复活），拆成两份就把这个先后弄丢了，
- * 落地时会把刚复活的那条再删一遍。怎么应用是调用方的事，本轮只负责读出来。
- */
-sealed interface ChangesOutcome {
-    /**
-     * 一批增量。要不要再来一批只看 [Loaded.items] 空不空：契约里没有「还有更多」那个键，
-     * 每批按 rev 升序发到 `limit` 条为止，空批就是账号里没有更新的东西了 ——
-     * 所以这里也不交出一个猜出来的布尔值。
-     */
-    data class Loaded(
-        /** 每一笔写入；`deleted` 为真的那笔要在本机**物理删除本地行、连段进度一起删** */
-        val items: List<ChangeItemDto>,
-        /** 下一批的 `since_rev`；等于本机这次的起点表示后台没有新写入，起点不用动 */
-        val nextRev: Long,
-        /** 起点被后台 GC 掉了：这批不完整，调用方该丢回游标改走全量翻页 */
-        val truncated: Boolean,
-    ) : ChangesOutcome
-
-    /**
-     * 后台还没有这条接口（HTTP 404）。
-     *
-     * 单独一个结果而不是并入 [Failed]：这是能力缺失不是故障，重试同样的请求只会再撞一次 404，
-     * 调用方要的是「这个后台退回全量翻页」。
-     */
-    data object Unsupported : ChangesOutcome
-
-    /** 网络失败、后台拒绝或响应不合形状：读操作，下次再对，不进上传队列 */
-    data class Failed(val reason: String) : ChangesOutcome
+sealed interface LookupOutcome {
+    data class Loaded(val favorites: List<FavoriteDto>) : LookupOutcome
+    data class Failed(val reason: String) : LookupOutcome
 }

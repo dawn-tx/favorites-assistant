@@ -3,11 +3,37 @@ package com.favkit.tablet.data
 /**
  * 一条收藏的**上传**状态，只有这三种：已经后台确认、还在队列里、重试耗尽需要用户动手。
  *
- * 内容有没有解析出来不在这个口径里 —— 后台保存与解析是同一次调用，收藏能上传成功，
- * 解析结果就同时到了；解析失败是这条内容自己的事，由 [Favorite.failedReason] 在条目上说明，
- * 不该在计数里占一个位置。
+ * 内容有没有准备好不在这个口径里 —— 后台把内容做好的时间比上传晚得多，由 [MediaState]
+ * 在条目上说明（[Favorite.contentPending]），不该在计数里占一个位置。
  */
 enum class SyncBadge { SYNCED, QUEUED, FAILED }
+
+/**
+ * 内容就绪状态。后台把「解析 → 下载 → 切片 → 转存」做成一条任务，所以内容会晚于收藏到达。
+ *
+ * 这不是第四个同步状态：同步说的是「本机改动传上去了没有」，这个说的是「后台把内容准备好了没有」，
+ * 两件事分属不同的一方，混进同一个枚举就会出现「解析失败却显示待同步」那种说不清的状态。
+ */
+enum class MediaState {
+    /** 刚保存、还没从后台拿到过状态 */
+    UNKNOWN,
+    /** 后台正在解析、下载、切片并转存到存储服务器 */
+    PENDING,
+    /** 内容齐了，可以看/可以播 */
+    READY,
+    /** 后台试过但失败了，原因在 failedReason */
+    FAILED,
+    ;
+
+    companion object {
+        fun of(raw: String): MediaState = when (raw.lowercase()) {
+            "pending" -> PENDING
+            "ready" -> READY
+            "failed" -> FAILED
+            else -> UNKNOWN
+        }
+    }
+}
 
 enum class OpType { UPSERT, DELETE }
 
@@ -58,30 +84,25 @@ data class Favorite(
     val failedReason: String = "",
     val resolvedAt: Long = 0L,
     val badge: SyncBadge = SyncBadge.QUEUED,
+    /** 后台这一行最后一次变化的时刻；对账拿它判断这条要不要重新取内容。0 = 还没从后台拿到过 */
+    val serverUpdatedAt: Long = 0,
     /**
-     * 后台对这一行发的版本号，本地只读，改它只有两条路：后台回来、或本机重新从后台取。
-     * 上传时它就是 `base_rev` —— 这次编辑基于的是哪一版；0 表示这台设备还没拿到过版本号，
-     * 那种时候宁可不发这个字段（发 0 等于宣称「基于第一版」，后台会把每条都判成冲突）。
+     * 内容就绪状态。`PENDING` = 后台正在解析/下载/切片转存；`FAILED` = 后台试过但失败；
+     * `READY` = 内容齐了。`UNKNOWN` 只属于「刚保存、还没上传」的那一瞬。
      */
-    val rev: Long = 0,
+    val mediaState: MediaState = MediaState.UNKNOWN,
     val locallyCached: Boolean = false,
     val tags: List<Tag> = emptyList(),
     /** 段号 → 该段看到过的位置。纯本地数据，不参与上传 */
     val segmentProgress: Map<Int, Long> = emptyMap(),
     /** 上次停在第几段 */
     val lastSegmentIndex: Int = 0,
-    /**
-     * 本机最后一次写这一行时的 HLC 读数：墙钟毫秒 + 同一毫秒内的序号。
-     *
-     * 它们和 [rev] 一样必须跟着这一行走 —— 上传时组包用的就是这两个值。现场取一次本机的钟不行：
-     * 两次编辑挨得近时，队列里排的是前一次的载荷，钟已经走到后一次，等于拿乙的时刻声明甲的内容。
-     * 0 表示这台设备没写过这一行（它从后台来、或者后台回来时还没被本机改过），那种时候不发 `write_hlc`。
-     */
-    val updatedAt: Long = 0,
-    val hlcSeq: Int = 0,
 ) {
     /** 后台给了可看可播的素材 */
     val resolved: Boolean get() = segments.isNotEmpty()
+
+    /** 内容还在后台准备（解析 + 下载 + 转存），不是错误，也不是「没同步」 */
+    val contentPending: Boolean get() = !resolved && failedReason.isBlank() && mediaState != MediaState.FAILED
 
     val hostLabel: String
         get() = site.ifBlank { runCatching { java.net.URI(url).host ?: url }.getOrDefault(url) }

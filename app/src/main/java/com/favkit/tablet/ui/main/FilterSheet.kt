@@ -32,9 +32,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.ui.components.Cardish
-import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.SectionTitle
-import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.TabletTagChip
 import com.favkit.tablet.ui.components.formatBytes
 import com.favkit.tablet.ui.components.rememberDialogWidth
@@ -85,19 +83,16 @@ fun FilterSheet(
                         verticalArrangement = Arrangement.spacedBy(scale.gapXs),
                     ) {
                         SectionTitle("同步")
-                        val hasStatus = !state.online || state.pendingSync > 0 || state.failed > 0
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            if (!state.online) StatusPill("离线", FavColors.muted)
-                            if (state.pendingSync > 0) StatusPill("待同步 ${state.pendingSync}", FavColors.warn)
-                            if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
+                        // 状态与顶栏同一口径：只报「还有多少在传」，离线与失败由底部悬浮条说
+                        val hasStatus = state.online && state.pendingSync == 0 && state.failed == 0
+                        if (!state.online) {
+                            Text("当前离线，改动会先存在本机，联网后自动补传。", style = MaterialTheme.typography.labelMedium)
+                        } else if (state.failed > 0) {
+                            Text("有 ${state.failed} 条上传失败，点「立即重试」重新排队。", style = MaterialTheme.typography.labelMedium)
+                        } else if (state.pendingSync > 0) {
+                            Text("待同步 ${state.pendingSync} 条。", style = MaterialTheme.typography.labelMedium)
                         }
-                        if (!hasStatus) {
+                        if (hasStatus) {
                             Text(
                                 "同步状态正常，本地与后台一致。",
                                 style = MaterialTheme.typography.labelMedium,

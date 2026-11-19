@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <dimen name="touch_target_min">72dp</dimen>
+    <dimen name="content_inset">28dp</dimen>
     <dimen name="edge_inset">28dp</dimen>
     <dimen name="gap_xs">9dp</dimen>
     <dimen name="gap_sm">16dp</dimen>

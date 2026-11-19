@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -42,7 +41,6 @@ import com.favkit.tablet.ui.components.Cardish
 import com.favkit.tablet.ui.components.FavColors
 import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
 import com.favkit.tablet.ui.components.SectionTitle
-import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.formatBytes
 import com.favkit.tablet.ui.components.formatSpeed
 import com.favkit.tablet.ui.components.rememberDialogWidth
@@ -243,9 +241,17 @@ fun SettingsSheet(
                             horizontalArrangement = Arrangement.spacedBy(scale.gapSm),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (state.pendingSync > 0) StatusPill("待同步 ${state.pendingSync}", FavColors.warn)
-                            if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
-                            Spacer(Modifier.weight(1f))
+                            // 与顶栏同一口径：这里只报进度，离线/失败由屏幕底部的悬浮提示条说
+                            Text(
+                                when {
+                                    !state.online -> "离线，改动会在联网后补传"
+                                    state.failed > 0 -> "待同步 ${state.pendingSync} 条 · 失败 ${state.failed} 条"
+                                    else -> "待同步 ${state.pendingSync} 条"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (state.failed > 0) FavColors.fail else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
                             TextButton(
                                 onClick = viewModel::retrySyncNow,
                                 modifier = Modifier.heightIn(min = scale.touchMin),

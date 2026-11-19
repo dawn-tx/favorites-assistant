@@ -72,6 +72,7 @@ object TabletMetrics {
             TabletScale(
                 touchMin = touchMin,
                 edgeInset = maxOf(mmToDp(context, EDGE_INSET_MM), dimenDp(context, R.dimen.edge_inset)),
+                contentInset = dimenDp(context, R.dimen.content_inset),
                 gapXs = dimenDp(context, R.dimen.gap_xs),
                 gapSm = dimenDp(context, R.dimen.gap_sm),
                 gapMd = dimenDp(context, R.dimen.gap_md),
@@ -84,7 +85,15 @@ object TabletMetrics {
 
 data class TabletScale(
     val touchMin: Dp,
+    /** 贴边控件（悬浮球）距屏幕边的距离：20mm 物理下限，只服务悬浮窗，不是内容边距 */
     val edgeInset: Dp,
+    /**
+     * 内容（视频墙、顶栏、列表）的左右边距。
+     *
+     * 以前内容边距直接借用 [edgeInset]（20mm 物理下限），在 1280dp 宽的平板上左右各吃掉 105dp、
+     * 墙的可用宽度少了 17%，还因此掉了一列。20mm 是「边缘控件不被误触」的指标，与内容排版无关。
+     */
+    val contentInset: Dp,
     val gapXs: Dp,
     val gapSm: Dp,
     val gapMd: Dp,

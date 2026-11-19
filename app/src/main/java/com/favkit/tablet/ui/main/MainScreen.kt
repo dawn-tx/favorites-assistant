@@ -29,8 +29,6 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,7 +36,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -58,6 +55,8 @@ import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.di.rememberAppGraph
 import com.favkit.tablet.floating.FloatingPanelScreen
 import com.favkit.tablet.ui.components.FavColors
+import com.favkit.tablet.ui.components.FloatingNotice
+import com.favkit.tablet.ui.components.NoticeTint
 import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.TabletIconButton
 import com.favkit.tablet.ui.components.rememberDialogWidth
@@ -83,7 +82,6 @@ fun MainScreen(
     val scale = TabletMetrics.rememberTabletScale()
     val state by viewModel.state.collectAsStateWithLifecycle()
     val graph = rememberAppGraph()
-    val snackbarHostState = remember { SnackbarHostState() }
     val gridState = rememberLazyGridState()
 
     // 关掉遮罩后要把用户带回刚才那条：滚到视野内 + 让那张卡闪一下
@@ -98,10 +96,12 @@ fun MainScreen(
         if (flashId == id) flashId = null
     }
 
+    // 临时回执走底部悬浮条：它自己消失，不排队、不堆叠
     LaunchedEffect(state.message) {
-        val message = state.message ?: return@LaunchedEffect
-        snackbarHostState.showSnackbar(message)
-        viewModel.consumeMessage()
+        if (state.message != null) {
+            delay(NOTICE_MS)
+            viewModel.consumeMessage()
+        }
     }
 
     // 遮罩层自己就是全屏：进度 tick 由 FocusOverlay 驱动，这里不再另起一份
@@ -122,7 +122,6 @@ fun MainScreen(
     val chromeVisible = focus == null
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             if (chromeVisible) {
                 MainTopBar(
@@ -153,7 +152,7 @@ fun MainScreen(
                 flashId = flashId,
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = scale.edgeInset),
+                    .padding(horizontal = scale.contentInset),
             )
 
             // 遮罩层是墙的兄弟节点：墙不退出组合，返回时浏览位置与已解码封面都还在
@@ -172,6 +171,26 @@ fun MainScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+
+            // 底部居中悬浮提示条：全应用唯一的临时消息位置。
+            // 铺在遮罩层之上 —— 看完片子回到底部，与在墙上时是同一个位置、同一种读法。
+            val notice = noticeOf(state)
+            FloatingNotice(
+                text = notice?.text,
+                tint = notice?.tint ?: NoticeTint.neutral,
+                scale = scale,
+                actionLabel = notice?.actionLabel,
+                onAction = when (notice?.action) {
+                    NoticeAction.RETRY_SWEEP -> viewModel::retrySweep
+                    NoticeAction.RETRY_SYNC -> viewModel::retrySyncNow
+                    null -> null
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    // 遮罩层底部有段条与播放条，提示条让出那一条高度
+                    .padding(bottom = if (focus != null) scale.touchMin * 6f else scale.gapMd)
+                    .padding(horizontal = scale.contentInset),
+            )
         }
     }
 
@@ -210,6 +229,47 @@ fun MainScreen(
 }
 
 /**
+ * 提示条此刻该显示什么：按优先级取**一条**。
+ *
+ * 1. 临时回执（已删除 / 标签已更新 / 刷新失败）—— 3.5 秒后自己走；
+ * 2. 对账失败 —— 留着，直到下一次对账成功，或者用户点「重试」；
+ * 3. 打开待就绪条目时那次单条查询失败 —— 同样留着，直到刷新成功；
+ * 4. 离线 / 上传失败 —— 条件消失才走。
+ *
+ * 不排队、不堆叠：新的直接替换旧的。排队的话会出现「我早就不关心了还一条条往外蹦」。
+ */
+private fun noticeOf(state: MainUiState): Notice? {
+    state.message?.let { return Notice(it, NoticeTint.neutral) }
+    state.sweepError?.let {
+        return Notice("同步失败：$it", NoticeTint.fail, actionLabel = "重试", action = NoticeAction.RETRY_SWEEP)
+    }
+    state.contentRefreshError?.let { return Notice(it, NoticeTint.warn) }
+    when {
+        !state.online -> return Notice("离线 · 改动会先存在本机", NoticeTint.neutral)
+        state.failed > 0 -> return Notice(
+            "上传失败 ${state.failed} 条",
+            NoticeTint.fail,
+            actionLabel = "重试",
+            action = NoticeAction.RETRY_SYNC,
+        )
+        state.queued > 0 -> return Notice("待同步 ${state.queued} 条", NoticeTint.info)
+    }
+    return null
+}
+
+private data class Notice(
+    val text: String,
+    val tint: Color,
+    val actionLabel: String? = null,
+    val action: NoticeAction? = null,
+)
+
+private enum class NoticeAction { RETRY_SWEEP, RETRY_SYNC }
+
+/** 临时回执停留时长 */
+private const val NOTICE_MS = 3_500L
+
+/**
  * 顶栏：标题 + 搜索 + 筛选 + 动作。
  *
  * 搜索默认收成一个图标，点开才占一整行 —— 浏览墙的时候用户要找的是内容，不是输入框。
@@ -234,7 +294,7 @@ private fun MainTopBar(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(horizontal = scale.edgeInset, vertical = scale.gapXs),
+            .padding(horizontal = scale.contentInset, vertical = scale.gapXs),
         verticalArrangement = Arrangement.spacedBy(scale.gapXs),
     ) {
         Row(
@@ -281,7 +341,6 @@ private fun MainTopBar(
                 SyncAction(
                     syncing = state.syncing,
                     pendingSync = state.pendingSync,
-                    failed = state.failed,
                     scale = scale,
                     onClick = onSync,
                 )
@@ -329,19 +388,16 @@ private fun FilterAction(state: MainUiState, scale: TabletScale, onClick: () -> 
     }
 }
 
-/** 状态胶囊只有三种：离线 / 待同步 / 失败。放不下由外层动作区一起横向滚 */
+/**
+ * 顶栏只留「进度」这一件事：正在传的条目数。
+ *
+ * 离线与「上传失败 N」搬到屏幕底部那条悬浮提示条上 —— 遮罩层里顶栏整条隐藏，
+ * 而观看恰恰是停留最久的时候，把「出问题了」藏在看不见的地方是最糟的选择。
+ * 这里剩下的「继续上传 N」只在有东西可传时出现，点了就把队列推一轮。
+ */
 @Composable
 private fun StatusPillsRow(state: MainUiState, scale: TabletScale) {
-    val hasAny = !state.online || state.pendingSync > 0 || state.failed > 0
-    if (!hasAny) return
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (!state.online) StatusPill("离线", FavColors.muted)
-        if (state.pendingSync > 0) StatusPill("待同步 ${state.pendingSync}", FavColors.warn)
-        if (state.failed > 0) StatusPill("失败 ${state.failed}", FavColors.fail)
-    }
+    if (state.queued > 0) StatusPill("待同步 ${state.queued}", FavColors.warn)
 }
 
 @Composable
@@ -380,17 +436,16 @@ private fun SearchField(
 }
 
 /**
- * 顶栏唯一的同步入口：**把失败的上传重新排队并立刻推动队列**。
+ * 顶栏只保留「进度」：正在传的时候转圈，还有条目排队时写「继续上传 N」。
  *
- * 用文字而不是刷新图标 —— 这个图标在这里一直被读成「刷新墙列表」，而墙列表压根不需要刷新：
- * 它由本地库的订阅驱动，滚到底自动补页。按钮也只在确实有话说的时候才占位置，队列清空就不出现，
- * 免得用户对着一个永远「点了像没反应」的图标猜它在忙什么。
+ * 失败那档搬到屏幕底部的悬浮提示条上（那里也带着「重试」动作）：遮罩层里顶栏整条隐藏，
+ * 而观看恰恰是停留最久的时候，把「出问题了」藏在看不见的地方是最糟的选择。
+ * 一个状态只在一个地方说，避免「顶栏一个红字、底下一个红条」各说各的。
  */
 @Composable
 private fun SyncAction(
     syncing: Boolean,
     pendingSync: Int,
-    failed: Int,
     scale: TabletScale,
     onClick: () -> Unit,
 ) {
@@ -401,8 +456,6 @@ private fun SyncAction(
                 modifier = Modifier.size(scale.touchMin * 0.38f),
             )
         }
-
-        failed > 0 -> SyncTextButton("重试上传 $failed", FavColors.fail, scale, onClick)
 
         pendingSync > 0 -> SyncTextButton("继续上传 $pendingSync", LocalContentColor.current, scale, onClick)
 
