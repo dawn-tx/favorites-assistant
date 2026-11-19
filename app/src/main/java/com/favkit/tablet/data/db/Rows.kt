@@ -39,10 +39,25 @@ data class FavoriteRow(
     val failedReason: String = "",
     val resolvedAt: Long = 0L,
 
+    // —— 后台发的行版本号，本地只读（0 表示这条还没从后台拿到过 rev）——
+    /** 账号内单调递增，由后台落库时 +1。本地编辑**不**动它，上传时作为 `base_rev` 的起点 */
+    val rev: Long = 0L,
+
     // —— 以下是纯本地状态，不参与上传 ——
     val badge: String = SyncBadge.QUEUED.name,
     val locallyCached: Boolean = false,
-    val updatedAt: Long = System.currentTimeMillis(),
+    /**
+     * 本行最后一次**本地**编辑的 HLC `wall_ms`（见 [com.favkit.tablet.data.SyncClock]）。
+     *
+     * 不是随手取的墙钟：字段级合并拿它当决胜键的一部分，写错一次这台设备就长期被判旧。
+     * 0 表示这行从后台来、本机还没编辑过。
+     */
+    val updatedAt: Long = 0L,
+    /**
+     * [updatedAt] 那次写入的 HLC `seq`。墙钟只到毫秒，同一毫秒内的两次编辑靠它分先后，
+     * 所以它得和墙钟记在同一行里：只留墙钟，这一行的写入时刻就永远是个残缺读数。
+     */
+    val hlcSeq: Int = 0,
     /** 软删除时间：非空表示已标记删除，等待后台补传后物理清除 */
     val deletedAt: Long? = null,
     /** 「段号:毫秒」逗号分隔的段级进度；见 SegmentProgressCodec */

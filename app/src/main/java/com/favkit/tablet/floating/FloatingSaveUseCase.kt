@@ -2,6 +2,7 @@ package com.favkit.tablet.floating
 
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.di.AppGraph
+import com.favkit.tablet.net.ChangedFields
 import com.favkit.tablet.util.VideoLinkDetector
 
 sealed interface SaveOutcome {
@@ -25,6 +26,9 @@ sealed interface SaveOutcome {
  * 同一条链接反复分享只入一次库：按收到的链接**原样**比对（不做参数归一化，
  * 所以 B 站 `?p=2` 分 P 与带不同跟踪参数的链接仍是各自独立的收藏），命中就返回
  * [SaveOutcome.Duplicate]，不写库、不排队，也不动标签库。
+ *
+ * 唯一例外是「删掉之后又收藏同一条」：那条链接在本机是一行墓碑、在后台还是同一行，
+ * 所以既不新建也不算重复，而是复用原来那个 id 把行恢复过来（见 [com.favkit.tablet.data.FavoritesRepository.reopenDeletedByUrl]）。
  */
 class FloatingSaveUseCase(private val graph: AppGraph) {
 
@@ -50,13 +54,26 @@ class FloatingSaveUseCase(private val graph: AppGraph) {
                 .onFailure { return SaveOutcome.Rejected("新建标签失败：${it.message ?: "未知原因"}") }
         }
 
+        // 之前删过这条链接：复用那一行，别再新建一个 id —— 后台那边那一行本来就是同一件事，
+        // 新建出来的两个 id 要等归并回执才对得上，中间这段时间本机看不见那条收藏
+        val reopened = graph.favorites.reopenDeletedByUrl(
+            url = cleanUrl,
+            note = note,
+            sourceApp = VideoLinkDetector.sourceLabel(cleanUrl),
+            tagIds = finalTagIds.distinct(),
+        )
+        if (reopened != null) {
+            graph.sync.queueUpsert(reopened, ChangedFields.CREATE)
+            return SaveOutcome.Queued(reopened, "这条之前删过，已重新收藏并按队列上传")
+        }
+
         val favorite = graph.favorites.create(
             url = cleanUrl,
             note = note,
             sourceApp = VideoLinkDetector.sourceLabel(cleanUrl),
             tagIds = finalTagIds.distinct(),
         )
-        graph.sync.queueUpsert(favorite)
+        graph.sync.queueUpsert(favorite, ChangedFields.CREATE)
         return SaveOutcome.Queued(favorite, "已保存，正在按队列上传")
     }
 }

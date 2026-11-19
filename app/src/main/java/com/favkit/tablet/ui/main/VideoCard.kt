@@ -358,7 +358,8 @@ private fun CoverTile(
 }
 
 /**
- * 封面区的两种「还没有内容」：后台解析失败，或这条的解析结果还没取回来。
+ * 封面区的两种「还没有内容」：后台解析失败，或这条的内容信息还在后台解析（文案与这一档口径一致：
+ * 不给转圈也不给进度条，本链路没有轮询，转圈是兑不了的承诺）。
  *
  * 失败原因只在这里、只在这条卡片上说一句 —— 它不进顶栏计数，也不占一枚胶囊：
  * 上传成功和解析失败是两件事，混成一个全局状态就没人分得清该重试还是该改链接。
@@ -385,7 +386,7 @@ private fun UnresolvedStage(favorite: Favorite, modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = if (failed) "解析失败" else "内容信息还没取回来",
+                text = if (failed) "解析失败" else "内容信息还在后台解析",
                 style = MaterialTheme.typography.labelLarge,
                 color = if (failed) scheme.error else scheme.onSurfaceVariant,
                 maxLines = 1,

@@ -58,12 +58,27 @@ data class Favorite(
     val failedReason: String = "",
     val resolvedAt: Long = 0L,
     val badge: SyncBadge = SyncBadge.QUEUED,
+    /**
+     * 后台对这一行发的版本号，本地只读，改它只有两条路：后台回来、或本机重新从后台取。
+     * 上传时它就是 `base_rev` —— 这次编辑基于的是哪一版；0 表示这台设备还没拿到过版本号，
+     * 那种时候宁可不发这个字段（发 0 等于宣称「基于第一版」，后台会把每条都判成冲突）。
+     */
+    val rev: Long = 0,
     val locallyCached: Boolean = false,
     val tags: List<Tag> = emptyList(),
     /** 段号 → 该段看到过的位置。纯本地数据，不参与上传 */
     val segmentProgress: Map<Int, Long> = emptyMap(),
     /** 上次停在第几段 */
     val lastSegmentIndex: Int = 0,
+    /**
+     * 本机最后一次写这一行时的 HLC 读数：墙钟毫秒 + 同一毫秒内的序号。
+     *
+     * 它们和 [rev] 一样必须跟着这一行走 —— 上传时组包用的就是这两个值。现场取一次本机的钟不行：
+     * 两次编辑挨得近时，队列里排的是前一次的载荷，钟已经走到后一次，等于拿乙的时刻声明甲的内容。
+     * 0 表示这台设备没写过这一行（它从后台来、或者后台回来时还没被本机改过），那种时候不发 `write_hlc`。
+     */
+    val updatedAt: Long = 0,
+    val hlcSeq: Int = 0,
 ) {
     /** 后台给了可看可播的素材 */
     val resolved: Boolean get() = segments.isNotEmpty()

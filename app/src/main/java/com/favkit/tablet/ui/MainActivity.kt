@@ -86,6 +86,10 @@ class MainActivity : ComponentActivity() {
                 FloatingAssistantService.start(this@MainActivity)
             }
         }
+        // 对账挂在这条 Runnable 上而不是直接 launch：lifecycleScope 是 Main.immediate，
+        // launch 会就地跑到第一个挂起点，冷启动时那等于在首帧之前发出请求（还会顺手把 ViewModel 建出来）。
+        // decorView 未 attach 时 post 进的是 attach 队列，真跑起来是第一次 traversal 之后的下一条消息。
+        window.decorView.post { mainModel.onEnterForeground() }
     }
 
     private fun enableAssistantNow() {

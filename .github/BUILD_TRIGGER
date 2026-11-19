@@ -9,19 +9,20 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 18
-code: 78ceeee
-note: 按设备实测体验整改遮罩层（上一包强制裁切 + 独立全屏 + 常驻右栏三件事都不顺手）。
-      一、画面不再分形态：PlayerStage 只剩 PlayerView + 一层只吃轻点的点击面 + 缓冲转圈，一律
-      RESIZE_MODE_FIT 完整显示、不裁切；竖屏 RESIZE_MODE_ZOOM 与 ⛶ 全屏层（FullscreenLayer/
-      FullscreenImages）一起删了，点卡片进的那一层自己就是全屏（进层隐系统栏、退出即恢复）。
-      二、控件全搬进盖在画面上的控制层：点画面唤出，播放中 3.5s 自收、暂停常显；层里是段条 +
-      段号/标题/作者/文案 +「详情 ›」+ 播放条（Slider 松手才 seek、尾部当前/总时长、倍速选择器），
-      视频段正中另给 ▶/⏸，图集段只给段号与文案。详情里那个「播放」一行（PlayControls）删除，
-      只在播放报错时留一句原因。
-      三、横屏详情从常驻右栏改成模态右侧抽屉：AnimatedVisibility + slideInHorizontally，
-      宽 = 可用宽度 45% 夹在 320~560dp，背后遮罩点它收回；FeedRail/RailHandle/StepBand 全删，
-      抽屉开着 userScrollEnabled=false 让竖向手势归抽屉，换条仍只有竖向 pager 一个来源。
-      竖屏底部三档 ModalBottomSheet 不变。返回键先收抽屉再关遮罩。
-      四、依赖补 androidx.compose.animation:animation（BOM 管版本，AnimatedVisibility 直接 import）；
-      遮罩层的吸附动画回到 pager 默认，SNAP_MS/SNAP_EASING 随 StepBand 一起去了。
+build: 19
+code: 60342e1
+note: 多设备与多写入者同步这条链路整体换语义（协议、参考实现、App 三面同批，App 面是这次要出包的改动）。
+      一、Room 版本 4→5：favorites 行加 rev / updatedAt / hlcSeq 三列，pending_ops 独立成表。
+      AppDatabase 挂的是 fallbackToDestructiveMigration()，所以**装着旧版直接升级会把本机收藏表清空**，
+      这一包请当新装看待，或先手动清数据；这不是回归，是既有迁移策略的既定代价。
+      二、发号器换成 HLC：新增 data/SyncClock.kt + net/Hlc.kt（状态落 DataStore，不放 Room），
+      出站带 write_hlc 与 changed_fields（只报这次真改的列），后台逐列 LWW 决胜。
+      三、对账通道打通：SyncApi.fetchChanges + FavoritesRepository.applyChanges 按后台顺序逐条落，
+      since_rev 存进 AppSettings 并绑「账号指纹 + 端点」游标戳（换令牌或换后台自动退回从头对）；
+      触发点两个 —— worker 把队列排空后顺带对一次，以及进前台补一次（离线或空表让路），
+      truncated 时退回全量翻页，跑满一轮 PAGE_CAP 后在同一次 worker 里续跑一次。
+      四、账号隔离在 App 侧只体现为一件事：设置里存了一串不同的令牌 = 换账号，本机在同一条事务里
+      清掉未上传的改动（pending_ops 整表 + QUEUED/FAILED 归 SYNCED + 物理删墓碑），只改端点不清。
+      五、一致性收口：后台收下但本机没写进去时**留队标红**而不是静默确认，所有 badge 写入按
+      「这一笔还在队列里」门控；被 op_errors 点名的条目留在队列、把后台那句中文原因写进 lastError，
+      顶栏「失败 N」点开可见。联网回调按裁决只补传、不对账，零轮询零定时器这条没破。

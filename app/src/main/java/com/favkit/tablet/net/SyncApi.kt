@@ -2,6 +2,7 @@ package com.favkit.tablet.net
 
 import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.data.SettingsSnapshot
+import com.favkit.tablet.data.SyncClock
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -19,12 +20,16 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * 与收藏后台的唯一出口：明文 JSON，一条请求就是一批 ops。
  *
  * 成功判据只认后台明确确认的条数，由 [com.favkit.tablet.sync.SyncWorker] 核对
- * `applied + unknown_ops == 送出条数`。早期版本走信封加密，后台解不开时仍回 200 + applied=0，
+ * `applied + unknown_ops + op_errors == 送出条数`。早期版本走信封加密，后台解不开时仍回 200 + applied=0，
  * App 误判成功并清空本地队列，数据被静默丢弃 —— 所以宁可后台回 4xx，也不接受「看起来成功的空响应」。
+ *
+ * 每条带 `server_time` 的响应（上传、取列表、重新解析、对账都算）都会喂给 [SyncClock] 抬升本机 HLC 的
+ * 时间下界：这是后台时间在客户端唯一有后果的用途，而且不需要为此多发任何请求。
  */
 class SyncApi(
     private val settings: AppSettings,
     private val gate: SyncGate,
+    private val clock: SyncClock,
 ) {
 
     private val json = Json {
@@ -56,11 +61,13 @@ class SyncApi(
         return exchange(config, "/sync", body, ::mapSyncError) { text, code ->
             when {
                 code == 429 -> {
-                    val retryAfter = runCatching {
-                        json.decodeFromString(SyncResponse.serializer(), text).nextWaitMs
+                    val throttled = runCatching {
+                        json.decodeFromString(SyncResponse.serializer(), text)
                     }.getOrNull()
-                    gate.noteServerWait(retryAfter)
-                    SyncOutcome.Retryable("后台限速：HTTP 429", retryAfterMs = retryAfter)
+                    gate.noteServerWait(throttled?.nextWaitMs)
+                    // 被限速也是收到了一次响应：下界照样要抬，否则本机之后的写入会停在旧时间里
+                    throttled?.let { clock.absorbServerTime(it.serverTime) }
+                    SyncOutcome.Retryable("后台限速：HTTP 429", retryAfterMs = throttled?.nextWaitMs)
                 }
 
                 code in 400..499 -> SyncOutcome.Rejected(rejectionReason(text) ?: "后台拒绝：HTTP $code")
@@ -68,6 +75,7 @@ class SyncApi(
                 else -> {
                     val parsed = json.decodeFromString(SyncResponse.serializer(), text)
                     gate.noteServerWait(parsed.nextWaitMs)
+                    clock.absorbServerTime(parsed.serverTime)
                     if (!parsed.ok) {
                         SyncOutcome.Rejected(parsed.error.ifBlank { "后台未应用任何改动（applied=0）" })
                     } else {
@@ -75,7 +83,9 @@ class SyncApi(
                             applied = parsed.applied,
                             serverTime = parsed.serverTime,
                             unknownOps = parsed.unknownOps,
+                            opErrors = parsed.opErrors,
                             favorites = parsed.favorites,
+                            mergedInto = parsed.mergedInto,
                             nextWaitMs = parsed.nextWaitMs,
                         )
                     }
@@ -101,10 +111,49 @@ class SyncApi(
                 PullOutcome.Failed("后台拒绝：HTTP $code")
             } else {
                 val parsed = json.decodeFromString(PullResponse.serializer(), text)
+                clock.absorbServerTime(parsed.serverTime)
                 if (!parsed.ok) {
                     PullOutcome.Failed(parsed.error.ifBlank { "后台没有返回这一页" })
                 } else {
                     PullOutcome.Loaded(parsed.favorites, parsed.nextCursor, parsed.hasMore, parsed.total)
+                }
+            }
+        }
+    }
+
+    /**
+     * 拉一段对账增量：`since_rev` 之后后台落过的每一笔写入，里面既有被改过的已有收藏，也有墓碑。
+     *
+     * [sinceRev] 就是上次拿到的 `next_rev`，本机不解释它、只原样回传；0 表示这个后台还没对过、从头起。
+     * 与 [pull] 走的是同一个 [SyncGate] 出站时隙，所以它不会额外打断上传，也不自带任何定时器。
+     */
+    suspend fun fetchChanges(sinceRev: Long, limit: Int): ChangesOutcome {
+        val config = settings.current()
+        val query = buildString {
+            append("/favorites/changes?limit=").append(limit)
+            if (sinceRev > 0L) {
+                append("&since_rev=").append(sinceRev)
+            }
+        }
+        return exchange(config, query, null, { reason -> ChangesOutcome.Failed(reason) }) { text, code ->
+            when {
+                // 404 要先于 4xx：这条接口在老后台上就是不存在，不是这台设备做错了什么
+                code == 404 -> ChangesOutcome.Unsupported
+                code in 400..499 -> ChangesOutcome.Failed("后台拒绝：HTTP $code")
+                else -> {
+                    val parsed = json.decodeFromString(ChangesResponse.serializer(), text)
+                    clock.absorbServerTime(parsed.serverTime)
+                    if (!parsed.ok) {
+                        ChangesOutcome.Failed(parsed.error.ifBlank { "后台没有返回这一批增量" })
+                    } else {
+                        ChangesOutcome.Loaded(
+                            items = parsed.items,
+                            // 后台没带 next_rev 时保住本机这次的起点：写成 0 会让下一轮从头再对一整段，
+                            // 那正是 GC 之外最容易被重复应用的场景
+                            nextRev = if (parsed.nextRev > 0L) parsed.nextRev else sinceRev,
+                            truncated = parsed.truncated,
+                        )
+                    }
                 }
             }
         }
@@ -127,6 +176,7 @@ class SyncApi(
             } else {
                 val parsed = json.decodeFromString(ResolveResponse.serializer(), text)
                 gate.noteServerWait(parsed.nextWaitMs)
+                clock.absorbServerTime(parsed.serverTime)
                 if (!parsed.ok) {
                     ResolveOutcome(error = parsed.error.ifBlank { "后台没有返回解析结果" })
                 } else {
@@ -198,4 +248,38 @@ sealed interface PullOutcome {
     ) : PullOutcome
 
     data class Failed(val reason: String) : PullOutcome
+}
+
+/**
+ * 一次对账拉取的结果。
+ *
+ * [Loaded.items] 按后台给的顺序原样交出（rev 升序），不在出站口拆成「收藏」与「墓碑」两份：
+ * 同一条收藏在一批里可能先被删、又被重新收藏（软删的行被同一个 url 复活），拆成两份就把这个先后弄丢了，
+ * 落地时会把刚复活的那条再删一遍。怎么应用是调用方的事，本轮只负责读出来。
+ */
+sealed interface ChangesOutcome {
+    /**
+     * 一批增量。要不要再来一批只看 [Loaded.items] 空不空：契约里没有「还有更多」那个键，
+     * 每批按 rev 升序发到 `limit` 条为止，空批就是账号里没有更新的东西了 ——
+     * 所以这里也不交出一个猜出来的布尔值。
+     */
+    data class Loaded(
+        /** 每一笔写入；`deleted` 为真的那笔要在本机**物理删除本地行、连段进度一起删** */
+        val items: List<ChangeItemDto>,
+        /** 下一批的 `since_rev`；等于本机这次的起点表示后台没有新写入，起点不用动 */
+        val nextRev: Long,
+        /** 起点被后台 GC 掉了：这批不完整，调用方该丢回游标改走全量翻页 */
+        val truncated: Boolean,
+    ) : ChangesOutcome
+
+    /**
+     * 后台还没有这条接口（HTTP 404）。
+     *
+     * 单独一个结果而不是并入 [Failed]：这是能力缺失不是故障，重试同样的请求只会再撞一次 404，
+     * 调用方要的是「这个后台退回全量翻页」。
+     */
+    data object Unsupported : ChangesOutcome
+
+    /** 网络失败、后台拒绝或响应不合形状：读操作，下次再对，不进上传队列 */
+    data class Failed(val reason: String) : ChangesOutcome
 }

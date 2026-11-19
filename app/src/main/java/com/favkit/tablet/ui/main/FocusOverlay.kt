@@ -1120,7 +1120,7 @@ private fun UnresolvedStage(favorite: Favorite, scale: TabletScale, modifier: Mo
         verticalArrangement = Arrangement.spacedBy(scale.gapSm),
     ) {
         Text(
-            text = if (failed) "后台没能解析这条链接" else "这条收藏还没有内容信息",
+            text = if (failed) "后台没能解析这条链接" else "内容信息还在后台解析",
             style = MaterialTheme.typography.titleMedium,
             color = Color.White,
         )

@@ -12,7 +12,7 @@ import androidx.room.RoomDatabase
         FavoriteTagRow::class,
         PendingOpRow::class,
     ],
-    version = 4,
+    version = 5,
     // 不导出 schema：调试期看运行时版本用 RoomInspector 即可。导出会让 debug/release 两个
     // KSP 任务写同一个目录，云端并行构建里会留下半截空文件，Room 读它直接报 "Empty schema file"。
     exportSchema = false,

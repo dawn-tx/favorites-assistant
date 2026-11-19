@@ -15,7 +15,9 @@ import com.favkit.tablet.floating.FloatingSaveUseCase
 import com.favkit.tablet.floating.PanelStatus
 import com.favkit.tablet.floating.SaveOutcome
 import com.favkit.tablet.media.PlayerUiState
+import com.favkit.tablet.net.ChangedFields
 import com.favkit.tablet.net.PullOutcome
+import com.favkit.tablet.sync.Reconcile
 import com.favkit.tablet.util.VideoLinkDetector
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -143,6 +145,44 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
+    /**
+     * 进前台对一次账（`GET /favorites/changes`）。
+     *
+     * 为什么要这第二条触发路：worker 那一档只在「本机刚把自己攒的改动传完」时跑，用户不写任何东西
+     * 就永远不触发 —— 新设备登录、闲置很久后回到界面，这些纯接收场景里别的设备的删除根本落不下来。
+     * 单飞不另加标志：[com.favkit.tablet.sync.SyncManager.reconcile] 里那个 AtomicBoolean 已经保证
+     * 同一时刻只有一笔在跑，撞上了直接回 BUSY，什么都不做。
+     * 离线不试：这条链的唯一出口是 SyncGate 的出站时隙，一次注定失败的请求不该把它占掉（也不弹任何东西）。
+     * 冷启动那一次由 MainActivity 用 `window.decorView.post` 推到首帧之后再跑，所以这里不构成「首帧之前新增网络请求」。
+     *
+     * **镜像空着就退让**：这跟 [seedRemoteCache] 用的是同一个判据、走的是相反的分支。表空 = 换机或清了数据，
+     * 那条路已经去后台取第一页了，本机既没有行等墓碑来删、游标也本来就是 0，再叠一次全量日志重放
+     * 等于一次进前台把「把后台现状搬到本机」做两遍。
+     */
+    fun onEnterForeground() {
+        if (!_state.value.online) return
+        viewModelScope.launch {
+            if (graph.favorites.cachedCount() == 0) return@launch
+            // 界面这一档只消费 TRUNCATED；PAGE_CAP 由 worker 那一档接（SyncWorker.reconcileQuietly 落定即续跑一次）
+            if (graph.sync.reconcile() == Reconcile.TRUNCATED) rebuildMirrorFromFirstPage()
+        }
+    }
+
+    /**
+     * `truncated` 的善后：后台已经把 `since_rev` 那段日志 GC 掉了，缺的那一段永远补不回来，
+     * 游标 [com.favkit.tablet.sync.SyncManager.reconcile] 归零，剩下的只能按「服务端为准」重建镜像。
+     *
+     * 做法是把翻页游标退回第一页再取一页，走的还是 [loadRemotePage] 那条既有路，不新写第二份翻页：
+     * 这个 App 的本地表本来就只缓存「滚到过的那几页」（README 的镜像口径），所以这里不追求一次拉完整库，
+     * 剩下的页仍由「列表离底两屏补一页」那条路继续接。
+     */
+    private fun rebuildMirrorFromFirstPage() {
+        remoteCursor = null
+        // 用户可能已经滚到底、remoteHasMore 被写成假，不扶正的话这次自动补页会被自己那条判据挡掉
+        _state.update { it.copy(remoteHasMore = true) }
+        loadRemotePage(announce = false)
+    }
+
     private fun bindFlows() {
         viewModelScope.launch {
             combine(graph.favorites.observeAll(), filterFlow) { all, filter -> all.filter(filter::matches) }
@@ -220,12 +260,18 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
+    /**
+     * 标签本身变了（改名或从库里删掉）：受影响条目的标签快照要重新排队，否则云端停在旧标签名。
+     * 这次改动动的是标签，所以 changed_fields 只报 tags，不能顺手报全字段。
+     *
+     * 排队前先让 repository 给这几条推一个新的 HLC 读数：改名对它们就是一次写入，
+     * 戳不推新，发出去的 `write_hlc` 还是上一次编辑的时刻，后台据此把改名判成旧改动丢掉。
+     */
     private suspend fun resync(favorites: List<Favorite>) {
         if (favorites.isEmpty()) return
-        favorites.forEach { favorite ->
-            graph.favorites.byId(favorite.id)?.let { graph.sync.queueUpsert(it) }
-        }
-        messageFlow.value = "标签已更新，${favorites.size} 条收藏重新排队同步"
+        val restamped = graph.favorites.stampTagRewrite(favorites.map { it.id })
+        restamped.forEach { graph.sync.queueUpsert(it, ChangedFields.TAGS) }
+        messageFlow.value = "标签已更新，${restamped.size} 条收藏重新排队同步"
     }
 
     /**
@@ -526,7 +572,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun saveNote(id: String, note: String) {
         viewModelScope.launch {
             val updated = graph.favorites.updateNote(id, note)
-            updated?.let { graph.sync.queueUpsert(it) }
+            updated?.let { graph.sync.queueUpsert(it, ChangedFields.NOTE) }
             messageFlow.value = "备注已保存，已排入上传队列"
         }
     }
@@ -534,7 +580,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun saveTags(id: String, tagIds: List<Long>) {
         viewModelScope.launch {
             graph.favorites.updateTags(id, tagIds)
-            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it) }
+            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it, ChangedFields.TAGS) }
         }
     }
 
@@ -548,7 +594,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             val ids = favorite.tags.map { it.id }.toMutableList()
             if (!ids.remove(tagId)) ids.add(tagId)
             graph.favorites.updateTags(id, ids)
-            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it) }
+            graph.favorites.byId(id)?.let { graph.sync.queueUpsert(it, ChangedFields.TAGS) }
         }
     }
 
@@ -655,7 +701,22 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     // region 设置
     fun setSyncEndpoint(value: String) = viewModelScope.launch { graph.settings.setSyncEndpoint(value) }
-    fun setSyncToken(value: String) = viewModelScope.launch { graph.settings.setSyncToken(value) }
+
+    /**
+     * 令牌换了值 = 换了一个账号，未上传的写要先作废再谈新账号（判据与理由见
+     * [com.favkit.tablet.data.FavoritesRepository.dropUnsentEdits]）。
+     * 判据只看 trim 之后的值是否不同：同一份配置重复保存不该把用户刚攒的改动清掉。
+     *
+     * 只改端点不作废队列：后台的账号身份只由 bearer 算（`acct-<sha1(令牌)[:16]>`），同一串令牌指到
+     * 另一台后台还是同一个账号，把待发队列清了等于替用户否定他刚换上的那台后台；
+     * 那边真正会错的是游标，而 [com.favkit.tablet.data.AppSettings.sinceRev] 的游标戳已经把端点算进去了，
+     * 换后台之后自动归 0 从头对。
+     */
+    fun setSyncToken(value: String) = viewModelScope.launch {
+        val previous = graph.settings.current().syncToken
+        graph.settings.setSyncToken(value)
+        if (previous != value.trim()) graph.favorites.dropUnsentEdits()
+    }
     fun setAssistantEnabled(value: Boolean) = viewModelScope.launch { graph.settings.setAssistantEnabled(value) }
     fun setPasteSuggestion(value: Boolean) = viewModelScope.launch { graph.settings.setPasteSuggestion(value) }
     fun setBallStatusBadge(value: Boolean) = viewModelScope.launch { graph.settings.setBallStatusBadge(value) }
