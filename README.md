@@ -100,7 +100,7 @@ app/src/main/java/com/favkit/tablet/
 mock-server/                   本地 mock 同步服务（明文协议 + 确定性假视频解析）
 .github/workflows/             云端构建 APK
 .github/BUILD_TRIGGER          构建开关：改它才会重新出包
-docs/                          使用说明、架构与性能验证、同步后台接口说明
+docs/                          使用说明、架构与性能验证、同步后台接口说明（今天真在跑的）、多设备与多写入者同步设计（目标协议，App 面后台已全部落地）、第三方采集服务接入接口（ingest 面，未开工）
 ```
 
 ## 五、需求对照
