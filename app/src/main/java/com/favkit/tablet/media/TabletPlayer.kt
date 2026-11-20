@@ -5,8 +5,11 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.exoplayer.ExoPlayer
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 data class PlayerUiState(
@@ -31,6 +34,10 @@ class TabletPlayer(private val cache: MediaCache) {
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
+    /** 自然播完的事件：带上 playerKey，让界面自己决定要不要接下一段 */
+    private val _ended = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val ended: SharedFlow<String> = _ended.asSharedFlow()
+
     private var exoPlayer: ExoPlayer? = null
 
     val player: ExoPlayer? get() = exoPlayer
@@ -51,6 +58,9 @@ class TabletPlayer(private val cache: MediaCache) {
                             durationMs = created.duration.coerceAtLeast(0L),
                             error = null,
                         )
+                    }
+                    if (playbackState == Player.STATE_ENDED) {
+                        _state.value.itemId?.let { _ended.tryEmit(it) }
                     }
                 }
 

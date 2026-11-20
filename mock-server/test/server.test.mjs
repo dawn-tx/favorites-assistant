@@ -84,8 +84,12 @@ before(async () => {
   const port = await pickFreePort(PORT_SEGMENT);
   baseUrl = `http://127.0.0.1:${port}/api/v1`;
   tempDataFile = path.join(TEMP_DIR, `data-${randomUUID().slice(0, 8)}.json`);
-  // 转存做得很快，测试不必为模拟耗时等太久
-  child = spawnServer(port, tempDataFile, { TRANSFER_MS: '50' });
+  // 解析做得很快，测试不必为模拟耗时等太久；备份指向不可达源站，失败不影响 ready
+  child = spawnServer(port, tempDataFile, {
+    TRANSFER_MS: '50',
+    BACKUP_TIMEOUT_MS: '200',
+    MOCK_ORIGIN_BASE: 'http://127.0.0.1:1',
+  });
   await waitStartup(child);
 });
 
@@ -118,7 +122,7 @@ async function waitReady(url, timeoutMs = 5000) {
   throw new Error(`5s 内 ${url} 没有变成 ready`);
 }
 
-test('GET /health 免鉴权存活，并报出转存队列与状态计数', async () => {
+test('GET /health 免鉴权存活，并报出解析/备份队列与状态计数', async () => {
   const { status, json } = await request('GET', '/health');
   assert.equal(status, 200);
   assert.equal(json.ok, true);
@@ -136,7 +140,7 @@ test('GET /meta 免鉴权：声明清单档、lookup 上限与三种就绪状态
   assert.equal(json.lookup_max_urls, 200);
 });
 
-test('POST /sync 新建一条：applied=1、回执是 pending 且 media 为空（内容还没转存完）', async () => {
+test('POST /sync 新建一条：applied=1、回执是 pending 且 media 为空（解析还没完成）', async () => {
   const url = 'https://www.bilibili.com/video/BV1xx411c7mD';
   const { status, json } = await sync(upsert(url, { note: '周末看', tags: ['待看', '算法'] }));
   assert.equal(status, 200);
@@ -151,12 +155,12 @@ test('POST /sync 新建一条：applied=1、回执是 pending 且 media 为空�
   assert.ok(Number.isFinite(json.next_wait_ms));
 });
 
-test('转存完成后 media 就绪：segments 非空、带存储 id、updated_at 前移', async () => {
+test('解析完成后 media 就绪：segments 非空、地址是相对虚拟路径、updated_at 前移', async () => {
   const url = 'https://www.bilibili.com/video/BV1xx411c7mD';
   const row = await waitReady(url);
   assert.ok(row.media.segments.length > 0, 'segments 应非空');
-  assert.ok(row.media.segments.every((seg) => typeof seg.store_id === 'string' && seg.store_id.length > 0),
-    '每段都应带存储 id');
+  assert.ok(row.media.segments.every((seg) => seg.url.startsWith('/media/')), '每段都应是相对虚拟地址');
+  assert.ok(row.media.segments.every((seg) => !seg.url.includes('://')), '不得再下发真实主机名');
   assert.equal(row.failed_reason, '');
   assert.ok(row.updated_at > 0);
 });

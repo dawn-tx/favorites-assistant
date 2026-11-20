@@ -51,8 +51,8 @@ data class MediaDto(
 )
 
 /**
- * 解析出来的单个素材。[url] 对视频段是可播地址（可能是切片后的 m3u8），对图片段就是图片本身，
- * 所以 App 不区分「播放地址字段」和「图片地址字段」。
+ * 解析出来的单个素材。[url] 是后台的虚拟地址（`/media/<key>.mp4`），
+ * App 用设置里的接口地址拼成绝对地址；视频段与图片段共用这一个字段。
  */
 @Serializable
 data class SegmentDto(
@@ -86,6 +86,20 @@ data class SyncRequest(
     @SerialName("device_id") val deviceId: String,
     @SerialName("sent_at") val sentAt: Long,
     val ops: List<OpDto>,
+    /** 长视频切片规则。后台按行保存，B 回调等没有规则的入口用后台默认值 */
+    @SerialName("slice_rule") val sliceRule: SliceRuleDto? = null,
+)
+
+/**
+ * 切片规则：只由 App 的设置页产生，切点由后台固定为关键帧对齐。
+ * `size` 用 [bytes]，`duration` 用 [seconds]，另一个留空。
+ */
+@Serializable
+data class SliceRuleDto(
+    val mode: String,
+    val bytes: Long? = null,
+    val seconds: Long? = null,
+    val align: String = "keyframe",
 )
 
 /**
@@ -127,9 +141,13 @@ data class LookupResponse(
     val error: String = "",
 )
 
-/** 手动重建内容：后台丢弃旧结果重排一次转存，立刻返回（这条回到 `pending`） */
+/** 手动重建内容：后台丢弃旧结果重排一次解析，立刻返回（这条回到 `pending`） */
 @Serializable
-data class ResolveRequest(val urls: List<String>)
+data class ResolveRequest(
+    val urls: List<String>,
+    /** 带了就按新规则重切；不带沿用这条收藏当初的规则 */
+    @SerialName("slice_rule") val sliceRule: SliceRuleDto? = null,
+)
 
 @Serializable
 data class ResolveResponse(

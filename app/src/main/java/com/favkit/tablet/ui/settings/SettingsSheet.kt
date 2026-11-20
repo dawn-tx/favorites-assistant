@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
+import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.floating.FloatingAssistantService
 import com.favkit.tablet.ui.components.Cardish
 import com.favkit.tablet.ui.components.FavColors
@@ -227,6 +228,76 @@ fun SettingsSheet(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.align(Alignment.CenterVertically),
                             )
+                        }
+                    }
+                }
+
+                Cardish(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(scale.gapSm),
+                        verticalArrangement = Arrangement.spacedBy(scale.gapXs),
+                    ) {
+                        SectionTitle("内容切片")
+                        Text(
+                            "长视频在后台切成一组独立可播的 mp4，每片在遮罩层里占一格；播完一片会自动接下一段。" +
+                                "规则只影响之后新收藏的链接，已收藏的条目要在详情里点「重新准备」才会按新规则重切。",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                        ) {
+                            ChoiceButton(
+                                label = "按大小",
+                                selected = settings.sliceRuleMode == AppSettings.SLICE_MODE_SIZE,
+                                scale = scale,
+                                modifier = Modifier.weight(1f),
+                                onClick = { viewModel.setSliceRuleMode(AppSettings.SLICE_MODE_SIZE) },
+                            )
+                            ChoiceButton(
+                                label = "按时长",
+                                selected = settings.sliceRuleMode == AppSettings.SLICE_MODE_DURATION,
+                                scale = scale,
+                                modifier = Modifier.weight(1f),
+                                onClick = { viewModel.setSliceRuleMode(AppSettings.SLICE_MODE_DURATION) },
+                            )
+                        }
+                        if (settings.sliceRuleMode == AppSettings.SLICE_MODE_SIZE) {
+                            Text("每片大小上限", style = MaterialTheme.typography.bodyLarge)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                            ) {
+                                listOf(2L, 8L, 32L, 128L).forEach { mb ->
+                                    val bytes = mb * 1_000_000L
+                                    ChoiceButton(
+                                        label = "${mb}MB",
+                                        selected = settings.sliceRuleBytes == bytes,
+                                        scale = scale,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { viewModel.setSliceRuleSizeMb(mb) },
+                                    )
+                                }
+                            }
+                            InfoLine("当前上限", "${settings.sliceRuleBytes / 1_000_000}MB")
+                        } else {
+                            Text("每片时长上限", style = MaterialTheme.typography.bodyLarge)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                            ) {
+                                listOf(60L, 300L, 600L, 1800L).forEach { seconds ->
+                                    ChoiceButton(
+                                        label = if (seconds >= 60) "${seconds / 60}分" else "${seconds}秒",
+                                        selected = settings.sliceRuleSeconds == seconds,
+                                        scale = scale,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { viewModel.setSliceRuleSeconds(seconds) },
+                                    )
+                                }
+                            }
+                            InfoLine("当前上限", "${settings.sliceRuleSeconds} 秒")
                         }
                     }
                 }

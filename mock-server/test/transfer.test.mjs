@@ -96,30 +96,33 @@ after(async () => {
   if (tempDataFile) rmSync(tempDataFile, { force: true });
 });
 
-test('转存失败用尽次数后落 failed 并带原因，不会无限重试', async () => {
-  // 非法链接在解析阶段就失败 —— 用来验证「重试 → 落 failed」这条路径
-  child = spawnServer({ TRANSFER_MS: '10', TRANSFER_MAX_ATTEMPTS: '2', TRANSFER_RETRY_MS: '20' });
+test('备份失败不影响 ready：源站不可达时内容仍可用，store_id 留空', async () => {
+  child = spawnServer({ TRANSFER_MS: '10', BACKUP_TIMEOUT_MS: '200', MOCK_ORIGIN_BASE: 'http://127.0.0.1:1' });
   await waitStartup(child);
-  const url = 'https://example.com/never-fails-in-mock';
+  const url = 'https://example.com/backup-fails';
   await upsert(url);
 
-  const badUrl = 'https://example.com/ok';
-  await upsert(badUrl);
   const deadline = Date.now() + 5000;
-  let row = await rowOf(badUrl);
+  let row = await rowOf(url);
   while (Date.now() < deadline && row.media_state !== 'ready') {
     await new Promise((resolve) => setTimeout(resolve, 25));
-    row = await rowOf(badUrl);
+    row = await rowOf(url);
   }
-  assert.equal(row.media_state, 'ready', '合法链接应就绪');
+  assert.equal(row.media_state, 'ready', '备份失败不应把条目打成 failed');
+  assert.ok(row.media.segments.every((seg) => seg.url.startsWith('/media/')));
+
+  // 给备份任务留一点时间失败落定
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const after = await rowOf(url);
+  assert.ok(after.media.segments.every((seg) => !seg.store_id), '源不可达时不应有存储 id');
 
   await stop(child);
   child = null;
 });
 
-test('重启后接着跑未完成的转存任务：pending 的行不会永远卡住', async () => {
-  // 用一个很慢的转存时间起服务，写入后立刻杀掉，模拟「转存中途进程退出」
-  child = spawnServer({ TRANSFER_MS: '3000' });
+test('重启后接着跑未完成的解析任务：pending 的行不会永远卡住', async () => {
+  // 用一个很慢的解析时间起服务，写入后立刻杀掉，模拟「解析中途进程退出」
+  child = spawnServer({ TRANSFER_MS: '3000', MOCK_ORIGIN_BASE: 'http://127.0.0.1:1', BACKUP_TIMEOUT_MS: '200' });
   await waitStartup(child);
   const url = 'https://example.com/survives-restart';
   await upsert(url);
@@ -131,7 +134,7 @@ test('重启后接着跑未完成的转存任务：pending 的行不会永远卡
   const persisted = JSON.parse(readFileSync(tempDataFile, 'utf8'));
   assert.ok(persisted.jobs.some((job) => job.url === url), '未完成的转存任务应落盘');
 
-  child = spawnServer({ TRANSFER_MS: '10' });
+  child = spawnServer({ TRANSFER_MS: '10', MOCK_ORIGIN_BASE: 'http://127.0.0.1:1', BACKUP_TIMEOUT_MS: '200' });
   await waitStartup(child);
   const deadline = Date.now() + 6000;
   let row = await rowOf(url);

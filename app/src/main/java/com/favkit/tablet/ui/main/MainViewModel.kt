@@ -139,6 +139,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     init {
         viewModelScope.launch { graph.tags.ensurePresets() }
         bindFlows()
+        viewModelScope.launch { graph.player.ended.collect { key -> advanceAfterEnd(key) } }
         viewModelScope.launch { cacheBytesFlow.value = graph.media.totalCachedBytes() }
         seedRemoteCache()
     }
@@ -330,6 +331,23 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     /**
+     * 一段自然播完：同一条里紧跟着的下一段还是视频，就直接接着播。
+     * 不在这里写上一段的进度 —— saveProgress 会连带改 lastSegmentIndex，和下一段的写入抢顺序；
+     * 回到已看完的那段时由 loadSegment 把「片尾续播」夹回 0。
+     */
+    private fun advanceAfterEnd(playerKey: String) {
+        val focus = focusFlow.value ?: return
+        if (playerKey != FocusUiState(focus.itemId, focus.segmentIndex).playerKey) return
+        val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
+        val next = focus.segmentIndex + 1
+        val segment = favorite.segments.getOrNull(next) ?: return
+        if (!segment.playable) return
+        focusFlow.value = FocusUiState(focus.itemId, next)
+        viewModelScope.launch { graph.favorites.setLastSegment(favorite.id, next) }
+        loadSegment(favorite, next, autoPlay = true)
+    }
+
+    /**
      * 遮罩层竖向 pager 滑到落定的那条：换成它。
      *
      * [id] 为 null（页序里的这条已被删掉）或就是当前那条时什么都不做 —— pager 落定与
@@ -365,10 +383,13 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.player.pausePlayback()
             return
         }
+        val saved = favorite.segmentProgress[index] ?: 0L
+        // 上次已经看到片尾的不再「从片尾续播」：自动接续之后回来，就从头看这一段
+        val resumeAt = if (segment.durationMs > 0 && saved >= segment.durationMs - 1_000) 0L else saved
         graph.player.open(
             itemId = FocusUiState(favorite.id, index).playerKey,
             url = segment.url,
-            resumeAtMs = favorite.segmentProgress[index] ?: 0L,
+            resumeAtMs = resumeAt,
             speed = _state.value.settings?.defaultPlaybackSpeed ?: 1f,
             autoPlay = autoPlay,
         )
@@ -404,7 +425,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     // region 后台读写
     /**
-     * 遮罩层「重新准备」：让后台丢弃旧结果，重新解析、下载并把素材再转存一次。
+     * 遮罩层「重新准备」：让后台丢弃旧结果，按当前切片规则重新解析一次；备份随后再做。
      *
      * 后台立刻返回、把这条置回 `pending`，内容稍后再就绪 —— 所以这里只回一句「已重新排队」，
      * 不假装已经拿到内容。这是全站唯一主动重建内容的入口，必须由用户点。
@@ -663,26 +684,41 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     /**
      * 手动把某条视频缓存到本地，离线也能播。
      *
-     * 只对**单文件**素材做整片预取。切片过的视频（`.m3u8`）由后台按大视频切出来，
-     * 整片预取要一套播放列表解析 + 逐片下载的管理器，换来的只是「省一次边播边存」——
-     * 所以这里明确不做，播放时照常边播边存，只是不标「已缓存」。
+     * 长视频由后台切成一组独立 mp4，所以「整片缓存」就是逐片预取：
+     * 全部片段都读到才算缓存完成，中途取消或某片失败都不标「已缓存」。
+     * 旧后台留下的 `.m3u8` 直接拒绝 —— 整片预取要一套播放列表解析，换来的只是省一次边播边存。
      */
     fun prefetch(id: String) {
         val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
-        val url = favorite.segments.firstOrNull { it.playable }?.url ?: return
-        if (url.isBlank() || prefetches.containsKey(id)) return
-        if (isPlaylist(url)) {
+        val urls = favorite.segments.filter { it.playable }.map { it.url }.filter { it.isNotBlank() }
+        if (urls.isEmpty() || prefetches.containsKey(id)) return
+        if (urls.any { isPlaylist(it) }) {
             messageFlow.value = "这条是切片视频，播放时会边看边存，不支持整片缓存"
             return
         }
         val handle = PrefetchHandle()
         val job = viewModelScope.launch {
-            val written = graph.media.prefetch(
-                url = url,
-                onProgress = { cached -> prefetchFlow.update { it + (id to cached) } },
-                isCancelled = { handle.cancelled },
-            )
-            if (!handle.cancelled && written > 0) {
+            var total = 0L
+            var complete = true
+            for (url in urls) {
+                if (handle.cancelled) {
+                    complete = false
+                    break
+                }
+                val base = total
+                val written = graph.media.prefetch(
+                    url = url,
+                    onProgress = { cached -> prefetchFlow.update { it + (id to base + cached) } },
+                    isCancelled = { handle.cancelled },
+                )
+                if (written <= 0) {
+                    complete = false
+                    break
+                }
+                total += written
+                prefetchFlow.update { it + (id to total) }
+            }
+            if (complete && !handle.cancelled) {
                 graph.favorites.setLocallyCached(id, true)
                 messageFlow.value = "已缓存到本地，离线可直接播放"
             }
@@ -747,6 +783,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun setPasteSuggestion(value: Boolean) = viewModelScope.launch { graph.settings.setPasteSuggestion(value) }
     fun setBallStatusBadge(value: Boolean) = viewModelScope.launch { graph.settings.setBallStatusBadge(value) }
     fun setUploadIntervalMs(value: Long) = viewModelScope.launch { graph.settings.setUploadIntervalMs(value) }
+    fun setSliceRuleMode(value: String) = viewModelScope.launch { graph.settings.setSliceRuleMode(value) }
+    fun setSliceRuleSizeMb(value: Long) =
+        viewModelScope.launch { graph.settings.setSliceRuleBytes(value * 1_000_000L) }
+    fun setSliceRuleSeconds(value: Long) = viewModelScope.launch { graph.settings.setSliceRuleSeconds(value) }
     fun setCacheLimitMb(value: Long) = viewModelScope.launch {
         graph.settings.setCacheLimitMb(value)
         // 改上限会重建 SimpleCache 实例，先释放播放器才不会打断正在读缓存的播放

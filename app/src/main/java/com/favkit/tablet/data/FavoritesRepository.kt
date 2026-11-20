@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
  */
 class FavoritesRepository(
     private val db: AppDatabase,
+    private val settings: AppSettings,
 ) {
 
     private val favoritesDao = db.favorites()
@@ -35,11 +36,17 @@ class FavoritesRepository(
         favoritesDao.observeRows(),
         refDao.observeAll(),
         tagsDao.observeUsage(),
-    ) { rows, refs, tagUsages ->
+        settings.snapshot,
+    ) { rows, refs, tagUsages, config ->
         val tagById = tagUsages.associate { it.id to Tag(it.id, it.name, it.isPreset, it.usageCount) }
         val refsByFavorite = refs.groupBy { it.favoriteId }
         rows.sortedByDescending { it.favoriteAt }
-            .map { row -> row.toDomain(refsByFavorite[row.id]?.mapNotNull { tagById[it.tagId] }.orEmpty()) }
+            .map { row ->
+                row.toDomain(
+                    refsByFavorite[row.id]?.mapNotNull { tagById[it.tagId] }.orEmpty(),
+                    config.syncEndpoint,
+                )
+            }
     }.distinctUntilChanged()
 
     /**
@@ -53,10 +60,14 @@ class FavoritesRepository(
 
     val cachedTotal: Flow<Int> = favoritesDao.observeCachedCount()
 
-    suspend fun byId(id: String): Favorite? = favoritesDao.byId(id)?.let { it.toDomain(tagsOf(it.id)) }
+    suspend fun byId(id: String): Favorite? =
+        favoritesDao.byId(id)?.let { it.toDomain(tagsOf(it.id), endpoint()) }
 
     /** 按链接原样查（不做参数归一化：同一视频带不同跟踪参数就算两条）。软删过的不算。 */
-    suspend fun byUrl(url: String): Favorite? = favoritesDao.byUrl(url)?.let { it.toDomain(tagsOf(it.id)) }
+    suspend fun byUrl(url: String): Favorite? =
+        favoritesDao.byUrl(url)?.let { it.toDomain(tagsOf(it.id), endpoint()) }
+
+    private suspend fun endpoint(): String = settings.current().syncEndpoint
 
     private suspend fun tagsOf(favoriteId: String): List<Tag> {
         val ids = refDao.tagIdsFor(favoriteId)
@@ -71,7 +82,8 @@ class FavoritesRepository(
     suspend fun favoritesWithTag(tagId: Long): List<Favorite> {
         val ids = refDao.favoriteIdsForTag(tagId)
         if (ids.isEmpty()) return emptyList()
-        return favoritesDao.byIds(ids).map { it.toDomain(tagsOf(it.id)) }
+        val base = endpoint()
+        return favoritesDao.byIds(ids).map { it.toDomain(tagsOf(it.id), base) }
     }
 
     /** 悬浮面板「保存同步」落库：链接 + 备注 + 标签 + 来源 + 收藏时间。内容由后台随后做好。 */
@@ -93,7 +105,7 @@ class FavoritesRepository(
         )
         favoritesDao.upsert(row)
         if (tagIds.isNotEmpty()) refDao.insertAll(tagIds.map { FavoriteTagRow(id, it) })
-        return row.toDomain(tagsOf(id))
+        return row.toDomain(tagsOf(id), endpoint())
     }
 
     /**
@@ -260,9 +272,10 @@ class FavoritesRepository(
      * 带上本机行 id：队列那一列存的是句柄，用来把 op 对回卡片与清账。
      */
     suspend fun unqueuedOps(limit: Int): List<Pair<OpDto, String>> {
+        val base = endpoint()
         return favoritesDao.queuedWithoutOp(SyncBadge.QUEUED.name, limit).map { row ->
             if (row.deletedAt != null) row.url.toDeleteOp() to row.id
-            else row.toDomain(tagsOf(row.id)).let { it.toUpsertOp(it.tags.map { tag -> tag.name }) } to row.id
+            else row.toDomain(tagsOf(row.id), base).let { it.toUpsertOp(it.tags.map { tag -> tag.name }) } to row.id
         }
     }
 
@@ -294,7 +307,7 @@ class FavoritesRepository(
         serverUpdatedAt = dto.updatedAt,
     )
 
-    private fun FavoriteRow.toDomain(tags: List<Tag>) = Favorite(
+    private fun FavoriteRow.toDomain(tags: List<Tag>, endpoint: String) = Favorite(
         id = id,
         url = url,
         note = note,
@@ -304,7 +317,13 @@ class FavoritesRepository(
         author = author,
         site = site,
         summary = summary,
-        segments = MediaCodec.decode(segmentsJson),
+        // 库里存的是后台下发的相对路径，这里统一拼成当前设置地址下的绝对地址
+        segments = MediaCodec.decode(segmentsJson).map { segment ->
+            segment.copy(
+                url = MediaUrls.resolve(endpoint, segment.url),
+                coverUrl = MediaUrls.resolve(endpoint, segment.coverUrl),
+            )
+        },
         failedReason = failedReason,
         resolvedAt = resolvedAt,
         badge = runCatching { SyncBadge.valueOf(badge) }.getOrDefault(SyncBadge.QUEUED),

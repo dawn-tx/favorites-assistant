@@ -23,7 +23,7 @@ class AppGraph private constructor(private val app: Application) {
     val db: AppDatabase by lazy { AppDatabase.build(app) }
     val tags: TagsRepository by lazy { TagsRepository(db) }
 
-    val favorites: FavoritesRepository by lazy { FavoritesRepository(db) }
+    val favorites: FavoritesRepository by lazy { FavoritesRepository(db, settings) }
     val connectivity: Connectivity by lazy { Connectivity(app) }
     val media: MediaCache by lazy { MediaCache(app, settings) }
     val images: ImageStore by lazy { ImageStore(app, settings) }

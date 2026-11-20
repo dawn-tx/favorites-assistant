@@ -7,15 +7,21 @@
  *   1. 助手 App 的 /sync（能改、能删）；
  *   2. 另一个 App 经 B 的固定格式回调推进来的链接（只增不改）。
  *
- * 内容信息不在同一次调用里回来：后台要先解析、下载、把素材转存到存储服务器（大视频切片），
- * 拿到存储 id 之后才写回 media。所以 App 侧会出现「条目已存在、内容还没就绪」的中间态，
- * 由 media_state 表达（pending / ready / failed），App 靠对账与单条查询看到它。
+ * 内容信息不在同一次调用里回来：后台要先解析，再把素材转存到存储服务器做备份。
+ * 所以 App 侧会出现「条目已存在、内容还没就绪」的中间态，由 media_state 表达
+ * （pending / ready / failed），App 靠对账与单条查询看到它。
+ *
+ * 下发给 App 的 segments[].url / cover_url 是**相对虚拟地址**（/media/<key>.mp4），
+ * App 用设置里的接口地址拼成绝对地址。真实地址与备份 id 只留在后台：
+ * 请求虚拟地址时先校验源地址，可用就代理回源，失效就代理存储里的备份。
  *
  * 只用 Node 内置模块：`node mock-server/server.mjs`，不需要 npm install。
  */
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, renameSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { Readable } from 'node:stream';
+import { once } from 'node:events';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
@@ -36,10 +42,28 @@ const MAX_BODY = 4 * 1024 * 1024;
  */
 const INGEST_PATH = (process.env.INGEST_PATH ?? '/ingest/callback').replace(/\/+$/, '');
 const INGEST_SOURCE_APP = process.env.INGEST_SOURCE_APP ?? '第三方';
-/** 转存任务：拿到素材直链后「下载 + 切片 + 上传存储」的耗时，mock 用这个值模拟 */
+/** 转存任务：模拟「解析 → 下载 → 切片 → 上传存储」的耗时，mock 用这个值模拟 */
 const TRANSFER_MS = positiveInt(process.env.TRANSFER_MS, 1500);
 const TRANSFER_MAX_ATTEMPTS = positiveInt(process.env.TRANSFER_MAX_ATTEMPTS, 3);
 const TRANSFER_RETRY_MS = positiveInt(process.env.TRANSFER_RETRY_MS, 2000);
+/**
+ * 远程切片服务（POST /api/mp4/parse）。留空时不做真切片，长视频降级为整片一段，
+ * 仍然走同一条虚拟地址与代理链路。
+ */
+const SLICE_SERVICE_URL = process.env.SLICE_SERVICE_URL ?? '';
+const SLICE_TIMEOUT_MS = positiveInt(process.env.SLICE_TIMEOUT_MS, 60_000);
+/** 默认切片规则；App 可以在 UPSERT / resolve 里按行覆盖 */
+const DEFAULT_SLICE_RULE = parseSliceRule(safeJson(process.env.SLICE_RULE)) ?? { mode: 'size', bytes: 2_000_000, align: 'keyframe' };
+/** 虚拟地址 key 的派生密钥。为空时退化为确定性哈希；公网部署建议配置 */
+const MEDIA_KEY_SECRET = process.env.MEDIA_KEY_SECRET ?? '';
+/** 备份落盘目录：真实后台把它换成存储服务器的上传 */
+const STORE_DIR = process.env.STORE_DIR ?? join(ROOT, 'store');
+/** 测试/离线联调时把生成的源地址指向本地夹具源站 */
+const ORIGIN_BASE = (process.env.MOCK_ORIGIN_BASE ?? '').replace(/\/+$/, '');
+const SOURCE_PROBE_MS = positiveInt(process.env.SOURCE_PROBE_MS, 2_500);
+const SOURCE_CHECK_TTL_MS = positiveInt(process.env.SOURCE_CHECK_TTL_MS, 60_000);
+const BACKUP_TIMEOUT_MS = positiveInt(process.env.BACKUP_TIMEOUT_MS, 30_000);
+const BACKUP_MAX_BYTES = positiveInt(process.env.BACKUP_MAX_BYTES, 64 * 1024 * 1024);
 
 let syncSeq = 0;
 
@@ -48,17 +72,49 @@ function positiveInt(raw, fallback) {
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
+function safeJson(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    console.error('SLICE_RULE 不是合法 JSON，改用默认规则');
+    return null;
+  }
+}
+
+/**
+ * 切片规则只收两种形状：按时长或按大小。切点一律对齐关键帧 ——
+ * 只有每片首个样本是 IDR，拼出来的 mp4 才能独立播放。
+ */
+function parseSliceRule(raw) {
+  if (raw == null) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (raw.mode === 'duration') {
+    const seconds = Number(raw.seconds ?? raw.segmentDurationSeconds ?? raw.durationSeconds);
+    if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 3600) return null;
+    return { mode: 'duration', seconds: Math.round(seconds), align: 'keyframe' };
+  }
+  if (raw.mode === 'size') {
+    const bytes = Number(raw.bytes ?? raw.maxBytes ?? raw.segmentBytes);
+    if (!Number.isFinite(bytes) || bytes < 64 * 1024 || bytes > 1024 ** 3) return null;
+    return { mode: 'size', bytes: Math.floor(bytes), align: 'keyframe' };
+  }
+  return null;
+}
+
 // ---------- 持久化 ----------
 
 /**
  * 数据形状（一个实例就是一个人的库）：
  *   favorites: { [url]: { url, note, tags, source_app, favorite_at, updated_at,
- *                         media, media_state, failed_reason, resolved_at } }
- *   media_cache: { [归一化 url]: media }      解析/转存结果按源 url 复用，重收藏不重放
- *   jobs: [ { url, attempts, next_at } ]       转存队列，单线程循环跑
+ *                         media, media_state, failed_reason, resolved_at,
+ *                         slice_rule, source_keys } }
+ *   media_cache: { [归一化 url]: { media, sources } }    解析结果按源 url 复用
+ *   media_sources: { [虚拟 key]: { source_url, slice, store_id, ... } }  代理与备份的索引
+ *   jobs: [ { url, kind: 'parse'|'backup', attempts, next_at } ]          单线程队列
  */
 function emptyState() {
-  return { favorites: {}, media_cache: {}, jobs: [] };
+  return { favorites: {}, media_cache: {}, media_sources: {}, jobs: [] };
 }
 
 function loadData() {
@@ -69,6 +125,7 @@ function loadData() {
     return {
       favorites: parsed.favorites && typeof parsed.favorites === 'object' ? parsed.favorites : base.favorites,
       media_cache: parsed.media_cache && typeof parsed.media_cache === 'object' ? parsed.media_cache : base.media_cache,
+      media_sources: parsed.media_sources && typeof parsed.media_sources === 'object' ? parsed.media_sources : base.media_sources,
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : base.jobs,
     };
   } catch (error) {
@@ -78,6 +135,7 @@ function loadData() {
 }
 
 const state = loadData();
+mkdirSync(STORE_DIR, { recursive: true });
 
 function saveData() {
   const tmp = `${DATA_FILE}.tmp`;
@@ -184,65 +242,269 @@ const SUMMARY_HINTS = {
   ],
 };
 
-/**
- * 一条链接解析回来的可能是「图＋视频」「纯图集」「多段视频」，也可能就是最常见的单个视频。
- * 构成只由 url 哈希决定，同一链接反复解析结果不变，方便反复验证 App 的多素材展示。
- *
- * 真实后台在这一步之后还要下载素材、切片、上传存储服务器，并把返回的一组 id 拼进可播/可看地址；
- * mock 用一个确定性的"存储 id"直接拼出来，省掉那条链路，形状与真实后台一致。
- */
-function buildMedia(hash, slot, site) {
+/** 素材构成（图＋视频 / 纯图集 / 多段视频 / 单视频），只由 url 哈希决定 */
+function compositionOf(slot) {
   const shape = slot % 10;
-  let images;
-  let videos;
-  if (shape <= 3) {
-    images = 1 + (slot % 4);
-    videos = 1 + (slot % 2);
-  } else if (shape <= 6) {
-    images = 1 + (slot % 12);
-    videos = 0;
-  } else if (shape <= 8) {
-    images = 0;
-    videos = 2 + (slot % 3);
-  } else {
-    images = 0;
-    videos = 1;
+  if (shape <= 3) return { images: 1 + (slot % 4), videos: 1 + (slot % 2) };
+  if (shape <= 6) return { images: 1 + (slot % 12), videos: 0 };
+  if (shape <= 8) return { images: 0, videos: 2 + (slot % 3) };
+  return { images: 0, videos: 1 };
+}
+
+/**
+ * 虚拟地址的 key 只由「归一化源 url + 段位置」派生，不含真实地址与分片数：
+ * 重新解析后同一段的地址不变，App 的播放/图片缓存继续命中。
+ */
+function mediaKey(seedUrl, slot) {
+  const input = `${normalizeCacheKey(seedUrl)}|${slot}`;
+  const hex = MEDIA_KEY_SECRET
+    ? createHmac('sha256', MEDIA_KEY_SECRET).update(input).digest('hex')
+    : createHash('sha256').update(input).digest('hex');
+  return `s${hex.slice(0, 32)}`;
+}
+
+/** 相对地址：相对的是 App 设置里的接口地址（含 BASE_PATH），不要在这里拼主机名 */
+function mediaPath(key, ext) {
+  return `/media/${key}${ext}`;
+}
+
+function segmentExt(kind) {
+  return kind === 'video' ? '.mp4' : '.jpg';
+}
+
+function storeFile(key, kind) {
+  return join(STORE_DIR, `${key}${segmentExt(kind)}`);
+}
+
+function originPath(kind, name) {
+  return `${ORIGIN_BASE}/${kind}-${name}${segmentExt(kind)}`;
+}
+
+function videoSourceUrl(slot, i, hash) {
+  if (ORIGIN_BASE) return originPath('video', `${hash.slice(0, 6)}-${i}`);
+  return PLAY_URLS[(slot + i) % PLAY_URLS.length];
+}
+
+function coverSourceUrl(seed, i) {
+  if (ORIGIN_BASE) return originPath('cover', `${seed}-${i}`);
+  return `https://picsum.photos/seed/${seed}-v${i}/640/360`;
+}
+
+function imageSourceUrl(seed, i) {
+  if (ORIGIN_BASE) return originPath('image', `${seed}-${i}`);
+  return `https://picsum.photos/seed/${seed}-i${i}/1280/720`;
+}
+
+/**
+ * 调远程切片服务。它只返回元数据与每片的 init 段，媒体正文仍按区间回源读取，
+ * 所以这里只记「取片配方」，不下载视频。
+ */
+async function fetchSlices(sourceUrl, rule) {
+  if (!SLICE_SERVICE_URL) return null;
+  const response = await fetch(SLICE_SERVICE_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: sourceUrl, rule, includeInitSegment: true }),
+    signal: AbortSignal.timeout(SLICE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`切片服务 HTTP ${response.status}${text ? `：${text.slice(0, 120)}` : ''}`);
+  }
+  const data = await response.json();
+  if (data?.source?.rangeSupported === false) throw new Error('源站不支持 Range，无法按区间取片');
+  const list = Array.isArray(data?.segments) ? data.segments : [];
+  const slices = [];
+  for (const item of list) {
+    const start = Number(item?.mdatStartOffset);
+    // mdatEndOffset 是闭区间（与切片服务的 compose 示例一致），源站 Range 直接可用
+    const end = Number(item?.mdatEndOffset);
+    const mediaSize = Number(item?.mediaSize);
+    const init = typeof item?.initSegmentBase64 === 'string' ? item.initSegmentBase64 : '';
+    const durationSeconds = Number(item?.durationSeconds);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start || !init) continue;
+    slices.push({
+      start,
+      end,
+      init_base64: init,
+      media_size: Number.isFinite(mediaSize) && mediaSize > 0 ? mediaSize : end - start + 1,
+      duration_ms: Number.isFinite(durationSeconds) && durationSeconds > 0 ? Math.round(durationSeconds * 1000) : 0,
+    });
+  }
+  if (slices.length === 0) throw new Error('切片服务没有返回可用的分片');
+  return {
+    sourceUrl: data?.source?.finalUrl || data?.source?.url || sourceUrl,
+    etag: typeof data?.source?.etag === 'string' ? data.source.etag : '',
+    fileSize: Number.isFinite(Number(data?.source?.fileSize)) ? Number(data.source.fileSize) : 0,
+    slices,
+  };
+}
+
+/**
+ * 解析一条链接，产出对外的 media 与后台私有的 sources。
+ *
+ * sources 是代理与备份的唯一索引：每段一条，视频切片带 init 段和源文件字节区间，
+ * 图片/封面只记源地址。对外的 segments[].url / cover_url 一律是相对虚拟地址。
+ */
+async function parseMedia(row) {
+  const url = row.url;
+  const hash = createHash('sha1').update(String(url)).digest('hex');
+  const resolvedAt = Date.now();
+
+  let host = '';
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('只支持 http(s)');
+    host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    host = '';
   }
 
-  const seed = hash.slice(0, 8);
-  const storeId = `st-${hash.slice(8, 16)}`;
-  const media = [];
-  // 视频排在前面：卡片首图取 media[0]，能播的先给封面
-  for (let i = 0; i < videos; i += 1) {
-    const long = (slot * (i + 3)) % 1_740_000 >= 900_000;
-    media.push({
-      index: media.length,
-      kind: 'video',
-      title: `${site}视频 ${i + 1}`,
-      cover_url: `https://picsum.photos/seed/${seed}-v${i}/640/360`,
-      // 转存后的地址：大视频走切片（m3u8），小的直接给 mp4 —— 与后台"对大视频做切片"同一形状
-      url: long
-        ? `http://store.local/${storeId}/v${i}/index.m3u8`
-        : PLAY_URLS[(slot + i) % PLAY_URLS.length],
-      duration_ms: 60_000 + (slot * (i + 3)) % 1_740_000,
-      quality: QUALITIES[(slot + i) % QUALITIES.length],
-      store_id: `${storeId}-v${i}`,
-    });
+  if (!host) {
+    return {
+      media: {
+        title: '',
+        author: '',
+        site: '未知站点',
+        summary: '',
+        segments: [],
+        failed_reason: '收藏链接不是合法的 http(s) 地址',
+        resolved_at: resolvedAt,
+      },
+      sources: {},
+    };
   }
+
+  const site = SITE_NAMES.find(([key]) => host.includes(key))?.[1] ?? host;
+  const slot = parseInt(hash.slice(6, 10), 16);
+  const author = AUTHORS[slot % AUTHORS.length];
+  const seed = hash.slice(0, 8);
+  const rule = parseSliceRule(row.slice_rule) ?? DEFAULT_SLICE_RULE;
+  const { images, videos } = compositionOf(slot);
+  const segments = [];
+  const sources = {};
+
+  // 视频排在前面：卡片首图取 segments[0]，能播的先给封面
+  for (let i = 0; i < videos; i += 1) {
+    const baseTitle = `${site}视频 ${i + 1}`;
+    const coverKey = mediaKey(url, `cover:${i}`);
+    sources[coverKey] = {
+      key: coverKey,
+      url,
+      slot: `cover:${i}`,
+      kind: 'cover',
+      source_url: coverSourceUrl(seed, i),
+      etag: '',
+      file_size: 0,
+      slice: null,
+      store_id: '',
+      backup_error: '',
+    };
+    const coverUrl = mediaPath(coverKey, '.jpg');
+    const nominalMs = 60_000 + (slot * (i + 3)) % 1_740_000;
+    const quality = QUALITIES[(slot + i) % QUALITIES.length];
+    const sourceUrl = videoSourceUrl(slot, i, hash);
+
+    let sliced = null;
+    try {
+      sliced = await fetchSlices(sourceUrl, rule);
+    } catch (error) {
+      console.warn(`切片失败，降级为整片一段：${error.message}`);
+    }
+
+    if (sliced) {
+      for (let j = 0; j < sliced.slices.length; j += 1) {
+        const part = sliced.slices[j];
+        const key = mediaKey(url, `video:${i}:${j}`);
+        sources[key] = {
+          key,
+          url,
+          slot: `video:${i}:${j}`,
+          kind: 'video',
+          source_url: sliced.sourceUrl,
+          etag: sliced.etag,
+          file_size: sliced.fileSize,
+          slice: part,
+          store_id: '',
+          backup_error: '',
+        };
+        segments.push({
+          index: segments.length,
+          kind: 'video',
+          title: sliced.slices.length > 1 ? `${baseTitle} · ${j + 1}` : baseTitle,
+          cover_url: coverUrl,
+          url: mediaPath(key, '.mp4'),
+          duration_ms: part.duration_ms || nominalMs,
+          quality,
+          store_id: '',
+        });
+      }
+    } else {
+      const key = mediaKey(url, `video:${i}:0`);
+      sources[key] = {
+        key,
+        url,
+        slot: `video:${i}:0`,
+        kind: 'video',
+        source_url: sourceUrl,
+        etag: '',
+        file_size: 0,
+        slice: null,
+        store_id: '',
+        backup_error: '',
+      };
+      segments.push({
+        index: segments.length,
+        kind: 'video',
+        title: baseTitle,
+        cover_url: coverUrl,
+        url: mediaPath(key, '.mp4'),
+        duration_ms: nominalMs,
+        quality,
+        store_id: '',
+      });
+    }
+  }
+
   for (let i = 0; i < images; i += 1) {
-    media.push({
-      index: media.length,
+    const key = mediaKey(url, `image:${i}`);
+    sources[key] = {
+      key,
+      url,
+      slot: `image:${i}`,
+      kind: 'image',
+      source_url: imageSourceUrl(seed, i),
+      etag: '',
+      file_size: 0,
+      slice: null,
+      store_id: '',
+      backup_error: '',
+    };
+    segments.push({
+      index: segments.length,
       kind: 'image',
       title: `图 ${i + 1}`,
-      // 图片段没有单独的封面：它自己就是要看的那张图
       cover_url: '',
-      url: `https://picsum.photos/seed/${seed}-i${i}/1280/720`,
+      url: mediaPath(key, '.jpg'),
       duration_ms: 0,
       quality: '',
-      store_id: `${storeId}-i${i}`,
+      store_id: '',
     });
   }
-  return media;
+
+  const firstVideo = segments.find((item) => item.kind === 'video');
+  return {
+    media: {
+      title: `${site}${firstVideo ? '视频' : '图集'} · ${hash.slice(0, 6)}`,
+      author,
+      site,
+      summary: buildSummary(segments, author, hash),
+      segments,
+      failed_reason: '',
+      resolved_at: resolvedAt,
+    },
+    sources,
+  };
 }
 
 function buildSummary(media, author, hash) {
@@ -268,54 +530,6 @@ function buildSummary(media, author, hash) {
 }
 
 /**
- * 解析一条链接。两种结局：segments[] 或 failed_reason。
- *
- * 注意这不是"最终结果"：真实后台在这里之后还要把素材转存到存储服务器，成功才算就绪；
- * mock 把转存做成一个耗时任务（见 runJob），好让 App「准备中」那一档真的能被看到。
- */
-function resolveMedia(url) {
-  const hash = createHash('sha1').update(String(url)).digest('hex');
-  const resolvedAt = Date.now();
-
-  let host = '';
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('只支持 http(s)');
-    host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-  } catch {
-    host = '';
-  }
-
-  if (!host) {
-    return {
-      title: '',
-      author: '',
-      site: '未知站点',
-      summary: '',
-      segments: [],
-      failed_reason: '收藏链接不是合法的 http(s) 地址',
-      resolved_at: resolvedAt,
-    };
-  }
-
-  const site = SITE_NAMES.find(([key]) => host.includes(key))?.[1] ?? host;
-  const slot = parseInt(hash.slice(6, 10), 16);
-  const author = AUTHORS[slot % AUTHORS.length];
-  const segments = buildMedia(hash, slot, site);
-  const firstVideo = segments.find((item) => item.kind === 'video');
-
-  return {
-    title: `${site}${firstVideo ? '视频' : '图集'} · ${hash.slice(0, 6)}`,
-    author,
-    site,
-    summary: buildSummary(segments, author, hash),
-    segments,
-    failed_reason: '',
-    resolved_at: resolvedAt,
-  };
-}
-
-/**
  * 归一化口径（只用于缓存键，不改变传给解析器的原文）：
  * scheme 与 host 不区分大小写（RFC 里它们本来就不敏感），结尾的 '/' 视为同一个地址；
  * 路径与查询串的大小写原样保留 —— 真实站点里它们通常是有意义的，不归一。
@@ -328,12 +542,10 @@ function normalizeCacheKey(url) {
 }
 
 /**
- * 转存任务：单线程循环，拿到一条就做一条。
- *
- * 真实后台的这一步是「解析 → 下载 → 大视频切片 → 上传存储 → 拿回一组 id」；
- * mock 用 TRANSFER_MS 模拟这段耗时，结果复用 media_cache（同一源 url 只转存一次）。
- * 失败按 TRANSFER_MAX_ATTEMPTS 退避重试，用尽后该条落到 failed + 原因，
- * 只能等用户在遮罩层里点「重新转存」再发起一次。
+ * 两个队列共用一条单线程循环：
+ *   parse  —— 解析（含调远程切片服务），成功后立刻 ready；
+ *   backup —— 把素材转存到存储目录，失败只记内部状态，不影响可播/可看。
+ * 真实后台把 backup 换成「上传存储服务器、拿回 id」，其余节奏一致。
  */
 let jobTimer = null;
 
@@ -348,43 +560,61 @@ function scheduleJobs(delayMs = 0) {
   jobTimer.unref?.();
 }
 
-async function runNextJob() {
-  if (state.jobs.length === 0) return;
+function runNextJob() {
+  if (state.jobs.length === 0) return Promise.resolve();
   const now = Date.now();
-  const index = state.jobs.findIndex((job) => job.next_at <= now);
-  if (index < 0) {
-    const soonest = Math.min(...state.jobs.map((job) => job.next_at));
+  const due = state.jobs.filter((job) => (job.next_at ?? 0) <= now);
+  if (due.length === 0) {
+    const soonest = Math.min(...state.jobs.map((job) => job.next_at ?? 0));
     scheduleJobs(soonest - now);
-    return;
+    return Promise.resolve();
   }
-  const job = state.jobs[index];
-  state.jobs.splice(index, 1);
+  // 解析优先：源的备份可能很慢，不能把「准备中」的条目堵在后面
+  const job = due.find((item) => (item.kind ?? 'parse') === 'parse') ?? due[0];
+  state.jobs.splice(state.jobs.indexOf(job), 1);
+  if (job.kind === 'backup') return runBackupJob(job);
+  return runParseJob(job);
+}
+
+async function runParseJob(job) {
   const row = state.favorites[job.url];
   if (!row) {
     saveData();
-    return; // 等转存期间被删了，任务作废
+    return; // 等解析期间被删了，任务作废
   }
 
   await sleep(TRANSFER_MS);
   try {
-    const cached = state.media_cache[normalizeCacheKey(row.url)];
-    const media = cached ?? resolveMedia(row.url);
-    if (media.failed_reason) throw new Error(media.failed_reason);
-    state.media_cache[normalizeCacheKey(row.url)] = media;
-    // 转存期间行可能已被删；仍然写回去也无害，那说明用户在这段时间里又收藏了一次
-    if (state.favorites[job.url]) {
-      row.media = media;
-      row.media_state = 'ready';
-      row.failed_reason = '';
-      row.resolved_at = media.resolved_at;
-      row.updated_at = Date.now();
+    const cacheKey = normalizeCacheKey(row.url);
+    const cached = state.media_cache[cacheKey];
+    const result = cached && cached.media && cached.sources ? cached : await parseMedia(row);
+    if (result.media.failed_reason) throw new Error(result.media.failed_reason);
+
+    // 解析期间行可能已被删；若用户又收藏了一次，内容应落在新行上
+    const current = state.favorites[job.url];
+    if (current) {
+      state.media_cache[cacheKey] = result;
+      const oldKeys = Array.isArray(current.source_keys) ? current.source_keys : [];
+      const nextKeys = Object.keys(result.sources);
+      for (const key of nextKeys) state.media_sources[key] = result.sources[key];
+      current.media = result.media;
+      current.source_keys = nextKeys;
+      current.media_state = 'ready';
+      current.failed_reason = '';
+      current.resolved_at = result.media.resolved_at;
+      current.updated_at = Date.now();
+      pruneSources(oldKeys.filter((key) => !nextKeys.includes(key)));
+      enqueueJob(job.url, 'backup');
     }
   } catch (error) {
-    job.attempts += 1;
+    job.attempts = (job.attempts ?? 0) + 1;
     if (job.attempts >= TRANSFER_MAX_ATTEMPTS) {
-      row.media_state = 'failed';
-      row.failed_reason = `转存失败：${error.message}`;
-      row.updated_at = Date.now();
+      // 只改最初那一行：这期间被删掉又重新收藏的新行有自己的解析任务
+      if (state.favorites[job.url] === row) {
+        row.media_state = 'failed';
+        row.failed_reason = `解析失败：${error.message}`;
+        row.updated_at = Date.now();
+      }
     } else {
       job.next_at = Date.now() + TRANSFER_RETRY_MS * job.attempts;
       state.jobs.push(job);
@@ -393,15 +623,105 @@ async function runNextJob() {
   saveData();
 }
 
+/** 备份失败不重排：源地址还在时照样能播，等用户手动「重新准备」时再备份一次 */
+async function runBackupJob(job) {
+  const row = state.favorites[job.url];
+  if (!row) {
+    saveData();
+    return;
+  }
+  for (const key of row.source_keys ?? []) {
+    const source = state.media_sources[key];
+    if (!source || source.store_id) continue;
+    try {
+      await backupSource(source);
+      updateSegmentStoreId(row, source);
+      source.backup_error = '';
+    } catch (error) {
+      source.backup_error = error.message;
+      console.warn(`备份失败 ${key}: ${error.message}`);
+    }
+    saveData();
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 让一条收藏进入「等转存」：已有进行中的任务或已就绪就不重复排 */
-function enqueueTransfer(url) {
-  if (state.jobs.some((job) => job.url === url)) return;
-  state.jobs.push({ url, attempts: 0, next_at: 0 });
+/** 让一条收藏进入某个队列：同 url 同类型已有任务就不重复排 */
+function enqueueJob(url, kind) {
+  if (state.jobs.some((job) => job.url === url && (job.kind ?? 'parse') === kind)) return;
+  state.jobs.push({ url, kind, attempts: 0, next_at: 0 });
   scheduleJobs(0);
+}
+
+function removeJobsFor(url) {
+  state.jobs = state.jobs.filter((job) => job.url !== url);
+}
+
+function pruneSources(keys) {
+  for (const key of keys) {
+    delete state.media_sources[key];
+    for (const kind of ['video', 'image', 'cover']) {
+      const file = storeFile(key, kind);
+      if (!existsSync(file)) continue;
+      try {
+        unlinkSync(file);
+      } catch (error) {
+        console.warn(`删除备份失败 ${file}: ${error.message}`);
+      }
+    }
+  }
+}
+
+function updateSegmentStoreId(row, source) {
+  const target = mediaPath(source.key, segmentExt(source.kind));
+  for (const segment of row.media?.segments ?? []) {
+    if (segment.url === target) {
+      segment.store_id = source.store_id;
+      return;
+    }
+  }
+}
+
+function writeAtomic(file, bytes) {
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, bytes);
+  renameSync(tmp, file);
+}
+
+/** 按闭区间从源站取字节；源站不支持 Range 时长度对不上，直接判失败 */
+async function fetchRangeBytes(url, start, end) {
+  const response = await fetch(url, {
+    headers: { range: `bytes=${start}-${end}`, 'accept-encoding': 'identity' },
+    signal: AbortSignal.timeout(BACKUP_TIMEOUT_MS),
+  });
+  if (response.status !== 206 && response.status !== 200) throw new Error(`源站 HTTP ${response.status}`);
+  const body = Buffer.from(await response.arrayBuffer());
+  const expected = end - start + 1;
+  if (body.length !== expected) throw new Error(`源站返回字节数不符：${body.length}/${expected}`);
+  return body;
+}
+
+async function backupSource(source) {
+  const file = storeFile(source.key, source.kind);
+  if (source.slice) {
+    if (source.slice.media_size > BACKUP_MAX_BYTES) throw new Error('素材超过备份上限');
+    const init = Buffer.from(source.slice.init_base64, 'base64');
+    const media = await fetchRangeBytes(source.source_url, source.slice.start, source.slice.end);
+    writeAtomic(file, Buffer.concat([init, media]));
+  } else {
+    const response = await fetch(source.source_url, {
+      headers: { 'accept-encoding': 'identity' },
+      signal: AbortSignal.timeout(BACKUP_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`源站 HTTP ${response.status}`);
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length > BACKUP_MAX_BYTES) throw new Error('素材超过备份上限');
+    writeAtomic(file, body);
+  }
+  source.store_id = `st-${source.key}`;
 }
 
 // ---------- 收藏读写 ----------
@@ -463,7 +783,7 @@ function minRow(row) {
 }
 
 /** 写入一条收藏（按 url 覆盖用户四列）。返回 'created' | 'updated' | 'unchanged' */
-function writeFavorite({ url, note, tags, sourceApp, favoriteAt }, { createOnly = false } = {}) {
+function writeFavorite({ url, note, tags, sourceApp, favoriteAt, sliceRule }, { createOnly = false } = {}) {
   const existing = state.favorites[url];
   if (existing) {
     if (createOnly) return 'unchanged'; // B 只增不改：已存在就一个字都不动
@@ -490,8 +810,11 @@ function writeFavorite({ url, note, tags, sourceApp, favoriteAt }, { createOnly 
     media_state: 'pending',
     failed_reason: '',
     resolved_at: 0,
+    // 切片规则随这条收藏落库：设置只影响新收藏与手动「重新准备」
+    slice_rule: parseSliceRule(sliceRule) ?? DEFAULT_SLICE_RULE,
+    source_keys: [],
   };
-  enqueueTransfer(url);
+  enqueueJob(url, 'parse');
   saveData();
   return 'created';
 }
@@ -504,9 +827,12 @@ function clampFavoriteAt(value) {
 }
 
 function deleteFavorite(url) {
-  if (!state.favorites[url]) return false;
+  const row = state.favorites[url];
+  if (!row) return false;
+  pruneSources(Array.isArray(row.source_keys) ? row.source_keys : []);
+  delete state.media_cache[normalizeCacheKey(url)];
   delete state.favorites[url];
-  state.jobs = state.jobs.filter((job) => job.url !== url);
+  removeJobsFor(url);
   saveData();
   return true;
 }
@@ -568,12 +894,280 @@ function nextWaitMs() {
   return wait;
 }
 
+// ---------- 媒体代理 ----------
+
+/**
+ * 媒体流不带 Bearer：ExoPlayer 与 Coil 都不会加 header，所以虚拟地址本身就是凭据。
+ * key 由不可逆哈希派生且只存在于后台；这里只服务已登记的 key，不构成任意 URL 转发。
+ */
+const sourceChecks = new Map();
+
+function markDead(source) {
+  sourceChecks.set(source.source_url, { at: Date.now(), alive: false });
+}
+
+/** 源地址有效性：按视频级缓存 60 秒，避免一个 HLS/整片请求把源站探测打爆 */
+async function sourceIsAlive(source) {
+  const cached = sourceChecks.get(source.source_url);
+  if (cached && Date.now() - cached.at < SOURCE_CHECK_TTL_MS) return cached.alive;
+
+  let alive = false;
+  try {
+    let response = await fetch(source.source_url, {
+      method: 'HEAD',
+      headers: { 'accept-encoding': 'identity' },
+      signal: AbortSignal.timeout(SOURCE_PROBE_MS),
+      redirect: 'follow',
+    });
+    if (response.status === 405 || response.status === 501) {
+      response = await fetch(source.source_url, {
+        headers: { range: 'bytes=0-0', 'accept-encoding': 'identity' },
+        signal: AbortSignal.timeout(SOURCE_PROBE_MS),
+        redirect: 'follow',
+      });
+    }
+    alive = response.ok || response.status === 206;
+    if (alive && source.file_size > 0 && response.status !== 206) {
+      const length = Number(response.headers.get('content-length'));
+      if (Number.isFinite(length) && length > 0 && length !== source.file_size) alive = false;
+    }
+    if (alive && source.etag) {
+      const etag = response.headers.get('etag');
+      if (etag && etag !== source.etag) alive = false;
+    }
+  } catch {
+    alive = false;
+  }
+  sourceChecks.set(source.source_url, { at: Date.now(), alive });
+  return alive;
+}
+
+/** 返回 null（无 Range）、{start,end}（闭区间）或 'invalid' */
+function parseRangeHeader(header, size) {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
+  if (!match) return null;
+  const hasStart = match[1] !== '';
+  const hasEnd = match[2] !== '';
+  if (!hasStart && !hasEnd) return null;
+  if (!hasStart) {
+    const suffix = Number(match[2]);
+    if (!Number.isFinite(suffix) || suffix <= 0 || size <= 0) return 'invalid';
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(match[1]);
+  if (!Number.isFinite(start) || start < 0 || start >= size) return 'invalid';
+  let end = hasEnd ? Number(match[2]) : size - 1;
+  if (!Number.isFinite(end)) return 'invalid';
+  end = Math.min(end, size - 1);
+  if (end < start) return 'invalid';
+  return { start, end };
+}
+
+function mediaType(source) {
+  return source.kind === 'video' ? 'video/mp4' : 'image/jpeg';
+}
+
+function sendMediaError(req, res, status, message) {
+  if (res.destroyed || res.headersSent) return;
+  const body = Buffer.from(message);
+  res.writeHead(status, {
+    'content-type': 'text/plain; charset=utf-8',
+    'content-length': String(body.length),
+    'cache-control': 'no-store',
+  });
+  if (req.method === 'HEAD') res.end();
+  else res.end(body);
+}
+
+function sendFileRange(req, res, file, contentType) {
+  let size;
+  try {
+    size = statSync(file).size;
+  } catch {
+    sendMediaError(req, res, 502, '素材备份不存在');
+    return;
+  }
+  const range = parseRangeHeader(req.headers.range, size);
+  if (range === 'invalid') {
+    res.writeHead(416, { 'content-range': `bytes */${size}`, 'cache-control': 'no-store' });
+    res.end();
+    return;
+  }
+  const start = range ? range.start : 0;
+  const end = range ? range.end : Math.max(0, size - 1);
+  const headers = {
+    'content-type': contentType,
+    'content-length': String(end - start + 1),
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-store',
+  };
+  if (range) headers['content-range'] = `bytes ${start}-${end}/${size}`;
+  res.writeHead(range ? 206 : 200, headers);
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  const stream = createReadStream(file, { start, end });
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
+}
+
+/** 整片/图片：把客户端的 Range 原样转给源站 */
+async function proxySource(req, res, source) {
+  const controller = new AbortController();
+  res.once('close', () => controller.abort());
+  const headers = { 'accept-encoding': 'identity' };
+  if (req.headers.range) headers.range = req.headers.range;
+
+  let upstream;
+  try {
+    upstream = await fetch(source.source_url, {
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers,
+      signal: controller.signal,
+      redirect: 'follow',
+    });
+  } catch {
+    if (!res.destroyed) markDead(source);
+    return false;
+  }
+  if (upstream.status !== 200 && upstream.status !== 206) {
+    markDead(source);
+    return false;
+  }
+
+  const out = {
+    'content-type': upstream.headers.get('content-type') || mediaType(source),
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-store',
+  };
+  for (const name of ['content-length', 'content-range', 'etag', 'last-modified']) {
+    const value = upstream.headers.get(name);
+    if (value) out[name] = value;
+  }
+  res.writeHead(upstream.status, out);
+  if (req.method === 'HEAD' || !upstream.body) {
+    res.end();
+    return true;
+  }
+  try {
+    for await (const chunk of Readable.fromWeb(upstream.body)) {
+      if (!res.write(chunk)) await once(res, 'drain');
+    }
+    res.end();
+  } catch {
+    res.destroy();
+  }
+  return true;
+}
+
+/**
+ * 单片 = init 段（本地字节）+ 源文件媒体区间。客户端 Range 要在这两段之间换算，
+ * 不能直接把 Range 转给源站。
+ */
+async function serveSliceFromSource(req, res, source) {
+  const init = Buffer.from(source.slice.init_base64, 'base64');
+  const mediaSize = source.slice.media_size;
+  const total = init.length + mediaSize;
+  const range = parseRangeHeader(req.headers.range, total);
+  if (range === 'invalid') {
+    res.writeHead(416, { 'content-range': `bytes */${total}`, 'cache-control': 'no-store' });
+    res.end();
+    return true;
+  }
+  const start = range ? range.start : 0;
+  const end = range ? range.end : total - 1;
+
+  const initStart = Math.min(start, init.length);
+  const initEnd = Math.min(end + 1, init.length);
+  const mediaStart = Math.max(0, start - init.length);
+  const mediaEnd = end - init.length; // 闭区间，相对媒体起点
+  const needInit = initEnd > initStart;
+  const needMedia = mediaEnd >= mediaStart && mediaSize > 0;
+
+  let upstream = null;
+  if (needMedia && req.method !== 'HEAD') {
+    const controller = new AbortController();
+    res.once('close', () => controller.abort());
+    try {
+      upstream = await fetch(source.source_url, {
+        headers: {
+          range: `bytes=${source.slice.start + mediaStart}-${source.slice.start + mediaEnd}`,
+          'accept-encoding': 'identity',
+        },
+        signal: controller.signal,
+        redirect: 'follow',
+      });
+    } catch {
+      if (!res.destroyed) markDead(source);
+      return false;
+    }
+    if (upstream.status !== 206 && upstream.status !== 200) {
+      markDead(source);
+      return false;
+    }
+    // 源站忽略 Range 返回 200 时，只有「正好要整段媒体」才能直接用
+    if (upstream.status === 200 && !(mediaStart === 0 && mediaEnd === mediaSize - 1)) {
+      markDead(source);
+      return false;
+    }
+  }
+
+  const headers = {
+    'content-type': 'video/mp4',
+    'content-length': String(end - start + 1),
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-store',
+  };
+  if (range) headers['content-range'] = `bytes ${start}-${end}/${total}`;
+  res.writeHead(range ? 206 : 200, headers);
+  if (req.method === 'HEAD') {
+    res.end();
+    return true;
+  }
+  if (needInit) res.write(init.subarray(initStart, initEnd));
+  if (upstream?.body) {
+    try {
+      for await (const chunk of Readable.fromWeb(upstream.body)) {
+        if (!res.write(chunk)) await once(res, 'drain');
+      }
+    } catch {
+      res.destroy();
+      return true;
+    }
+  }
+  res.end();
+  return true;
+}
+
+async function handleMedia(req, res, relativePath) {
+  const match = /^\/media\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
+  if (!match) return sendMediaError(req, res, 404, '未知的素材地址');
+  const source = state.media_sources[match[1]];
+  if (!source) return sendMediaError(req, res, 404, '素材地址不存在或已过期');
+
+  if (await sourceIsAlive(source)) {
+    const served = source.slice
+      ? await serveSliceFromSource(req, res, source)
+      : await proxySource(req, res, source);
+    if (served) return;
+    if (res.destroyed) return;
+    console.log(`源地址失效，改用备份：${source.key}`);
+  }
+
+  const file = storeFile(source.key, source.kind);
+  if (!existsSync(file)) return sendMediaError(req, res, 502, '源地址已失效，备份也不存在');
+  sendFileRange(req, res, file, mediaType(source));
+}
+
 // ---------- 路由 ----------
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const path = url.pathname.replace(/\/+$/, '') || '/';
-  console.log(`${req.method} ${path}`);
+  // 媒体请求量是接口面的几十倍（播放器会按 Range 连续取），不逐条刷日志
+  if (!path.startsWith(`${BASE_PATH}/media/`)) console.log(`${req.method} ${path}`);
 
   try {
     if (path === `${BASE_PATH}/health` && req.method === 'GET') {
@@ -607,9 +1201,22 @@ const server = createServer(async (req, res) => {
         resolver: {
           name: 'mock-store',
           deterministic_by_url: true,
-          note: '解析结果按源 url 缓存；真实后台在这里之后还要下载、切片并转存到存储服务器，成功后 media 才就绪',
+          note: '解析结果按源 url 缓存；视频可选调用远程切片服务，切片失败降级为整片一段。media 就绪不再等备份',
         },
+        media_url_style: 'relative-to-endpoint',
+        media_path: 'media/<key>.<ext>',
+        media_path_note: '段地址是 /media/<key>.<ext>，相对的是接口地址（含 BASE_PATH），App 负责拼接',
+        media_requires_auth: false,
+        ready_on_parse: true,
+        slice_rule: DEFAULT_SLICE_RULE,
+        slice_service: SLICE_SERVICE_URL ? 'remote' : 'builtin-none',
       });
+      return;
+    }
+
+    // 媒体代理：免鉴权（ExoPlayer/Coil 不带 header），只服务已登记的 key
+    if (path.startsWith(`${BASE_PATH}/media/`) && (req.method === 'GET' || req.method === 'HEAD')) {
+      await handleMedia(req, res, path.slice(BASE_PATH.length));
       return;
     }
 
@@ -671,6 +1278,10 @@ const server = createServer(async (req, res) => {
         const body = parseJson(await readBody(req));
         if (!plainObject(body) || !Array.isArray(body.urls)) throw new HttpError(400, 'urls 必须是字符串数组');
         const urls = stringArray(body.urls, 'urls').map((item) => item.trim()).filter(Boolean);
+        const rule = body.slice_rule == null ? null : parseSliceRule(body.slice_rule);
+        if (body.slice_rule != null && !rule) {
+          throw new HttpError(400, 'slice_rule 只支持 {mode:"duration",seconds} 或 {mode:"size",bytes}');
+        }
         const favorites = [];
         const unknownUrls = [];
         for (const target of new Set(urls)) {
@@ -681,11 +1292,12 @@ const server = createServer(async (req, res) => {
           }
           // 丢弃缓存里的旧结果重算：这是唯一的强制刷新入口
           delete state.media_cache[normalizeCacheKey(target)];
+          if (rule) row.slice_rule = rule;
           row.media_state = 'pending';
           row.failed_reason = '';
           row.updated_at = Date.now();
-          state.jobs = state.jobs.filter((job) => job.url !== target);
-          enqueueTransfer(target);
+          removeJobsFor(target);
+          enqueueJob(target, 'parse');
           favorites.push(publicRow(row));
         }
         saveData();
@@ -707,6 +1319,10 @@ const server = createServer(async (req, res) => {
         if (typeof body.device_id !== 'string' || !body.device_id.trim()) throw new HttpError(400, '缺少 device_id');
         if (!Array.isArray(body.ops)) throw new HttpError(400, 'ops 必须是数组');
         if (body.ops.length !== 1) throw new HttpError(400, '这个后台一次只接受一条操作');
+        const sliceRule = body.slice_rule == null ? null : parseSliceRule(body.slice_rule);
+        if (body.slice_rule != null && !sliceRule) {
+          throw new HttpError(400, 'slice_rule 只支持 {mode:"duration",seconds} 或 {mode:"size",bytes}');
+        }
         const op = body.ops[0];
         if (!plainObject(op)) throw new HttpError(400, '第 1 条操作不是 JSON 对象');
         if (op.type === 'DELETE') {
@@ -730,7 +1346,7 @@ const server = createServer(async (req, res) => {
         const sourceApp = optionalString(favorite.source_app, 'favorite.source_app');
         const tags = stringArray(favorite.tags, 'favorite.tags');
         const favoriteAt = optionalNumber(favorite.favorite_at, 'favorite.favorite_at', Date.now());
-        writeFavorite({ url: urlText, note, tags, sourceApp, favoriteAt });
+        writeFavorite({ url: urlText, note, tags, sourceApp, favoriteAt, sliceRule });
         const wait = nextWaitMs();
         send(res, 200, {
           ok: true,
@@ -835,17 +1451,22 @@ server.listen(PORT, HOST, () => {
   }
 
   console.log(TOKEN ? '已开启 Bearer 校验：数据接口必须带 Authorization: Bearer <SYNC_TOKEN>' : '未开启 token 校验（SYNC_TOKEN 为空）');
+  console.log(`媒体代理免鉴权: GET ${BASE_PATH}/media/<key>.<ext>（虚拟地址由不可猜 key 保护）`);
   console.log(`B 回调地址: POST ${BASE_PATH}${INGEST_PATH}（来源固定写「${INGEST_SOURCE_APP}」，只增不改）`);
-  console.log(`内容解析器：mock-store（转存耗时 ${TRANSFER_MS}ms，失败重试 ${TRANSFER_MAX_ATTEMPTS} 次）`);
+  console.log(`内容解析器：mock-store（解析耗时 ${TRANSFER_MS}ms，失败重试 ${TRANSFER_MAX_ATTEMPTS} 次）`);
+  console.log(SLICE_SERVICE_URL
+    ? `远程切片服务: ${SLICE_SERVICE_URL}（默认规则 ${JSON.stringify(DEFAULT_SLICE_RULE)}）`
+    : `未配置 SLICE_SERVICE_URL：长视频整片一段，不调切片服务`);
+  console.log(`备份目录: ${STORE_DIR}${MEDIA_KEY_SECRET ? '（虚拟 key 已加盐）' : '（虚拟 key 为确定性哈希）'}`);
   console.log(`数据文件: ${DATA_FILE}（已读取收藏 ${Object.keys(state.favorites).length} 条）`);
   console.log(`后台能力自查: GET ${BASE_PATH}/meta（免鉴权，联调前先在浏览器里看一眼）`);
   console.log(UPLOAD_WAIT_JITTER_MS > 0
     ? `next_wait_ms: 基准 ${UPLOAD_WAIT_MS}ms，按请求序号抖动 ${UPLOAD_WAIT_JITTER_MS}ms（0/1/2 倍循环）`
     : `next_wait_ms: 固定 ${UPLOAD_WAIT_MS}ms`);
 
-  // 上次退出时还有没跑完的转存任务：启动后接着跑
+  // 上次退出时还有没跑完的解析/备份任务：启动后接着跑
   if (state.jobs.length > 0) {
-    console.log(`恢复未完成的转存任务 ${state.jobs.length} 条`);
+    console.log(`恢复未完成的任务 ${state.jobs.length} 条`);
     scheduleJobs(0);
   }
 });

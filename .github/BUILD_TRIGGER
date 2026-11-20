@@ -9,22 +9,16 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 21
-code: 24065ae
-note: 按「个人助手」定位把同步与内容链路整体瘦身（多写者那一套按 2026-11-20 裁决下线）。
-      一、后台：一张 favorites 表以 url 为主键，无账号/rev/墓碑/revision_log/HLC；接口缩到
-      /sync（一次一条、按 url 增删）、/favorites 两档（整行 / fields=min 清单）、/favorites/lookup
-      批量取内容、/resolve 按 url 重排、/health 与 /meta；新增 B 的固定格式回调（只增不改、
-      不收时间、坏链接跳过、处理完就 2xx）。内容改为异步就绪：收到链接后排转存任务
-      （解析→下载→大视频切片→上传存储→拿回 id），按源 url 缓存、失败退避 3 次、重启续跑，
-      状态走 media_state（pending/ready/failed）。
-      二、App 同步层：删掉 HLC/SyncClock/changed_fields/base_rev/merged_into/op_errors 与
-      /favorites/changes 整套；对账改成「翻完整份清单做差集」，中途失败一律不删、脏行不删；
-      上传判据回到 applied==1；打开待就绪条目时单条查询一次，失败只提示不写库。
-      三、UI：全局状态收进屏幕底部居中悬浮提示条（临时回执 3.5s、同步失败带重试、离线、上传失败），
-      顶栏只留待同步与转圈，Snackbar 与两处状态胶囊删除；内容边距与 20mm 物理边距解耦
-      （新增 content_inset 20/24/28dp，墙在 1280dp 宽平板上因此多出一列）；占位文案统一
-      「内容还在后台准备」；切片视频不给整片缓存按钮。
-      四、Room v6（destructive）：删 rev/hlcSeq、加 serverUpdatedAt/mediaState、url 唯一索引。
-      五、文档：两份作废设计稿删除，口径合并进「同步后台接口说明」（含 B 回调一节）。
-      mock 测试重写为三套 26 例（协议 17 / 回调 7 / 转存 2），本地全绿。
+build: 22
+code: eddd6ba
+note: 媒体链路改为后台虚拟地址代理，长视频交给远程切片服务切段，源地址失效时回落备份。
+      一、后台：segments[].url / cover_url 改为相对虚拟地址 /media/<key>.<ext>，真实地址与存储 id
+      只留在后台；/sync 与 /resolve 接受顶层 slice_rule（size 或 duration，关键帧对齐）；解析成功即
+      ready，下载/切片/转存降级为异步备份，失败只记内部状态；新增 GET /media/<key>（免鉴权、Range
+      透传、单片 init+源区间换算、源失效读备份、未知 key 404）。切片服务不可用或源不支持 Range 时
+      降级为整片一段。
+      二、App：相对地址在仓库层按设置里的接口地址拼接，换地址自动跟随；设置页新增「内容切片」
+      （2/8/32/128MB 或 1/5/10/30 分钟，只影响新收藏与手动重新准备）；播完一片自动接下一段；
+      「整片缓存」改为逐片预取，全部完成才标已缓存。
+      三、文档：接口说明、架构、使用说明与 README 同步；fMP4/CMAF 方案记入架构文档 §7 后续改进。
+      mock 测试扩到 37 例（新增代理/回落/地址稳定 11 例），本地全绿；真实切片服务与 Range 已联调。

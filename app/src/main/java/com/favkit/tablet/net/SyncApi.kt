@@ -51,6 +51,7 @@ class SyncApi(
                 deviceId = config.deviceId.ifBlank { settings.ensureDeviceId() },
                 sentAt = System.currentTimeMillis(),
                 ops = ops,
+                sliceRule = config.sliceRule(),
             ),
         )
         return exchange(config, "/sync", body, pacing = true, ::mapSyncError) { text, code ->
@@ -161,8 +162,11 @@ class SyncApi(
      */
     suspend fun resolve(urls: List<String>): ResolveOutcome {
         if (urls.isEmpty()) return ResolveOutcome()
-        val body = json.encodeToString(ResolveRequest.serializer(), ResolveRequest(urls = urls))
         val config = settings.current()
+        val body = json.encodeToString(
+            ResolveRequest.serializer(),
+            ResolveRequest(urls = urls, sliceRule = config.sliceRule()),
+        )
         return exchange(config, "/resolve", body, pacing = true, { reason -> ResolveOutcome(error = reason) }) { text, code ->
             if (code in 400..499) {
                 val parsed = runCatching { json.decodeFromString(ResolveResponse.serializer(), text) }.getOrNull()
@@ -219,6 +223,13 @@ class SyncApi(
     private fun rejectionReason(text: String): String? = runCatching {
         json.decodeFromString(SyncResponse.serializer(), text).error
     }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun SettingsSnapshot.sliceRule(): SliceRuleDto =
+        if (sliceRuleMode == AppSettings.SLICE_MODE_DURATION) {
+            SliceRuleDto(mode = AppSettings.SLICE_MODE_DURATION, seconds = sliceRuleSeconds)
+        } else {
+            SliceRuleDto(mode = AppSettings.SLICE_MODE_SIZE, bytes = sliceRuleBytes)
+        }
 
     private fun buildUrl(endpoint: String, path: String): String? {
         val base = endpoint.trim().trimEnd('/')

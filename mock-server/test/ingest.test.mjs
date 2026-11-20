@@ -66,7 +66,15 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${port}/api/v1`;
   tempDataFile = path.join(TEMP_DIR, `data-${randomUUID().slice(0, 8)}.json`);
   child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), DATA_FILE: tempDataFile, TRANSFER_MS: '50' },
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      DATA_FILE: tempDataFile,
+      TRANSFER_MS: '50',
+      BACKUP_TIMEOUT_MS: '200',
+      MOCK_ORIGIN_BASE: 'http://127.0.0.1:1',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (chunk) => process.stderr.write(chunk));
@@ -144,7 +152,7 @@ test('认不出链接列表的载荷回 400（让它去修适配，而不是静�
   assert.equal(status, 400);
 });
 
-test('回调进来的条目同样走转存：先 pending，随后 ready 且带存储 id', async () => {
+test('回调进来的条目同样走解析：先 pending，随后 ready 且地址是相对虚拟路径', async () => {
   const url = 'https://example.com/i6';
   await callback({ links: [url] });
   const pending = (await rows()).find((item) => item.url === url);
@@ -156,7 +164,7 @@ test('回调进来的条目同样走转存：先 pending，随后 ready 且带�
     row = (await rows()).find((item) => item.url === url);
   }
   assert.equal(row.media_state, 'ready');
-  assert.ok(row.media.segments.every((seg) => seg.store_id));
+  assert.ok(row.media.segments.every((seg) => seg.url.startsWith('/media/')));
 });
 
 test('删掉之后 B 再推一次会复活（个人场景：确实又收藏了一次）', async () => {
