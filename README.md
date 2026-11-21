@@ -62,6 +62,24 @@ gradle wrapper --gradle-version 8.9          # 只需执行一次
 PARSE_SERVICE_URL=http://127.0.0.1:3001/parse node mock-server/server.mjs   # 监听 0.0.0.0:8787/api/v1
 ```
 
+本地没有真实解析服务时，用仓库里的联调桩（视频固定指向本机 `:9200/test`，图片由它自己生成）：
+
+```bash
+VIDEO_BASE=http://127.0.0.1:9200/test node mock-server/dev-parser.mjs   # 监听 3001
+# 另开终端
+PARSE_SERVICE_URL=http://127.0.0.1:3001/parse node mock-server/server.mjs
+```
+
+`GET http://127.0.0.1:3001/demo` 会列出 5 组可用链接：
+
+```
+https://demo.local/cyber    单视频（赛博播放器）
+https://demo.local/xg       单视频（西瓜 360P）
+https://demo.local/two      两个视频
+https://demo.local/mixed    视频 + 3 张图
+https://demo.local/images   纯图集 4 张
+```
+
 - 协议是纯明文 JSON。数据接口：`POST /sync`（上传变更，回执通常还是 `pending`）、`GET /favorites`（分页取收藏）、`POST /favorites/lookup`（批量取内容）、`POST /resolve`（手动重解析）；媒体由免鉴权的 `GET /media/<key>.<ext>` 代理，源地址失效时自动回落存储备份。另有 `GET /health` / `GET /meta`。
   没有信封加密、没有 RSA 密钥，也**没有取解析结果的轮询接口** —— 解析是异步的：回执通常是 `pending`，内容靠对账与单条 `lookup` 取回。
   `GET /favorites` 按 `favorite_at` 倒序做 keyset 分页，App 侧本地表只是它的分页缓存。
@@ -70,7 +88,7 @@ PARSE_SERVICE_URL=http://127.0.0.1:3001/parse node mock-server/server.mjs   # �
   之后只做选档、切片、上传与代理。测试用 [fixture-parser.mjs](mock-server/test/support/fixture-parser.mjs) 桩解析服务返回夹具素材。
   每个视频按 `UPLOAD_MAX_HEIGHT` 选一档（播放与上传共用；没有可达档则取最小的范围外档），选中视频超过片大小才调远程切片服务（`SLICE_SERVICE_URL`），否则整片。
   所有素材（片/整片/图片/封面）都有后台的相对虚拟地址，由后台代理；key 里带内容版本，改切片/源后地址随之变化。上传把同一批 asset 逐条传到存储并拿 id。
-  切片的 `init`/区间按 `SLICE_INFO_TTL_MS` 当缓存清理：已有备份且空闲的会被删掉，代理时按 slot 索引重新向切片服务补取；段地址、时长与备份不受影响。
+  切片的 `init`/区间按 `SLICE_INFO_TTL_MS` 当缓存清理：已有备份且空闲的会被删掉，代理时按 `slice_index` 重新向切片服务补取；段地址、时长与备份不受影响。
   标题与说明由解析服务提供；数据落在 `mock-server/data.json`。
 - 服务默认监听 `0.0.0.0`，同一局域网内任何设备都能访问，只适合内网调试，不要暴露到公网。
 - **真机连不上先看这三条**：
