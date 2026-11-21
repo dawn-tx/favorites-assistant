@@ -19,6 +19,7 @@ import com.favkit.tablet.floating.SaveOutcome
 import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.net.LookupOutcome
 import com.favkit.tablet.net.PullOutcome
+import com.favkit.tablet.sync.Sweep
 import com.favkit.tablet.util.VideoLinkDetector
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -79,6 +80,10 @@ data class MainUiState(
     val message: String? = null,
     /** 对账失败的原因（底部悬浮提示条读它）；null = 上次对账成功 */
     val sweepError: String? = null,
+    /** 设置页手动触发的那次对账是否还在跑 */
+    val reconciling: Boolean = false,
+    /** 设置页手动对账的最近一次结果；只在手动触发后写，自动对账不占用它 */
+    val reconcileResult: String? = null,
     /** 打开待就绪条目时那次单条查询失败了：只影响提示，不动库里任何状态 */
     val contentRefreshError: String? = null,
 ) {
@@ -152,7 +157,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     /**
-     * 进前台对一次账（翻一遍后台清单做差集）。
+     * 自动对账开启时，进前台对一次账（翻一遍后台清单做差集）；默认关闭时这一步跳过，只能从设置页手动触发。
      *
      * 为什么要这第二条触发路：worker 那一档只在「本机刚把自己攒的改动传完」时跑，用户不写任何东西
      * 就永远不触发 —— 换设备、闲置很久后回到界面、另一个 App 推了新链接，这些纯接收场景里
@@ -168,6 +173,8 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun onEnterForeground() {
         if (!_state.value.online) return
         viewModelScope.launch {
+            // 自动对账默认关闭：关闭时进前台只让上传队列跑，不翻清单
+            if (!graph.settings.current().autoReconcile) return@launch
             if (graph.favorites.cachedCount() == 0) return@launch
             graph.sync.sweep()
         }
@@ -176,6 +183,31 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     /** 底部提示条上的「重试」：用户手点，不构成定时重试 */
     fun retrySweep() {
         viewModelScope.launch { graph.sync.sweep() }
+    }
+
+    /**
+     * 设置页「立即对账」：与自动对账共用同一条 sweep，但不受自动开关限制。
+     * 结果直接写在设置卡片里，不依赖底部提示条。
+     */
+    fun reconcileNow() {
+        if (_state.value.reconciling) return
+        viewModelScope.launch {
+            _state.update { it.copy(reconciling = true, reconcileResult = null) }
+            val result = runCatching { graph.sync.sweep() }
+                .getOrElse { Sweep.FAILED(it.message ?: "对账失败") }
+            _state.update { it.copy(reconciling = false, reconcileResult = describeSweep(result)) }
+        }
+    }
+
+    private fun describeSweep(result: Sweep): String = when (result) {
+        is Sweep.DONE -> buildString {
+            append("对账完成：清单 ${result.rows} 条，刷新 ${result.refreshed} 条，删除 ${result.removed} 条")
+            if (result.broken > 0) append("，跳过 ${result.broken} 条损坏记录")
+        }
+
+        is Sweep.PARTIAL -> "对账部分完成：${result.reason}（已刷新 ${result.refreshed} 条，未做删除判断）"
+        is Sweep.FAILED -> "对账失败：${result.reason}"
+        Sweep.BUSY -> "已有一轮对账在进行"
     }
 
     private fun bindFlows() {
@@ -771,6 +803,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun setAssistantEnabled(value: Boolean) = viewModelScope.launch { graph.settings.setAssistantEnabled(value) }
     fun setPasteSuggestion(value: Boolean) = viewModelScope.launch { graph.settings.setPasteSuggestion(value) }
     fun setBallStatusBadge(value: Boolean) = viewModelScope.launch { graph.settings.setBallStatusBadge(value) }
+    fun setAutoReconcile(value: Boolean) = viewModelScope.launch { graph.settings.setAutoReconcile(value) }
     fun setUploadIntervalMs(value: Long) = viewModelScope.launch { graph.settings.setUploadIntervalMs(value) }
     fun setSliceRuleSizeMb(value: Long) =
         viewModelScope.launch { graph.settings.setSliceRuleBytes(value * 1_000_000L) }

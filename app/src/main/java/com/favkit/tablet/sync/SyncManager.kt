@@ -39,7 +39,8 @@ import kotlinx.serialization.json.Json
  * 2) [SyncWorker] 串行消费队列；两条之间的等待由 [com.favkit.tablet.net.SyncGate] 在出站口统一把控；
  * 3) 网络类失败静默退避重试 [MAX_ATTEMPTS] 次，用尽后留在队列里，靠联网回调或下次改动自动补传；
  * 4) 后台明确拒绝（4xx 或确认条数对不上）的条目保留在队列并标 FAILED，绝不静默丢弃；
- * 5) 队列排空后由 [sweep] 翻一遍后台清单做差集：补进新增、刷新变更、删掉后台已经没有的活行。
+ * 5) 自动对账开启时，队列排空后由 [sweep] 翻一遍后台清单做差集：补进新增、刷新变更、删掉后台已经没有的活行；
+ *    默认关闭，设置页可手动触发。
  */
 class SyncManager(
     context: Context,
@@ -73,8 +74,8 @@ class SyncManager(
     /**
      * 同一时刻只允许一笔对账在跑。
      *
-     * 对账有两档触发 —— [SyncWorker] 排空队列那一档（worker 本身是 unique work，已经串了）与
-     * 进前台那一档（`MainActivity.onResume`），两条链路并发是常态而不是将来时。
+     * 自动对账开启时有两档触发 —— [SyncWorker] 排空队列那一档（worker 本身是 unique work，已经串了）与
+     * 进前台那一档（`MainActivity.onResume`），两条链路并发是常态而不是将来时；设置页的「立即对账」是第三条。
      */
     private val sweeping = AtomicBoolean(false)
     private val _running = MutableStateFlow(false)

@@ -55,9 +55,9 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
             if (!graph.connectivity.isOnline) return Result.retry()
             val op = ops.nextDue(System.currentTimeMillis())
             if (op == null) {
-                // 队列排空 = 本机刚把自己攒的改动传完，顺手对一次账。
+                // 自动对账开启时，队列排空 = 本机刚把自己攒的改动传完，顺手对一次账。
                 // 放在这一档而不是开头：开头时本机还有东西要发，对账结果会被自己的在途改动盖住。
-                sweepQuietly(graph)
+                if (graph.settings.current().autoReconcile) sweepQuietly(graph)
                 return Result.success()
             }
             val dto = runCatching { graph.sync.decodePayload(op) }.getOrNull()

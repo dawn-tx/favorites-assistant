@@ -31,6 +31,8 @@ data class SettingsSnapshot(
     /** 上传切片的片大小，同时也是“长视频”的判定阈值；只影响新收藏与手动「重新准备」 */
     val sliceRuleBytes: Long,
     val deviceId: String,
+    /** 自动对账：进前台、上传队列排空时自动翻清单做差集；默认关闭，设置页可手动触发 */
+    val autoReconcile: Boolean = false,
 )
 
 class AppSettings(context: Context) {
@@ -48,6 +50,7 @@ class AppSettings(context: Context) {
         val UPLOAD_INTERVAL = longPreferencesKey("upload_interval_ms")
         val SLICE_BYTES = longPreferencesKey("slice_rule_bytes")
         val DEVICE_ID = stringPreferencesKey("device_id")
+        val AUTO_RECONCILE = booleanPreferencesKey("auto_reconcile")
     }
 
     val snapshot: Flow<SettingsSnapshot> = appContext.settingsStore.data.map { p ->
@@ -63,6 +66,7 @@ class AppSettings(context: Context) {
             uploadIntervalMs = p[Keys.UPLOAD_INTERVAL] ?: DEFAULT_UPLOAD_INTERVAL_MS,
             sliceRuleBytes = p[Keys.SLICE_BYTES] ?: DEFAULT_SLICE_BYTES,
             deviceId = p[Keys.DEVICE_ID] ?: "",
+            autoReconcile = p[Keys.AUTO_RECONCILE] ?: false,
         )
     }
 
@@ -85,6 +89,7 @@ class AppSettings(context: Context) {
     suspend fun setAssistantEnabled(value: Boolean) = update { this[Keys.ASSISTANT] = value }
     suspend fun setPasteSuggestion(value: Boolean) = update { this[Keys.PASTE_SUGGEST] = value }
     suspend fun setBallStatusBadge(value: Boolean) = update { this[Keys.BALL_BADGE] = value }
+    suspend fun setAutoReconcile(value: Boolean) = update { this[Keys.AUTO_RECONCILE] = value }
     suspend fun setDefaultPlaybackSpeed(value: Float) = update { this[Keys.SPEED] = value }
     suspend fun setCacheLimitMb(value: Long) = update { this[Keys.CACHE_MB] = value }
     suspend fun setImageCacheLimitMb(value: Long) = update { this[Keys.IMAGE_CACHE_MB] = value }
