@@ -172,25 +172,27 @@ fun MainScreen(
                 )
             }
 
-            // 底部居中悬浮提示条：全应用唯一的临时消息位置。
-            // 铺在遮罩层之上 —— 看完片子回到底部，与在墙上时是同一个位置、同一种读法。
-            val notice = noticeOf(state)
-            FloatingNotice(
-                text = notice?.text,
-                tint = notice?.tint ?: NoticeTint.neutral,
-                scale = scale,
-                actionLabel = notice?.actionLabel,
-                onAction = when (notice?.action) {
-                    NoticeAction.RETRY_SWEEP -> viewModel::retrySweep
-                    NoticeAction.RETRY_SYNC -> viewModel::retrySyncNow
-                    null -> null
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    // 遮罩层底部有段条与播放条，提示条让出那一条高度
-                    .padding(bottom = if (focus != null) scale.touchMin * 6f else scale.gapMd)
-                    .padding(horizontal = scale.contentInset),
-            )
+            // 墙上：底部居中悬浮提示条。
+            // 遮罩层打开时不在这里画 —— 它收进遮罩层的控制层，随控制层显隐，
+            // 收起控制层后不会盖住视频/图片层。
+            if (focus == null || focusFavorite == null) {
+                val notice = noticeOf(state)
+                FloatingNotice(
+                    text = notice?.text,
+                    tint = notice?.tint ?: NoticeTint.neutral,
+                    scale = scale,
+                    actionLabel = notice?.actionLabel,
+                    onAction = when (notice?.action) {
+                        NoticeAction.RETRY_SWEEP -> viewModel::retrySweep
+                        NoticeAction.RETRY_SYNC -> viewModel::retrySyncNow
+                        null -> null
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = scale.gapMd)
+                        .padding(horizontal = scale.contentInset),
+                )
+            }
         }
     }
 
@@ -227,44 +229,6 @@ fun MainScreen(
         onClose = { viewModel.showSettings(false) },
     )
 }
-
-/**
- * 提示条此刻该显示什么：按优先级取**一条**。
- *
- * 1. 临时回执（已删除 / 标签已更新 / 刷新失败）—— 3.5 秒后自己走；
- * 2. 对账失败 —— 留着，直到下一次对账成功，或者用户点「重试」；
- * 3. 打开待就绪条目时那次单条查询失败 —— 同样留着，直到刷新成功；
- * 4. 离线 / 上传失败 —— 条件消失才走。
- *
- * 不排队、不堆叠：新的直接替换旧的。排队的话会出现「我早就不关心了还一条条往外蹦」。
- */
-private fun noticeOf(state: MainUiState): Notice? {
-    state.message?.let { return Notice(it, NoticeTint.neutral) }
-    state.sweepError?.let {
-        return Notice("同步失败：$it", NoticeTint.fail, actionLabel = "重试", action = NoticeAction.RETRY_SWEEP)
-    }
-    state.contentRefreshError?.let { return Notice(it, NoticeTint.warn) }
-    when {
-        !state.online -> return Notice("离线 · 改动会先存在本机", NoticeTint.neutral)
-        state.failed > 0 -> return Notice(
-            "上传失败 ${state.failed} 条",
-            NoticeTint.fail,
-            actionLabel = "重试",
-            action = NoticeAction.RETRY_SYNC,
-        )
-        state.queued > 0 -> return Notice("待同步 ${state.queued} 条", NoticeTint.info)
-    }
-    return null
-}
-
-private data class Notice(
-    val text: String,
-    val tint: Color,
-    val actionLabel: String? = null,
-    val action: NoticeAction? = null,
-)
-
-private enum class NoticeAction { RETRY_SWEEP, RETRY_SYNC }
 
 /** 临时回执停留时长 */
 private const val NOTICE_MS = 3_500L

@@ -95,6 +95,7 @@ import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
 import com.favkit.tablet.ui.components.ConfirmDialog
 import com.favkit.tablet.ui.components.FavColors
+import com.favkit.tablet.ui.components.FloatingNotice
 import com.favkit.tablet.ui.components.StatusPill
 import com.favkit.tablet.ui.components.TabletTagChip
 import com.favkit.tablet.ui.components.TabletTextField
@@ -147,7 +148,8 @@ private val FEED_BOTTOM_SCRIM = Brush.verticalGradient(
  * - 这一层自己就是全屏 —— 进层把系统栏一起隐掉（见 MainScreen 的 `ImmersiveWhileFocused`），
  *   所以画面不再分「内嵌」与「全屏」两种形态，也不再单独给图片或视频一个 ⛶：
  *   画面铺满整屏，图片与视频一律 Fit 完整显示、不裁切，横竖屏同一条路径。
- * - 段号角标 / 标题 / 作者 / 文案连「详情」入口与播放条一起叠在画面底部，跟着控制层显隐：
+ * - 段号角标 / 标题 / 作者 / 文案连「详情」入口与播放条一起叠在画面底部，跟着控制层显隐；
+ *   底部全局提示条也收进这一层，控制层收起时一起消失，不盖住视频/图片层：
  *   点画面唤出、再点收起（不做定时自动隐藏，拖进度拖到一半不会自己消失）。视频段正中另给一颗 ▶/⏸。
  * - 详情按「可用宽度 + 方向」挑容器：够宽且确实横着（平板横屏）从右侧拉出可用宽度 45% 的抽屉，
  *   其余（手机、平板竖屏）用底部三档抽屉（隐藏 · 半屏 · 96%）。两种都是模态的 ——
@@ -454,6 +456,7 @@ private fun FeedPage(
 ) {
     val player = state.player
     val segments = favorite.segments
+    val notice = noticeOf(state)
     val current = segments.getOrNull(focus.segmentIndex)
     // 图集段没有时间进度、也没有倍速可言：播放条与居中那颗键都只给视频段
     val isVideo = current != null && current.kind != MediaKind.IMAGE
@@ -523,6 +526,22 @@ private fun FeedPage(
                     ),
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
+                // 全局提示条收进控制层：控制层收起时它一起消失，不再常驻压在视频/图片上
+                notice?.let { currentNotice ->
+                    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        FloatingNotice(
+                            text = currentNotice.text,
+                            tint = currentNotice.tint,
+                            scale = scale,
+                            actionLabel = currentNotice.actionLabel,
+                            onAction = when (currentNotice.action) {
+                                NoticeAction.RETRY_SWEEP -> viewModel::retrySweep
+                                NoticeAction.RETRY_SYNC -> viewModel::retrySyncNow
+                                null -> null
+                            },
+                        )
+                    }
+                }
                 if (segments.isNotEmpty()) {
                     SegmentStrip(
                         segments = segments,
