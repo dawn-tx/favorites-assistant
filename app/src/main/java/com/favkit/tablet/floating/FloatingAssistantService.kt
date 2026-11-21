@@ -213,7 +213,10 @@ class FloatingAssistantService : Service() {
             size,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                // 半隐要把窗口摆到屏幕外一半。没有 NO_LIMITS 时系统会把 x 夹回 [0, 屏宽-球径]，
+                // 球拖到边上也只是整颗贴边停住，贴边收起永远不出现。
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START

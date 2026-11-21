@@ -8,6 +8,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startParserFixture } from './support/fixture-parser.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, '..', 'server.mjs');
@@ -15,6 +16,7 @@ const TEMP_DIR = 'G:/QoderWorkSpace/_temp_/mocktest';
 const PORT_SEGMENT = 4000;
 
 let child = null;
+let parser = null;
 let baseUrl = '';
 let tempDataFile = '';
 
@@ -65,15 +67,18 @@ before(async () => {
   const port = await pickFreePort(PORT_SEGMENT);
   baseUrl = `http://127.0.0.1:${port}/api/v1`;
   tempDataFile = path.join(TEMP_DIR, `data-${randomUUID().slice(0, 8)}.json`);
+  parser = startParserFixture({ delayMs: 50 }).server;
+  const parserPort = await new Promise((resolve) => {
+    parser.listen(0, '127.0.0.1', () => resolve(parser.address().port));
+  });
   child = spawn(process.execPath, [SERVER], {
     env: {
       ...process.env,
       HOST: '127.0.0.1',
       PORT: String(port),
       DATA_FILE: tempDataFile,
-      TRANSFER_MS: '50',
+      PARSE_SERVICE_URL: `http://127.0.0.1:${parserPort}/parse`,
       BACKUP_TIMEOUT_MS: '200',
-      MOCK_ORIGIN_BASE: 'http://127.0.0.1:1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -89,6 +94,7 @@ after(async () => {
       else child.once('exit', resolve);
     });
   }
+  if (parser) await new Promise((resolve) => parser.close(resolve));
   if (tempDataFile) rmSync(tempDataFile, { force: true });
 });
 

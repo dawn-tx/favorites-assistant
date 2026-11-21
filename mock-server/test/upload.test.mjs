@@ -9,6 +9,7 @@ import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startParserFixture } from './support/fixture-parser.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, '..', 'server.mjs');
@@ -17,6 +18,8 @@ const SLICE_BYTES = 65_536;
 
 let origin = null;
 let slicer = null;
+let parser = null;
+let parserUrl = '';
 let originBase = '';
 let main = null;
 let mainBase = '';
@@ -163,13 +166,12 @@ async function startMock({ maxHeight, dataFile, storeDir }) {
       PORT: String(port),
       DATA_FILE: dataFile,
       STORE_DIR: storeDir,
-      MOCK_ORIGIN_BASE: originBase,
+      PARSE_SERVICE_URL: parserUrl,
       SLICE_SERVICE_URL: `http://127.0.0.1:${slicer.address().port}/slice`,
       SLICE_RULE: JSON.stringify({ mode: 'size', bytes: SLICE_BYTES }),
       UPLOAD_MAX_HEIGHT: String(maxHeight),
       UPLOAD_MAX_ATTEMPTS: '2',
       UPLOAD_RETRY_MS: '50',
-      TRANSFER_MS: '10',
       BACKUP_TIMEOUT_MS: '2000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -224,8 +226,7 @@ async function waitUpload(dataFile, url, statuses = ['ready', 'partial', 'failed
 function videoGroups(assets) {
   const groups = new Map();
   for (const asset of assets.filter((item) => item.kind === 'video')) {
-    const match = /^video:(\d+):/.exec(asset.slot ?? '');
-    const key = match ? match[1] : '?';
+    const key = String(asset.video_index);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(asset);
   }
@@ -258,6 +259,9 @@ before(async () => {
   originBase = `http://127.0.0.1:${originPort}`;
   slicer = startSlicer();
   await listen(slicer);
+  parser = startParserFixture({ originBase }).server;
+  const parserPort = await listen(parser);
+  parserUrl = `http://127.0.0.1:${parserPort}/parse`;
 
   const id = randomUUID().slice(0, 8);
   mainData = path.join(TEMP_DIR, `data-upload-${id}.json`);
@@ -271,7 +275,7 @@ before(async () => {
 after(async () => {
   await stop(main);
   main = null;
-  for (const server of [origin, slicer]) {
+  for (const server of [origin, slicer, parser]) {
     if (server) await new Promise((resolve) => server.close(resolve));
   }
   if (mainData) rmSync(mainData, { force: true });

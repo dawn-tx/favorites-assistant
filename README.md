@@ -54,23 +54,24 @@ gradle wrapper --gradle-version 8.9          # 只需执行一次
 也可以走环境变量 `SYNC_ENDPOINT`（GitHub Actions 里就是 Repository variable `SYNC_ENDPOINT`）。
 传输层没有加密，所以不再需要往包里塞服务端公钥。
 
-## 三、本地 mock 同步服务
+## 三、后台参考实现（本地运行）
 
 只用 Node 内置模块，`npm install` 都不需要（Node 18+）：
 
 ```bash
-node mock-server/server.mjs     # 监听 0.0.0.0:8787/api/v1
+PARSE_SERVICE_URL=http://127.0.0.1:3001/parse node mock-server/server.mjs   # 监听 0.0.0.0:8787/api/v1
 ```
 
 - 协议是纯明文 JSON。数据接口：`POST /sync`（上传变更，回执通常还是 `pending`）、`GET /favorites`（分页取收藏）、`POST /favorites/lookup`（批量取内容）、`POST /resolve`（手动重解析）；媒体由免鉴权的 `GET /media/<key>.<ext>` 代理，源地址失效时自动回落存储备份。另有 `GET /health` / `GET /meta`。
   没有信封加密、没有 RSA 密钥，也**没有取解析结果的轮询接口** —— 解析是异步的：回执通常是 `pending`，内容靠对账与单条 `lookup` 取回。
   `GET /favorites` 按 `favorite_at` 倒序做 keyset 分页，App 侧本地表只是它的分页缓存。
 - 启动日志会列出本机所有非内部 IPv4 地址，平板照抄 `http://<电脑内网 IP>:8787/api/v1` 即可。
-- 标题、作者、站点、`summary` 与 `segments[]` 素材清单（封面、可播地址、时长、清晰度都在段上）由服务端按 url 哈希确定性生成（`resolver: mock-store`），
-  内联在每条收藏的 `media` 字段里：同一链接永远同一结果，四类构成（图+视频 / 纯图集 / 多段视频 / 单个视频）按哈希均匀出现，用来真跑一遍多素材展示链路。
+- 素材由外部解析服务（`PARSE_SERVICE_URL`）返回；后台的 [resolver.mjs](mock-server/resolver.mjs) 只负责把它的原始结果提取/校验成内部模型，
+  之后只做选档、切片、上传与代理。测试用 [fixture-parser.mjs](mock-server/test/support/fixture-parser.mjs) 桩解析服务返回夹具素材。
   每个视频按 `UPLOAD_MAX_HEIGHT` 选一档（播放与上传共用；没有可达档则取最小的范围外档），选中视频超过片大小才调远程切片服务（`SLICE_SERVICE_URL`），否则整片。
   所有素材（片/整片/图片/封面）都有后台的相对虚拟地址，由后台代理；key 里带内容版本，改切片/源后地址随之变化。上传把同一批 asset 逐条传到存储并拿 id。
-  App 不需要自己猜标题；数据落在 `mock-server/data.json`。
+  切片的 `init`/区间按 `SLICE_INFO_TTL_MS` 当缓存清理：已有备份且空闲的会被删掉，代理时按 slot 索引重新向切片服务补取；段地址、时长与备份不受影响。
+  标题与说明由解析服务提供；数据落在 `mock-server/data.json`。
 - 服务默认监听 `0.0.0.0`，同一局域网内任何设备都能访问，只适合内网调试，不要暴露到公网。
 - **真机连不上先看这三条**：
   1. Windows 防火墙默认拦 8787 入站，管理员 PowerShell 放行一次即可：
@@ -101,7 +102,7 @@ app/src/main/java/com/favkit/tablet/
     ├── main/                  自适应主界面：VideoWall / VideoCard / FocusOverlay（聚焦遮罩层）/ FilterSheet（筛选抽屉）+ MainViewModel
     └── settings/              SettingsSheet
 
-mock-server/                   本地 mock 同步服务（明文协议 + 确定性假解析 + 媒体代理/备份）
+mock-server/                   后台参考实现（明文协议 + 解析服务适配 + 媒体代理/备份）
 .github/workflows/             云端构建 APK
 .github/BUILD_TRIGGER          构建开关：改它才会重新出包
 docs/                          使用说明、架构与性能验证、同步后台接口说明（唯一协议口径，含另一个 App 的回调接入）

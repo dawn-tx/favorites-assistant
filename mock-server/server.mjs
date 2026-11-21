@@ -26,6 +26,7 @@ import { once } from 'node:events';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
+import { resolveMedia } from './resolver.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const HOST = process.env.HOST ?? '0.0.0.0';
@@ -43,28 +44,34 @@ const MAX_BODY = 4 * 1024 * 1024;
  */
 const INGEST_PATH = (process.env.INGEST_PATH ?? '/ingest/callback').replace(/\/+$/, '');
 const INGEST_SOURCE_APP = process.env.INGEST_SOURCE_APP ?? '第三方';
-/** 转存任务：模拟「解析 → 下载 → 切片 → 上传存储」的耗时，mock 用这个值模拟 */
-const TRANSFER_MS = positiveInt(process.env.TRANSFER_MS, 1500);
 const TRANSFER_MAX_ATTEMPTS = positiveInt(process.env.TRANSFER_MAX_ATTEMPTS, 3);
 const TRANSFER_RETRY_MS = positiveInt(process.env.TRANSFER_RETRY_MS, 2000);
 /**
  * 远程切片服务（POST /api/mp4/parse）。留空时不做真切片，长视频降级为整片一段，
  * 仍然走同一条虚拟地址与代理链路。
  */
+const PARSE_SERVICE_URL = process.env.PARSE_SERVICE_URL ?? '';
 const SLICE_SERVICE_URL = process.env.SLICE_SERVICE_URL ?? '';
 const SLICE_TIMEOUT_MS = positiveInt(process.env.SLICE_TIMEOUT_MS, 60_000);
+/**
+ * 切片信息（init/区间）是派生缓存：写库后按 last_used_at 保留，已有备份且空闲超过 TTL 的清掉；
+ * 代理命中被清掉的片时，按 slice_index 重新向切片服务补取。没有备份的片不清理 —— 上传还要用。
+ */
+const SLICE_INFO_TTL_MS = positiveInt(process.env.SLICE_INFO_TTL_MS, 30 * 24 * 60 * 60 * 1000);
+const SLICE_INFO_CLEANUP_MS = positiveInt(process.env.SLICE_INFO_CLEANUP_MS, 60 * 60 * 1000);
+const SLICE_INFO_TOUCH_MS = positiveInt(process.env.SLICE_INFO_TOUCH_MS, 10 * 60 * 1000);
 /** 默认切片规则；App 可以在 UPSERT / resolve 里按行覆盖 */
 const DEFAULT_SLICE_RULE = parseSliceRule(safeJson(process.env.SLICE_RULE)) ?? { mode: 'size', bytes: 2_000_000, align: 'keyframe' };
 /** 虚拟地址 key 的派生密钥。为空时退化为确定性哈希；公网部署建议配置 */
 const MEDIA_KEY_SECRET = process.env.MEDIA_KEY_SECRET ?? '';
 /** 备份落盘目录：真实后台把它换成存储服务器的上传 */
 const STORE_DIR = process.env.STORE_DIR ?? join(ROOT, 'store');
-/** 测试/离线联调时把生成的源地址指向本地夹具源站 */
-const ORIGIN_BASE = (process.env.MOCK_ORIGIN_BASE ?? '').replace(/\/+$/, '');
 const SOURCE_PROBE_MS = positiveInt(process.env.SOURCE_PROBE_MS, 2_500);
 const SOURCE_CHECK_TTL_MS = positiveInt(process.env.SOURCE_CHECK_TTL_MS, 60_000);
 const BACKUP_TIMEOUT_MS = positiveInt(process.env.BACKUP_TIMEOUT_MS, 30_000);
 const BACKUP_MAX_BYTES = positiveInt(process.env.BACKUP_MAX_BYTES, 64 * 1024 * 1024);
+/** 虚拟 key 里带内容版本：同一媒体地址的字节不会变，可长期缓存；错误响应仍 no-store */
+const MEDIA_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 /**
  * 上传筛选：每个视频只选一档。取高度不超过该值的最高档；没有就取最小档。
  * 与播放选档无关，播放/代理那套先不动。
@@ -117,8 +124,9 @@ function parseSliceRule(raw) {
  *   favorites: { [url]: { url, note, tags, source_app, favorite_at, updated_at,
  *                         media{title,author,site,summary}, media_state, failed_reason,
  *                         resolved_at, slice_rule, asset_keys, upload_state } }
- *   assets: { [虚拟 key]: { favorite, slot, kind, title, quality, duration_ms, cover_key,
- *                            source_url, etag, file_size, slice, store_id, error } }
+ *   assets: { [虚拟 key]: { favorite, kind, video_index, slice_index, image_index,
+ *                            title, quality, duration_ms, cover_key, source_url, etag,
+ *                            file_size, slice, store_id, error, last_used_at, slice_cleaned } }
  *   jobs: [ { url, kind: 'parse'|'upload', attempts, next_at } ]   单线程队列
  *
  * 一条段只有一份记录：App 展示、上传、代理都读 assets。封面也是一条 kind=cover 的 asset。
@@ -132,11 +140,16 @@ function loadData() {
   try {
     const parsed = JSON.parse(readFileSync(DATA_FILE, 'utf8'));
     const base = emptyState();
-    return {
-      favorites: parsed.favorites && typeof parsed.favorites === 'object' ? parsed.favorites : base.favorites,
-      assets: parsed.assets && typeof parsed.assets === 'object' ? parsed.assets : base.assets,
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : base.jobs,
-    };
+    const favorites = parsed.favorites && typeof parsed.favorites === 'object' ? parsed.favorites : base.favorites;
+    const assets = parsed.assets && typeof parsed.assets === 'object' ? parsed.assets : base.assets;
+    const jobs = Array.isArray(parsed.jobs) ? parsed.jobs : base.jobs;
+    // 旧数据没有 last_used_at：按这条收藏的解析时刻补一次，避免升级后第一次清理就把所有片都当成空闲
+    for (const asset of Object.values(assets)) {
+      if (typeof asset.last_used_at === 'number') continue;
+      const row = favorites[asset.favorite];
+      asset.last_used_at = Number(row?.resolved_at) || Number(row?.updated_at) || Date.now();
+    }
+    return { favorites, assets, jobs };
   } catch (error) {
     console.error(`读取 ${DATA_FILE} 失败，从空库开始：${error.message}`);
     return emptyState();
@@ -194,6 +207,38 @@ function flushData() {
   writeState();
 }
 
+/**
+ * 媒体请求算一次使用，清理按它判断空闲。合并成 10 分钟一次写盘：
+ * 播放器一次播放会发很多 Range 请求，逐条落盘纯属浪费。
+ */
+function touchAsset(asset, now = Date.now()) {
+  if (!asset || now - (asset.last_used_at ?? 0) < SLICE_INFO_TOUCH_MS) return;
+  asset.last_used_at = now;
+  saveData();
+}
+
+/**
+ * 只清已经有备份的片：没有 store_id 的片上传任务还要用它，不能动。
+ * 清掉的是 init 与区间，保留 key/位置字段/时长/store_id —— App 的段列表和备份回落都不受影响。
+ */
+function cleanupSliceInfos(now = Date.now()) {
+  let cleaned = 0;
+  for (const asset of Object.values(state.assets)) {
+    if (!asset.slice || !asset.store_id) continue;
+    if (now - (asset.last_used_at ?? 0) < SLICE_INFO_TTL_MS) continue;
+    delete asset.slice;
+    asset.slice_cleaned = true;
+    cleaned += 1;
+  }
+  if (cleaned > 0) {
+    console.log(`清理空闲切片信息：${cleaned} 条`);
+    saveData();
+  }
+  return cleaned;
+}
+
+setInterval(() => cleanupSliceInfos(), SLICE_INFO_CLEANUP_MS).unref();
+
 // ---------- HTTP 基座 ----------
 
 class HttpError extends Error {
@@ -247,67 +292,21 @@ function rejectUnauthorized(res) {
 
 // ---------- 内容解析与转存 ----------
 
-const SITE_NAMES = [
-  ['bilibili', '哔哩哔哩'],
-  ['douyin', '抖音'],
-  ['youtube', 'YouTube'],
-  ['vimeo', 'Vimeo'],
-  ['dailymotion', 'Dailymotion'],
-];
-const AUTHORS = ['阿茶', '老周', '小林同学', '夜航星', '橘子汽水', '慢慢看', '山城阿甘'];
-// 不要修改这几个测试地址
-const PLAY_URLS = [
-  'http://192.168.1.33:9200/test/xgplayer-demo-360p.mp4',
-  'http://192.168.1.33:9200/test/cyberplayer-demo.mp4',
-  'http://192.168.1.33:9200/test/xgplayer-demo-360p.mp4',
-  'http://192.168.1.33:9200/test/cyberplayer-demo.mp4',
-];
-// 说明文案的后半句：让 mock 像真的读懂了内容，而不是只拼了个素材数量。
-// 分池是因为「纯图集」不能配「先看视频」这种话 —— App 现在把这句话当内容主体展示。
-const SUMMARY_HINTS = {
-  mixed: [
-    '先看视频再对照第 2 张图的参数逐项改',
-    '视频是过程，图片是整理前后的定妆照',
-    '图 1 是总览，其余按视频里的顺序展开',
-    '视频讲完会给一张清单图，可以照着核对',
-  ],
-  images: [
-    '地图在第一张，其余都是沿途实拍',
-    '每张图片对应一种配方，比例标在右侧',
-    '最后一张是清单，可以照着核对',
-    '第 2 到第 4 张是同一处景的三种参数',
-    '按由近到远排，最后一张是全景',
-    '只看第 1 张和第 5 张就够，其余是细节',
-  ],
-  videos: [
-    '顺序由浅入深，最后一段是错题示范',
-    '没有解说，建议佩戴耳机看',
-    '第一段是全程录屏，后面几段是分步讲解',
-    '每段各对应一个场景，可以直接跳到需要的那段',
-  ],
-  single: [
-    '全程录屏，可以直接从第 1 分钟开始看',
-    '有解说，前 30 秒是成品展示',
-    '结尾有小结，赶时间可以只看最后两段',
-  ],
-};
-
-/** 素材构成（图＋视频 / 纯图集 / 多段视频 / 单视频），只由 url 哈希决定 */
-function compositionOf(slot) {
-  const shape = slot % 10;
-  if (shape <= 3) return { images: 1 + (slot % 4), videos: 1 + (slot % 2) };
-  if (shape <= 6) return { images: 1 + (slot % 12), videos: 0 };
-  if (shape <= 8) return { images: 0, videos: 2 + (slot % 3) };
-  return { images: 0, videos: 1 };
+/**
+ * 资产身份只由后台归一化的位置决定：kind + video_index + slice_index + image_index。
+ * 解析服务的原始字段/顺序变化不会把身份变成另一套字符串。
+ */
+function assetIdentity(asset) {
+  return `${asset.kind}:${asset.video_index ?? '-'}:${asset.slice_index ?? '-'}:${asset.image_index ?? '-'}`;
 }
 
 /**
- * 虚拟 key = HMAC(归一化收藏 url | 段位置 | 内容版本)。
+ * 虚拟 key = HMAC(归一化收藏 url | 资产身份 | 内容版本)。
  * 内容版本见 contentVersion：切片边界/分辨率档/源/解析结果一变，地址就变；
  * 完全相同的解析结果重放时地址稳定，App 缓存继续命中。
  */
-function mediaKey(seedUrl, slot, version) {
-  const input = `${normalizeCacheKey(seedUrl)}|${slot}|${version ?? ''}`;
+function mediaKey(seedUrl, identity, version) {
+  const input = `${normalizeCacheKey(seedUrl)}|${identity}|${version ?? ''}`;
   const hex = MEDIA_KEY_SECRET
     ? createHmac('sha256', MEDIA_KEY_SECRET).update(input).digest('hex')
     : createHash('sha256').update(input).digest('hex');
@@ -325,41 +324,6 @@ function segmentExt(kind) {
 
 function storeFile(key, kind) {
   return join(STORE_DIR, `${key}${segmentExt(kind)}`);
-}
-
-function originPath(kind, name) {
-  return `${ORIGIN_BASE}/${kind}-${name}${segmentExt(kind)}`;
-}
-
-/** mock 模拟的清晰度档位：每个档一条链接，没有同分辨率多镜像 */
-const VIDEO_QUALITY_TIERS = [
-  { quality: '1080P', height: 1080 },
-  { quality: '720P', height: 720 },
-  { quality: '480P', height: 480 },
-];
-
-function videoVariantUrl(slot, i, height, hash) {
-  if (ORIGIN_BASE) return originPath('video', `${hash.slice(0, 6)}-${i}-${height}`);
-  // 没有独立源站时各档共用同一条测试片：mock 造不出真实的不同分辨率文件
-  return PLAY_URLS[(slot + i) % PLAY_URLS.length];
-}
-
-function videoVariants(slot, i, hash) {
-  return VIDEO_QUALITY_TIERS.map((tier) => ({
-    quality: tier.quality,
-    height: tier.height,
-    url: videoVariantUrl(slot, i, tier.height, hash),
-  }));
-}
-
-function coverSourceUrl(seed, i) {
-  if (ORIGIN_BASE) return originPath('cover', `${seed}-${i}`);
-  return `https://picsum.photos/seed/${seed}-v${i}/640/360`;
-}
-
-function imageSourceUrl(seed, i) {
-  if (ORIGIN_BASE) return originPath('image', `${seed}-${i}`);
-  return `https://picsum.photos/seed/${seed}-i${i}/1280/720`;
 }
 
 /**
@@ -493,7 +457,7 @@ function assetFingerprint(asset) {
 
 /** 整条收藏一个内容版本：内容版本进虚拟 key，同内容重放地址稳定 */
 function contentVersion(assets) {
-  const parts = assets.map((asset) => `${asset.slot}|${asset.kind}|${assetFingerprint(asset)}`).sort();
+  const parts = assets.map((asset) => `${assetIdentity(asset)}|${assetFingerprint(asset)}`).sort();
   return createHash('sha1').update(parts.join('\n')).digest('hex').slice(0, 12);
 }
 
@@ -505,7 +469,6 @@ function contentVersion(assets) {
  */
 async function parseMedia(row) {
   const url = row.url;
-  const hash = createHash('sha1').update(String(url)).digest('hex');
   const resolvedAt = Date.now();
 
   let host = '';
@@ -532,36 +495,36 @@ async function parseMedia(row) {
     };
   }
 
-  const site = SITE_NAMES.find(([key]) => host.includes(key))?.[1] ?? host;
-  const slot = parseInt(hash.slice(6, 10), 16);
-  const author = AUTHORS[slot % AUTHORS.length];
-  const seed = hash.slice(0, 8);
+  // 解析服务只给最小集合；这里只做编排：选档 → 探活/切片 → 建 assets
+  const resolved = await resolveMedia(url);
   const rule = parseSliceRule(row.slice_rule) ?? DEFAULT_SLICE_RULE;
   const sliceBytes = Number.isFinite(rule?.bytes) && rule.bytes > 0 ? rule.bytes : DEFAULT_SLICE_RULE.bytes;
   const sliceRule = { mode: 'size', bytes: sliceBytes, align: 'keyframe' };
-  const { images, videos } = compositionOf(slot);
   const drafts = [];
+  const videos = Array.isArray(resolved.videos) ? resolved.videos : [];
 
-  // 视频：选一档 → 探体积 → 切片/整片；封面跟随视频，一起进 assets
-  for (let i = 0; i < videos; i += 1) {
-    const baseTitle = `${site}视频 ${i + 1}`;
-    const variants = videoVariants(slot, i, hash);
-    const { variant, probe } = await pickReachableVariant(variants);
-    const coverSlot = `cover:${i}`;
-    drafts.push({
-      slot: coverSlot,
-      kind: 'cover',
-      title: '',
-      quality: '',
-      duration_ms: 0,
-      coverSlot: '',
-      source_url: coverSourceUrl(seed, i),
-      etag: '',
-      file_size: 0,
-      slice: null,
-    });
+  for (let i = 0; i < videos.length; i += 1) {
+    const video = videos[i];
+    const baseTitle = video.title || `视频 ${i + 1}`;
+    const coverId = video.cover_url ? `cover:${i}:-:-` : '';
+    if (video.cover_url) {
+      drafts.push({
+        kind: 'cover',
+        video_index: i,
+        slice_index: null,
+        image_index: null,
+        title: '',
+        quality: '',
+        duration_ms: 0,
+        coverId: '',
+        source_url: video.cover_url,
+        etag: '',
+        file_size: 0,
+        slice: null,
+      });
+    }
 
-    const nominalMs = 60_000 + (slot * (i + 3)) % 1_740_000;
+    const { variant, probe } = await pickReachableVariant(video.variants);
     let sourceUrl = variant.url;
     let etag = probe.etag;
     let fileSize = probe.size;
@@ -583,12 +546,14 @@ async function parseMedia(row) {
     if (slices) {
       slices.forEach((part, j) => {
         drafts.push({
-          slot: `video:${i}:${j}`,
           kind: 'video',
+          video_index: i,
+          slice_index: j,
+          image_index: null,
           title: slices.length > 1 ? `${baseTitle} · ${j + 1}` : baseTitle,
-          quality: variant.quality,
-          duration_ms: part.duration_ms || nominalMs,
-          coverSlot,
+          quality: variant.quality ?? '',
+          duration_ms: part.duration_ms || video.duration_ms || 0,
+          coverId,
           source_url: sourceUrl,
           etag,
           file_size: fileSize,
@@ -604,12 +569,14 @@ async function parseMedia(row) {
       });
     } else {
       drafts.push({
-        slot: `video:${i}:0`,
         kind: 'video',
+        video_index: i,
+        slice_index: null,
+        image_index: null,
         title: baseTitle,
-        quality: variant.quality,
-        duration_ms: nominalMs,
-        coverSlot,
+        quality: variant.quality ?? '',
+        duration_ms: video.duration_ms || 0,
+        coverId,
         source_url: sourceUrl,
         etag,
         file_size: fileSize,
@@ -618,55 +585,75 @@ async function parseMedia(row) {
     }
   }
 
-  // 图片全部保留
-  for (let i = 0; i < images; i += 1) {
+  const images = Array.isArray(resolved.images) ? resolved.images : [];
+  for (let i = 0; i < images.length; i += 1) {
     drafts.push({
-      slot: `image:${i}`,
       kind: 'image',
-      title: `图 ${i + 1}`,
+      video_index: null,
+      slice_index: null,
+      image_index: i,
+      title: images[i].title || `图 ${i + 1}`,
       quality: '',
       duration_ms: 0,
-      coverSlot: '',
-      source_url: imageSourceUrl(seed, i),
+      coverId: '',
+      source_url: images[i].url,
       etag: '',
       file_size: 0,
       slice: null,
     });
   }
 
+  const site = resolved.site || host;
+  if (drafts.length === 0) {
+    return {
+      media: {
+        title: resolved.title || site,
+        author: resolved.author || '',
+        site,
+        summary: resolved.summary || '',
+        failed_reason: '解析服务没有返回可用素材',
+        resolved_at: resolvedAt,
+      },
+      assets: [],
+      assetKeys: [],
+    };
+  }
+
   // 内容版本 → 统一生成 key；封面排最后，渲染时过滤
   const version = contentVersion(drafts);
-  const keyBySlot = new Map(drafts.map((draft) => [draft.slot, mediaKey(url, draft.slot, version)]));
+  const keyById = new Map(drafts.map((draft) => [assetIdentity(draft), mediaKey(url, assetIdentity(draft), version)]));
   const assets = drafts.map((draft) => ({
-    key: keyBySlot.get(draft.slot),
+    key: keyById.get(assetIdentity(draft)),
     favorite: url,
-    slot: draft.slot,
     kind: draft.kind,
+    video_index: draft.video_index,
+    slice_index: draft.slice_index,
+    image_index: draft.image_index,
     title: draft.title,
     quality: draft.quality,
     duration_ms: draft.duration_ms,
-    cover_key: draft.coverSlot ? keyBySlot.get(draft.coverSlot) : '',
+    cover_key: draft.coverId ? keyById.get(draft.coverId) ?? '' : '',
     source_url: draft.source_url,
     etag: draft.etag,
     file_size: draft.file_size,
     slice: draft.slice,
     store_id: '',
     error: '',
+    last_used_at: resolvedAt,
   }));
   const ordered = [
     ...drafts.filter((draft) => draft.kind !== 'cover'),
     ...drafts.filter((draft) => draft.kind === 'cover'),
   ];
-  const bySlot = new Map(assets.map((asset) => [asset.slot, asset]));
-  const assetsOrdered = ordered.map((draft) => bySlot.get(draft.slot));
+  const byId = new Map(assets.map((asset) => [assetIdentity(asset), asset]));
+  const assetsOrdered = ordered.map((draft) => byId.get(assetIdentity(draft)));
   const display = assetsOrdered.filter((asset) => asset.kind !== 'cover');
-  const firstVideo = display.find((asset) => asset.kind === 'video');
   return {
     media: {
-      title: `${site}${firstVideo ? '视频' : '图集'} · ${hash.slice(0, 6)}`,
-      author,
+      title: resolved.title || fallbackTitle(site, display),
+      author: resolved.author || '',
       site,
-      summary: buildSummary(display, author, hash),
+      summary: resolved.summary || fallbackSummary(display),
       failed_reason: '',
       resolved_at: resolvedAt,
     },
@@ -675,27 +662,22 @@ async function parseMedia(row) {
   };
 }
 
-function buildSummary(media, author, hash) {
-  const videos = media.filter((item) => item.kind === 'video');
-  const images = media.filter((item) => item.kind === 'image');
-  const minutes = Math.max(1, Math.round(videos.reduce((sum, item) => sum + item.duration_ms, 0) / 60_000));
-
-  let shape;
-  if (images.length && videos.length) shape = 'mixed';
-  else if (videos.length > 1) shape = 'videos';
-  else if (videos.length === 1) shape = 'single';
-  else shape = 'images';
-
-  const lead = {
-    mixed: `共 ${images.length} 张图 + ${videos.length} 段视频（合计约 ${minutes} 分钟）`,
-    videos: `共 ${videos.length} 段视频，合计约 ${minutes} 分钟`,
-    single: `1 段视频，约 ${minutes} 分钟`,
-    images: images.length === 1 ? '1 张图' : `共 ${images.length} 张图`,
-  }[shape];
-  const pool = SUMMARY_HINTS[shape];
-  const hint = pool[parseInt(hash.slice(20, 24), 16) % pool.length];
-  return `${lead}：${hint}${author ? `（${author}）` : ''}。`;
+function fallbackTitle(site, display) {
+  const firstVideo = display.find((asset) => asset.kind === 'video');
+  const firstImage = display.find((asset) => asset.kind === 'image');
+  return firstVideo?.title || firstImage?.title || site;
 }
+
+/** 解析服务没给说明时只报事实数量，不编内容 */
+function fallbackSummary(display) {
+  const videos = display.filter((asset) => asset.kind === 'video');
+  const images = display.filter((asset) => asset.kind === 'image');
+  const parts = [];
+  if (videos.length > 0) parts.push(`${videos.length} 段视频`);
+  if (images.length > 0) parts.push(`${images.length} 张图片`);
+  return parts.length > 0 ? parts.join(' · ') : '暂无可用素材';
+}
+
 
 /**
  * 归一化口径（只用于缓存键，不改变传给解析器的原文）：
@@ -751,7 +733,6 @@ async function runParseJob(job) {
     return; // 等解析期间被删了，任务作废
   }
 
-  await sleep(TRANSFER_MS);
   try {
     const result = await parseMedia(row);
     if (result.media.failed_reason) throw new Error(result.media.failed_reason);
@@ -813,7 +794,7 @@ async function runUploadJob(job) {
       done += 1;
     } catch (error) {
       asset.error = error.message;
-      console.warn(`上传失败 ${job.url} ${asset.kind}#${asset.slot}: ${error.message}`);
+      console.warn(`上传失败 ${job.url} ${assetIdentity(asset)}: ${error.message}`);
     }
     saveData();
   }
@@ -878,10 +859,6 @@ function removeFile(file) {
   } catch (error) {
     console.warn(`删除上传文件失败 ${file}: ${error.message}`);
   }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** 让一条收藏进入某个队列：同 url 同类型已有任务就不重复排 */
@@ -1174,7 +1151,7 @@ function sendFileRange(req, res, file, contentType) {
     'content-type': contentType,
     'content-length': String(end - start + 1),
     'accept-ranges': 'bytes',
-    'cache-control': 'no-store',
+    'cache-control': MEDIA_CACHE_CONTROL,
   };
   if (range) headers['content-range'] = `bytes ${start}-${end}/${size}`;
   res.writeHead(range ? 206 : 200, headers);
@@ -1214,7 +1191,7 @@ async function proxySource(req, res, source) {
   const out = {
     'content-type': upstream.headers.get('content-type') || mediaType(source),
     'accept-ranges': 'bytes',
-    'cache-control': 'no-store',
+    'cache-control': MEDIA_CACHE_CONTROL,
   };
   for (const name of ['content-length', 'content-range', 'etag', 'last-modified']) {
     const value = upstream.headers.get(name);
@@ -1292,7 +1269,7 @@ async function serveSliceFromSource(req, res, source) {
     'content-type': 'video/mp4',
     'content-length': String(end - start + 1),
     'accept-ranges': 'bytes',
-    'cache-control': 'no-store',
+    'cache-control': MEDIA_CACHE_CONTROL,
   };
   if (range) headers['content-range'] = `bytes ${start}-${end}/${total}`;
   res.writeHead(range ? 206 : 200, headers);
@@ -1315,19 +1292,78 @@ async function serveSliceFromSource(req, res, source) {
   return true;
 }
 
+/**
+ * 切片服务单飞：同一「源地址 + 规则」的并发补取共用一次解析。
+ * 一个视频被清理后，播放器连发的多个 Range 不能各自去解析一遍。
+ */
+const sliceFetchInflight = new Map();
+
+function fetchSlicesShared(sourceUrl, rule) {
+  const key = `${sourceUrl}\u0000${rule.mode}:${rule.bytes ?? rule.seconds ?? ''}`;
+  let pending = sliceFetchInflight.get(key);
+  if (!pending) {
+    pending = fetchSlices(sourceUrl, rule).finally(() => sliceFetchInflight.delete(key));
+    sliceFetchInflight.set(key, pending);
+  }
+  return pending;
+}
+
+/**
+ * 被清理过的片按 slice_index 补回 init/区间。
+ * 源站已失效时不会走到这里（直接回落备份）；切片服务失败也返回 false，由调用方回落备份。
+ */
+async function ensureSliceInfo(asset) {
+  if (!asset || asset.slice || !asset.slice_cleaned) return true;
+  const index = Number(asset.slice_index);
+  if (!Number.isInteger(index) || index < 0) return false;
+  const row = state.favorites[asset.favorite];
+  const rule = parseSliceRule(row?.slice_rule) ?? DEFAULT_SLICE_RULE;
+  let sliced;
+  try {
+    sliced = await fetchSlicesShared(asset.source_url, rule);
+  } catch (error) {
+    console.warn(`补取切片信息失败 ${asset.key}：${error.message}`);
+    return false;
+  }
+  const part = sliced?.slices?.[index];
+  if (!part) {
+    console.warn(`补取切片信息失败 ${asset.key}：切片服务没有第 ${index} 片`);
+    return false;
+  }
+  asset.slice = {
+    start: part.start,
+    end: part.end,
+    media_size: part.media_size,
+    init_base64: part.init_base64,
+    init_sha1: part.init_sha1,
+    duration_ms: part.duration_ms,
+  };
+  asset.slice_cleaned = false;
+  asset.last_used_at = Date.now();
+  saveData();
+  console.log(`已补回切片信息：${asset.key}`);
+  return true;
+}
+
 async function handleMedia(req, res, relativePath) {
   const match = /^\/media\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
   if (!match) return sendMediaError(req, res, 404, '未知的素材地址');
   const source = state.assets[match[1]];
   if (!source) return sendMediaError(req, res, 404, '素材地址不存在或已过期');
 
+  touchAsset(source);
+
   if (await assetSourceAlive(source)) {
-    const served = source.slice
-      ? await serveSliceFromSource(req, res, source)
-      : await proxySource(req, res, source);
-    if (served) return;
-    if (res.destroyed) return;
-    console.log(`源地址失效，改用备份：${source.key}`);
+    if (await ensureSliceInfo(source)) {
+      const served = source.slice
+        ? await serveSliceFromSource(req, res, source)
+        : await proxySource(req, res, source);
+      if (served) return;
+      if (res.destroyed) return;
+      console.log(`源地址失效，改用备份：${source.key}`);
+    } else {
+      console.log(`切片信息补取失败，改用备份：${source.key}`);
+    }
   }
 
   const file = storeFile(source.key, source.kind);
@@ -1355,7 +1391,7 @@ const server = createServer(async (req, res) => {
         pending: rows.filter((row) => row.media_state === 'pending').length,
         failed: rows.filter((row) => row.media_state === 'failed').length,
         jobs: state.jobs.length,
-        resolver: 'mock-store',
+        resolver: 'parser+store',
       });
       return;
     }
@@ -1373,17 +1409,24 @@ const server = createServer(async (req, res) => {
         next_wait_ms: UPLOAD_WAIT_MS,
         next_wait_jitter_ms: UPLOAD_WAIT_JITTER_MS,
         resolver: {
-          name: 'mock-store',
-          deterministic_by_url: true,
-          note: '解析结果按收藏 url 生成；每个视频选一档并可选切片；media 就绪不等上传',
+          name: 'parser-service',
+          parser_service: PARSE_SERVICE_URL ? 'remote' : 'none',
+          note: '素材由解析服务返回，后台只做提取/选档/切片/代理；media 就绪不等上传',
         },
         media_url_style: 'relative-to-endpoint',
         media_path: 'media/<key>.<ext>',
         media_path_note: '段地址是 /media/<key>.<ext>，相对的是接口地址（含 BASE_PATH），App 负责拼接',
         media_requires_auth: false,
+        media_cache_control: MEDIA_CACHE_CONTROL,
         ready_on_parse: true,
         slice_rule: DEFAULT_SLICE_RULE,
         slice_service: SLICE_SERVICE_URL ? 'remote' : 'builtin-none',
+        slice_info_cache: {
+          ttl_ms: SLICE_INFO_TTL_MS,
+          cleanup_ms: SLICE_INFO_CLEANUP_MS,
+          touch_ms: SLICE_INFO_TOUCH_MS,
+          note: '切片的 init 与区间是派生缓存：已有备份且空闲超过 ttl 的清掉，代理时按索引重新向切片服务补取；没有备份的片不清理',
+        },
         upload: {
           max_height: UPLOAD_MAX_HEIGHT,
           max_attempts: UPLOAD_MAX_ATTEMPTS,
@@ -1635,7 +1678,9 @@ server.listen(PORT, HOST, () => {
   console.log(TOKEN ? '已开启 Bearer 校验：数据接口必须带 Authorization: Bearer <SYNC_TOKEN>' : '未开启 token 校验（SYNC_TOKEN 为空）');
   console.log(`媒体代理免鉴权: GET ${BASE_PATH}/media/<key>.<ext>（虚拟地址由不可猜 key 保护）`);
   console.log(`B 回调地址: POST ${BASE_PATH}${INGEST_PATH}（来源固定写「${INGEST_SOURCE_APP}」，只增不改）`);
-  console.log(`内容解析器：mock-store（解析耗时 ${TRANSFER_MS}ms，失败重试 ${TRANSFER_MAX_ATTEMPTS} 次）`);
+  console.log(PARSE_SERVICE_URL
+  ? `内容解析服务: ${PARSE_SERVICE_URL}（失败重试 ${TRANSFER_MAX_ATTEMPTS} 次）`
+  : '未配置 PARSE_SERVICE_URL：解析会失败，请接入真实解析服务');
   console.log(`上传筛选：每个视频取高度 ≤ ${UPLOAD_MAX_HEIGHT} 的最高档（没有则取最小档）；图片与封面全传；片大小取收藏上行 slice_rule.bytes，默认 ${DEFAULT_SLICE_RULE.bytes} 字节`);
   console.log(`上传重试：${UPLOAD_MAX_ATTEMPTS} 次，间隔 ${UPLOAD_RETRY_MS}ms；段与上传项 1:1`);
   console.log(SLICE_SERVICE_URL

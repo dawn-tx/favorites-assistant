@@ -9,13 +9,12 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 24
-code: 0902bca
-note: 修 #35 的回归并完成播放体验收尾：悬浮球启用闪退、播放进度去掉、上传时媒体代理卡顿。
-      一、悬浮球：#35 把 Compose 球包进 FrameLayout 后，窗口挂载时找不到 ViewTreeLifecycleOwner，
-      启用即闪退；在外层包装上补 lifecycle / ViewModelStore / SavedState owner。
-      二、播放进度：App 不再记录每段看到哪儿，也不写 lastSegmentIndex / segmentProgress；卡片进度条
-      与详情「上次看到」移除；DB 旧列保留但不写不读，避免动数据库版本。
-      三、播放卡顿：mock 上传时逐片同步写整个 data.json 与 2MB 分片，会把同进程的媒体代理堵住；
-      改为 80ms 合并写、rename 短重试、分片异步落盘，关键状态点立即 flush；App 播当前片时后台预取
-      下一片。实测空闲代理 Range p50 13ms、上传期间 p50 7ms / 最大 35ms。
+build: 25
+code: 57e0721
+note: 悬浮球贴边半隐补 FLAG_LAYOUT_NO_LIMITS；后台按生产形态接入外部解析服务。
+      一、悬浮球：窗口缺 FLAG_LAYOUT_NO_LIMITS 时系统会把 x 夹回屏幕内，贴边只能整颗停靠，
+      半隐永远不出现；补上后负 x / 越界 x 生效，松手可半隐成 12dp 窄边。
+      二、后台：解析服务 + resolver 适配，服务内不再造数；assets 去掉 slot，改用
+      kind/video_index/slice_index/image_index 身份；切片信息清理/补取/单飞；媒体成功响应可长缓存；
+      桩解析服务与造数只在 test/support，46 例通过。
+      后台改动不影响 /sync 协议面，APK 侧只有悬浮球这一处。

@@ -1,15 +1,16 @@
 // 媒体代理：虚拟地址、单片合成、Range 换算、源失效回落、地址稳定。
-// 夹具源站与桩切片服务都跑在测试进程里，mock 用 MOCK_ORIGIN_BASE / SLICE_SERVICE_URL 指过来。
+// 夹具源站、桩解析服务、桩切片服务都跑在测试进程里，server 用 PARSE_SERVICE_URL / SLICE_SERVICE_URL 指过来。
 //   "G:/frontend-toolkit/nodejs/node-versions/v24.22.2/installation/node.exe" --test mock-server/test/media.test.mjs
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hasVideo, startParserFixture } from './support/fixture-parser.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, '..', 'server.mjs');
@@ -28,6 +29,7 @@ const HALF = VIDEO.length / 2;
 let child = null;
 let origin = null;
 let slicer = null;
+let parser = null;
 let baseUrl = '';
 let originBase = '';
 let dataFile = '';
@@ -108,14 +110,6 @@ function upsert(url, sliceRule) {
     slice_rule: sliceRule,
     ops: [{ type: 'UPSERT', favorite: { url, note: '', tags: [], source_app: 'manual', favorite_at: Date.now() } }],
   });
-}
-
-/** 与 mock 的 compositionOf 同口径：只有非纯图集才会调切片服务 */
-function hasVideo(url) {
-  const hash = createHash('sha1').update(url).digest('hex');
-  const slot = parseInt(hash.slice(6, 10), 16);
-  const shape = slot % 10;
-  return shape <= 3 || shape > 6;
 }
 
 function originSize(pathname) {
@@ -202,6 +196,9 @@ before(async () => {
   slicer = startSlicer();
   const slicerPort = await listen(slicer);
 
+  parser = startParserFixture({ originBase }).server;
+  const parserPort = await listen(parser);
+
   const port = await pickFreePort(6000);
   baseUrl = `http://127.0.0.1:${port}/api/v1`;
   child = spawn(process.execPath, [SERVER], {
@@ -211,10 +208,9 @@ before(async () => {
       PORT: String(port),
       DATA_FILE: dataFile,
       STORE_DIR: storeDir,
-      MOCK_ORIGIN_BASE: originBase,
+      PARSE_SERVICE_URL: `http://127.0.0.1:${parserPort}/parse`,
       SLICE_SERVICE_URL: `http://127.0.0.1:${slicerPort}/slice`,
       SLICE_RULE: JSON.stringify({ mode: 'size', bytes: SLICE_BYTES }),
-      TRANSFER_MS: '10',
       SOURCE_CHECK_TTL_MS: '0',
       BACKUP_TIMEOUT_MS: '2000',
     },
@@ -231,7 +227,7 @@ before(async () => {
 after(async () => {
   await stop(child);
   child = null;
-  for (const server of [origin, slicer]) {
+  for (const server of [origin, slicer, parser]) {
     if (server) await new Promise((resolve) => server.close(resolve));
   }
   if (dataFile) rmSync(dataFile, { force: true });
@@ -271,6 +267,9 @@ test('单片代理：init 段 + 源文件区间拼成可播放 mp4', async () =>
   const res = await fetch(`${baseUrl}${segment.url}`);
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('accept-ranges'), 'bytes');
+  // 媒体 key 带内容版本，成功响应要能被 Coil/播放器长期缓存；no-store 会让图片三处各自回源
+  assert.match(res.headers.get('cache-control') ?? '', /max-age=/);
+  assert.notEqual(res.headers.get('cache-control'), 'no-store');
   const body = Buffer.from(await res.arrayBuffer());
   assert.deepEqual(body.subarray(0, INIT_A.length), INIT_A);
   assert.deepEqual(body.subarray(INIT_A.length), VIDEO.subarray(0, HALF));
@@ -318,6 +317,7 @@ test('图片与封面同样走代理', async () => {
   assert.ok(image, '至少应有一条图片段');
   const imageRes = await fetch(`${baseUrl}${image.url}`);
   assert.equal(imageRes.status, 200);
+  assert.match(imageRes.headers.get('cache-control') ?? '', /max-age=/);
   assert.equal(Buffer.from(await imageRes.arrayBuffer()).length, IMAGE.length);
 
   const video = await videoRow();

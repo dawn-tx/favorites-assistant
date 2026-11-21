@@ -11,6 +11,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startParserFixture } from './support/fixture-parser.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, '..', 'server.mjs');
@@ -19,6 +20,7 @@ const TEMP_DIR = 'G:/QoderWorkSpace/_temp_/mocktest';
 const PORT_SEGMENT = 3000;
 
 let child = null;
+let parser = null;
 let baseUrl = '';
 let tempDataFile = '';
 
@@ -84,11 +86,14 @@ before(async () => {
   const port = await pickFreePort(PORT_SEGMENT);
   baseUrl = `http://127.0.0.1:${port}/api/v1`;
   tempDataFile = path.join(TEMP_DIR, `data-${randomUUID().slice(0, 8)}.json`);
-  // 解析做得很快，测试不必为模拟耗时等太久；备份指向不可达源站，失败不影响 ready
+  // 桩解析服务返回指向不可达源站的素材：解析可 ready，探活/备份失败
+  parser = startParserFixture({ delayMs: 50 }).server;
+  const parserPort = await new Promise((resolve) => {
+    parser.listen(0, '127.0.0.1', () => resolve(parser.address().port));
+  });
   child = spawnServer(port, tempDataFile, {
-    TRANSFER_MS: '50',
+    PARSE_SERVICE_URL: `http://127.0.0.1:${parserPort}/parse`,
     BACKUP_TIMEOUT_MS: '200',
-    MOCK_ORIGIN_BASE: 'http://127.0.0.1:1',
   });
   await waitStartup(child);
 });
@@ -96,6 +101,7 @@ before(async () => {
 after(async () => {
   if (child) await stopServer(child);
   child = null;
+  if (parser) await new Promise((resolve) => parser.close(resolve));
   if (tempDataFile) rmSync(tempDataFile, { force: true });
 });
 
