@@ -783,10 +783,8 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun setPasteSuggestion(value: Boolean) = viewModelScope.launch { graph.settings.setPasteSuggestion(value) }
     fun setBallStatusBadge(value: Boolean) = viewModelScope.launch { graph.settings.setBallStatusBadge(value) }
     fun setUploadIntervalMs(value: Long) = viewModelScope.launch { graph.settings.setUploadIntervalMs(value) }
-    fun setSliceRuleMode(value: String) = viewModelScope.launch { graph.settings.setSliceRuleMode(value) }
     fun setSliceRuleSizeMb(value: Long) =
         viewModelScope.launch { graph.settings.setSliceRuleBytes(value * 1_000_000L) }
-    fun setSliceRuleSeconds(value: Long) = viewModelScope.launch { graph.settings.setSliceRuleSeconds(value) }
     fun setCacheLimitMb(value: Long) = viewModelScope.launch {
         graph.settings.setCacheLimitMb(value)
         // 改上限会重建 SimpleCache 实例，先释放播放器才不会打断正在读缓存的播放

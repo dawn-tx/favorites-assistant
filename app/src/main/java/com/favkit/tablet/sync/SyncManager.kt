@@ -46,6 +46,7 @@ class SyncManager(
     db: AppDatabase,
     private val favorites: FavoritesRepository,
     private val api: SyncApi,
+    private val connectivity: Connectivity,
 ) {
 
     private val appContext = context.applicationContext
@@ -106,8 +107,7 @@ class SyncManager(
     }
 
     init {
-        // 联网跳变即补传。仅注册回调、不轮询，无常驻定时器。
-        val connectivity = Connectivity(appContext)
+        // 联网跳变即补传。网络状态由 AppGraph 里共享的那一份提供，亮屏/回前台会主动重算。
         scope.launch {
             connectivity.onlineTransitions().collect { flush() }
         }

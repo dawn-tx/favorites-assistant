@@ -91,14 +91,13 @@ data class SyncRequest(
 )
 
 /**
- * 切片规则：只由 App 的设置页产生，切点由后台固定为关键帧对齐。
- * `size` 用 [bytes]，`duration` 用 [seconds]，另一个留空。
+ * 切片规则：只由 App 的设置页产生，只支持按大小，切点由后台固定为关键帧对齐。
+ * [bytes] 同时是“长视频”的判定阈值与每片的大小上限。
  */
 @Serializable
 data class SliceRuleDto(
     val mode: String,
     val bytes: Long? = null,
-    val seconds: Long? = null,
     val align: String = "keyframe",
 )
 

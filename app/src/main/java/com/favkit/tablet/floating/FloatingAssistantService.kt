@@ -14,7 +14,10 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,6 +39,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
  * 全局悬浮收藏助手。
@@ -71,6 +75,15 @@ class FloatingAssistantService : Service() {
     private var snap: ValueAnimator? = null
     private val clipboardBridge: ClipboardBridge by lazy { ClipboardBridge(this) }
 
+    /** 拖拽用屏幕绝对坐标：窗口跟着手指走时，视图内坐标会反向抵消掉窗口位移 */
+    private var dragStartRawX = 0f
+    private var dragStartRawY = 0f
+    private var dragStartX = 0
+    private var dragStartY = 0
+    private var dragging = false
+    private var wasHalfHidden = false
+    private val touchSlop by lazy { ViewConfiguration.get(this).scaledTouchSlop.toFloat() }
+
     /** 「打开面板时自动读取剪贴板」偏好，关掉后只能手动粘贴或用系统分享入口 */
     private var autoReadClipboard = true
 
@@ -81,6 +94,8 @@ class FloatingAssistantService : Service() {
     override fun onCreate() {
         super.onCreate()
         windows = getSystemService(WINDOW_SERVICE) as WindowManager
+        // 服务可能在熄屏后重启：先按当前网络重算一次在线状态
+        graph?.connectivity?.refresh()
         goForeground()
         addBall()
         ContextCompat.registerReceiver(
@@ -170,15 +185,21 @@ class FloatingAssistantService : Service() {
         }
         val size = TabletMetrics.ballSizePx(this)
         val host = OverlayHost(this)
-        val view = host.createView {
+        val content = host.createView {
             FloatingBall(
                 halfHidden = halfHidden,
                 badge = badge,
-                onMove = { dx, dy -> moveBall(dx, dy) },
-                onDragEnd = { snapToEdge() },
-                onClick = { if (halfHidden) expandBall() else openPanel(null) },
             )
         }
+        // Compose 子视图不参与命中：所有触摸由这层拦截，服务层用 raw 坐标改窗口位置
+        val view = TouchInterceptLayout(this) { event -> handleBallTouch(event) }
+        view.addView(
+            content,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val params = WindowManager.LayoutParams(
             size,
@@ -205,13 +226,54 @@ class FloatingAssistantService : Service() {
         halfHidden = isHalfHidden(params.x, size)
     }
 
-    private fun moveBall(dx: Float, dy: Float) {
-        val params = ballParams ?: return
-        if (halfHidden) expandBall()
-        params.x += dx.toInt()
-        params.y += dy.toInt()
-        clampBall(params)
-        runCatching { windows.updateViewLayout(ballView, params) }
+    /**
+     * 拖拽/点击都走这里：用 `rawX/rawY` 的屏幕位移改窗口坐标。
+     *
+     * 原来的 Compose 视图内坐标不能用：窗口本身在跟着手指移动，下一次事件的局部坐标会反向
+     * 变化，位移互相抵消，球看起来拖不动，也就永远到不了贴边半隐那一档。
+     */
+    private fun handleBallTouch(event: MotionEvent): Boolean {
+        val params = ballParams ?: return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                dragging = false
+                wasHalfHidden = halfHidden
+                dragStartRawX = event.rawX
+                dragStartRawY = event.rawY
+                dragStartX = params.x
+                dragStartY = params.y
+                return true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.rawX - dragStartRawX
+                val dy = event.rawY - dragStartRawY
+                if (!dragging && abs(dx) + abs(dy) > touchSlop) dragging = true
+                if (dragging) {
+                    if (wasHalfHidden) halfHidden = false
+                    params.x = (dragStartX + dx).toInt()
+                    params.y = (dragStartY + dy).toInt()
+                    clampBall(params)
+                    runCatching { windows.updateViewLayout(ballView, params) }
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_UP -> {
+                when {
+                    dragging -> snapToEdge()
+                    wasHalfHidden -> expandBall()
+                    else -> openPanel(null)
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                if (dragging) snapToEdge()
+                return true
+            }
+        }
+        return true
     }
 
     private fun clampBall(params: WindowManager.LayoutParams) {
@@ -398,6 +460,7 @@ class FloatingAssistantService : Service() {
             params.width = size
             params.height = size
             clampBall(params)
+            halfHidden = isHalfHidden(params.x, size)
             runCatching { windows.updateViewLayout(ballView, params) }
         }
         panelParams?.let { params ->
@@ -462,4 +525,16 @@ class FloatingAssistantService : Service() {
             context.stopService(Intent(context, FloatingAssistantService::class.java))
         }
     }
+}
+
+/**
+ * 悬浮球窗口的触摸全部由这一层接住：Compose 子视图不参与命中，
+ * 服务层直接用 `rawX/rawY` 改窗口坐标，拖动不会被窗口位移反向抵消。
+ */
+private class TouchInterceptLayout(
+    context: Context,
+    private val onTouch: (MotionEvent) -> Boolean,
+) : FrameLayout(context) {
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean = true
+    override fun onTouchEvent(event: MotionEvent): Boolean = onTouch(event)
 }

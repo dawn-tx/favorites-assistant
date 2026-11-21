@@ -33,7 +33,7 @@ class AppGraph private constructor(private val app: Application) {
     val gate: SyncGate by lazy { SyncGate() }
     val api: SyncApi by lazy { SyncApi(settings, gate) }
     // 对账要发请求、落库，两样都是别人已经建好的对象；sync 不反过来被它们持有，无环
-    val sync: SyncManager by lazy { SyncManager(app, db, favorites, api) }
+    val sync: SyncManager by lazy { SyncManager(app, db, favorites, api, connectivity) }
 
     companion object {
         @Volatile

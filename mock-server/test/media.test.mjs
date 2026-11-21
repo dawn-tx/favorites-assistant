@@ -17,10 +17,13 @@ const TEMP_DIR = 'G:/QoderWorkSpace/_temp_/mocktest';
 const INIT_A = Buffer.from('INIT-A-');
 const INIT_B = Buffer.from('INIT-B-');
 
-const VIDEO = Buffer.alloc(1000);
+// 夹具视频要大于切片服务的下限 64KB，才能同时覆盖「超过阈值才切片」和真实规则校验
+const VIDEO = Buffer.alloc(200_000);
 for (let i = 0; i < VIDEO.length; i += 1) VIDEO[i] = i % 251;
 const IMAGE = Buffer.alloc(200);
 for (let i = 0; i < IMAGE.length; i += 1) IMAGE[i] = 160 + (i % 32);
+const SLICE_BYTES = 65_536;
+const HALF = VIDEO.length / 2;
 
 let child = null;
 let origin = null;
@@ -30,13 +33,13 @@ let originBase = '';
 let dataFile = '';
 let storeDir = '';
 let originDown = false;
-let lastRule = null;
+let slicerRules = [];
 
 function pickFreePort(offset = 0) {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
     probe.listen(0, '127.0.0.1', () => {
-      const port = probe.address().port + offset;
+      const port = probe.address().port;
       probe.close(() => resolve(port));
     });
     probe.on('error', reject);
@@ -166,17 +169,17 @@ function startSlicer() {
     let text = '';
     for await (const chunk of req) text += chunk;
     const body = JSON.parse(text);
-    lastRule = body.rule;
+    slicerRules.push(body.rule);
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
       source: { url: body.url, finalUrl: body.url, fileSize: VIDEO.length, etag: '"v1"' },
       segments: [
         {
-          index: 0, mdatStartOffset: 0, mdatEndOffset: 499, mediaSize: 500, durationSeconds: 1.5,
+          index: 0, mdatStartOffset: 0, mdatEndOffset: HALF - 1, mediaSize: HALF, durationSeconds: 1.5,
           initSegmentBase64: INIT_A.toString('base64'),
         },
         {
-          index: 1, mdatStartOffset: 500, mdatEndOffset: 999, mediaSize: 500, durationSeconds: 2.5,
+          index: 1, mdatStartOffset: HALF, mdatEndOffset: VIDEO.length - 1, mediaSize: HALF, durationSeconds: 2.5,
           initSegmentBase64: INIT_B.toString('base64'),
         },
       ],
@@ -210,6 +213,7 @@ before(async () => {
       STORE_DIR: storeDir,
       MOCK_ORIGIN_BASE: originBase,
       SLICE_SERVICE_URL: `http://127.0.0.1:${slicerPort}/slice`,
+      SLICE_RULE: JSON.stringify({ mode: 'size', bytes: SLICE_BYTES }),
       TRANSFER_MS: '10',
       SOURCE_CHECK_TTL_MS: '0',
       BACKUP_TIMEOUT_MS: '2000',
@@ -269,7 +273,7 @@ test('单片代理：init 段 + 源文件区间拼成可播放 mp4', async () =>
   assert.equal(res.headers.get('accept-ranges'), 'bytes');
   const body = Buffer.from(await res.arrayBuffer());
   assert.deepEqual(body.subarray(0, INIT_A.length), INIT_A);
-  assert.deepEqual(body.subarray(INIT_A.length), VIDEO.subarray(0, 500));
+  assert.deepEqual(body.subarray(INIT_A.length), VIDEO.subarray(0, HALF));
 });
 
 test('Range 换算：跨 init 与源数据两段的请求也精确', async () => {
@@ -277,7 +281,7 @@ test('Range 换算：跨 init 与源数据两段的请求也精确', async () =>
   const segment = row.media.segments.find((item) => item.kind === 'video');
   const res = await fetch(`${baseUrl}${segment.url}`, { headers: { range: 'bytes=5-10' } });
   assert.equal(res.status, 206);
-  const total = INIT_A.length + 500;
+  const total = INIT_A.length + HALF;
   assert.equal(res.headers.get('content-range'), `bytes 5-10/${total}`);
   const body = Buffer.from(await res.arrayBuffer());
   const expected = Buffer.concat([INIT_A.subarray(5), VIDEO.subarray(0, 4)]);
@@ -290,13 +294,13 @@ test('非零源偏移的切片：整片与 Range 都按区间取', async () => {
   assert.ok(second, '至少应有第二片');
   const full = Buffer.from(await (await fetch(`${baseUrl}${second.url}`)).arrayBuffer());
   assert.deepEqual(full.subarray(0, INIT_B.length), INIT_B);
-  assert.deepEqual(full.subarray(INIT_B.length), VIDEO.subarray(500));
+  assert.deepEqual(full.subarray(INIT_B.length), VIDEO.subarray(HALF));
 
   const res = await fetch(`${baseUrl}${second.url}`, { headers: { range: 'bytes=5-10' } });
   assert.equal(res.status, 206);
   assert.deepEqual(
     Buffer.from(await res.arrayBuffer()),
-    Buffer.concat([INIT_B.subarray(5), VIDEO.subarray(500, 504)]),
+    Buffer.concat([INIT_B.subarray(5), VIDEO.subarray(HALF, HALF + 4)]),
   );
 });
 
@@ -305,7 +309,7 @@ test('HEAD 只回头，不拉源数据', async () => {
   const segment = row.media.segments.find((item) => item.kind === 'video');
   const res = await fetch(`${baseUrl}${segment.url}`, { method: 'HEAD' });
   assert.equal(res.status, 200);
-  assert.equal(res.headers.get('content-length'), String(INIT_A.length + 500));
+  assert.equal(res.headers.get('content-length'), String(INIT_A.length + HALF));
 });
 
 test('图片与封面同样走代理', async () => {
@@ -375,18 +379,21 @@ test('切片规则：非法 400，合法规则透传给切片服务', async () =
   });
   assert.equal(badResolve.status, 400);
 
-  lastRule = null;
+  slicerRules = [];
   let url = '';
   for (let i = 0; i < 20; i += 1) {
-    const candidate = `https://example.com/rule-duration-${i}`;
+    const candidate = `https://example.com/rule-size-${i}`;
     if (hasVideo(candidate)) {
       url = candidate;
       break;
     }
   }
   assert.ok(url, '应能构造一条带视频的链接');
-  const ok = await upsert(url, { mode: 'duration', seconds: 600 });
+  const ok = await upsert(url, { mode: 'size', bytes: SLICE_BYTES });
   assert.equal(ok.status, 200);
   await waitReady(url);
-  assert.deepEqual(lastRule, { mode: 'duration', seconds: 600, align: 'keyframe' });
+  assert.ok(
+    slicerRules.some((rule) => rule?.mode === 'size' && rule?.bytes === SLICE_BYTES),
+    `切片服务应收到 size 65536 的规则：${JSON.stringify(slicerRules)}`,
+  );
 });

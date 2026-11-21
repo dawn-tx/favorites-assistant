@@ -225,11 +225,7 @@ class SyncApi(
     }.getOrNull()?.takeIf { it.isNotBlank() }
 
     private fun SettingsSnapshot.sliceRule(): SliceRuleDto =
-        if (sliceRuleMode == AppSettings.SLICE_MODE_DURATION) {
-            SliceRuleDto(mode = AppSettings.SLICE_MODE_DURATION, seconds = sliceRuleSeconds)
-        } else {
-            SliceRuleDto(mode = AppSettings.SLICE_MODE_SIZE, bytes = sliceRuleBytes)
-        }
+        SliceRuleDto(mode = "size", bytes = sliceRuleBytes)
 
     private fun buildUrl(endpoint: String, path: String): String? {
         val base = endpoint.trim().trimEnd('/')

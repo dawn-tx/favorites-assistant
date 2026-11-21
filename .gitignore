@@ -14,3 +14,6 @@ node_modules/
 
 # mock 同步服务的本地数据，不要提交
 mock-server/data.json
+
+# mock 上传/备份的本地落盘目录
+mock-server/store/

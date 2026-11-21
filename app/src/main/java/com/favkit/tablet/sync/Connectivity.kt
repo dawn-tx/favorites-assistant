@@ -1,94 +1,86 @@
 package com.favkit.tablet.sync
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
-import kotlinx.coroutines.channels.awaitClose
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 
 /**
- * 回调式网络监听：注册一次 ConnectivityManager 回调，不做任何轮询，
- * 因此常驻后台时不会因为网络探测产生额外唤醒，满足"不明显增加耗电"。
+ * 回调式网络监听 + 主动重算。
+ *
+ * 只靠回调会漏事件：熄屏/Doze 期间网络切换或回调被延迟，系统恢复后不一定再补一条 onAvailable，
+ * 界面就会一直停在「离线」。这里把状态做成进程级 StateFlow，并在亮屏、解锁与回前台时
+ * 主动 [refresh] 一次；仍然没有轮询。
  */
 class Connectivity(context: Context) {
 
+    private val appContext = context.applicationContext
     private val manager: ConnectivityManager? =
-        context.applicationContext.getSystemService(ConnectivityManager::class.java)
+        appContext.getSystemService(ConnectivityManager::class.java)
 
-    val isOnline: Boolean
-        get() {
-            val network = manager?.activeNetwork ?: return false
-            val capabilities = manager?.getNetworkCapabilities(network) ?: return false
-            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-        }
+    private val _online = MutableStateFlow(isOnlineNow())
+    val online: StateFlow<Boolean> = _online.asStateFlow()
 
-    /** 只在"断网 -> 有网"跳变上发 true，供待同步队列补传使用 */
-    fun onlineTransitions(): Flow<Boolean> = callbackFlow {
-        val cm = manager
-        if (cm == null) {
-            awaitClose { }
-            return@callbackFlow
-        }
-        var online = isOnline
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = announce()
+    private val callback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = refresh()
+        override fun onLost(network: Network) = refresh()
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) = refresh()
+    }
 
-            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-                if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) announce()
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) = refresh()
+    }
+
+    init {
+        manager?.let { cm ->
+            runCatching { cm.registerDefaultNetworkCallback(callback) }
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
             }
-
-            override fun onLost(network: Network) {
-                online = isOnline
-            }
-
-            private fun announce() {
-                if (!online) {
-                    online = true
-                    trySend(true)
-                }
+            runCatching {
+                ContextCompat.registerReceiver(
+                    appContext,
+                    screenReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED,
+                )
             }
         }
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        cm.registerNetworkCallback(request, callback)
-        awaitClose { runCatching { cm.unregisterNetworkCallback(callback) } }
-    }.conflate()
+    }
 
-    /** 当前联网状态（离线角标用），同样只在真实变化上发射 */
-    fun onlineState(): Flow<Boolean> = callbackFlow {
-        val cm = manager
-        if (cm == null) {
-            trySend(false)
-            awaitClose { }
-            return@callbackFlow
-        }
-        var current = isOnline
-        trySend(current)
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = publish()
+    /** 现算一份，给 SyncWorker 这类只需要瞬时判断的地方 */
+    val isOnline: Boolean get() = isOnlineNow()
 
-            override fun onLost(network: Network) = publish()
+    /** 系统回调、亮屏、回前台都可以调用；只在值真的变化时更新 */
+    fun refresh() {
+        _online.value = isOnlineNow()
+    }
 
-            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) = publish()
+    private fun isOnlineNow(): Boolean {
+        val cm = manager ?: return false
+        val network = cm.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+    }
 
-            private fun publish() {
-                val now = isOnline
-                if (now != current) {
-                    current = now
-                    trySend(now)
-                }
-            }
-        }
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        cm.registerNetworkCallback(request, callback)
-        awaitClose { runCatching { cm.unregisterNetworkCallback(callback) } }
-    }.conflate()
+    fun onlineState(): Flow<Boolean> = online
+
+    /** 只在"断网 -> 有网"跳变上发 true；初始状态不算一次跳变 */
+    fun onlineTransitions(): Flow<Boolean> = online
+        .drop(1)
+        .distinctUntilChanged()
+        .filter { it }
 }

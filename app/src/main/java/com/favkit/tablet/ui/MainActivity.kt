@@ -79,6 +79,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 熄屏/Doze 可能漏掉一次联网恢复回调：回前台先按当前网络重算一次，避免一直显示离线
+        appGraph.connectivity.refresh()
         // 用户开启过助手且已授权，就把它拉起来；服务本身 START_STICKY，常驻不轮询
         lifecycleScope.launch {
             val snapshot = appGraph.settings.current()

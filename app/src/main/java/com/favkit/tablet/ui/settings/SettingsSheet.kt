@@ -36,7 +36,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.favkit.tablet.core.TabletScale
-import com.favkit.tablet.data.AppSettings
 import com.favkit.tablet.floating.FloatingAssistantService
 import com.favkit.tablet.ui.components.Cardish
 import com.favkit.tablet.ui.components.FavColors
@@ -54,6 +53,10 @@ private val UPLOAD_INTERVAL_PRESETS = listOf(0L, 1_000L, 3_000L, 10_000L, 30_000
 
 /** 后台 setUploadIntervalMs 会再夹一次，这里先按同一个范围挡掉脏输入 */
 private const val MAX_UPLOAD_INTERVAL_MS = 600_000L
+
+/** 片大小输入范围；后台会按字节再夹一次 */
+private const val MIN_SLICE_MB = 1L
+private const val MAX_SLICE_MB = 1024L
 
 /**
  * 设置面板：同步地址与令牌、上传节奏、悬浮助手、播放与缓存。
@@ -76,6 +79,9 @@ fun SettingsSheet(
     var token by remember(settings.syncToken) { mutableStateOf(settings.syncToken) }
     var intervalDraft by remember(settings.uploadIntervalMs) {
         mutableStateOf(settings.uploadIntervalMs.toString())
+    }
+    var sliceDraft by remember(settings.sliceRuleBytes) {
+        mutableStateOf((settings.sliceRuleBytes / 1_000_000L).toString())
     }
     val context = LocalContext.current
     val toggleAssistant: (Boolean) -> Unit = { enabled ->
@@ -239,65 +245,48 @@ fun SettingsSheet(
                     ) {
                         SectionTitle("内容切片")
                         Text(
-                            "长视频在后台切成一组独立可播的 mp4，每片在遮罩层里占一格；播完一片会自动接下一段。" +
-                                "规则只影响之后新收藏的链接，已收藏的条目要在详情里点「重新准备」才会按新规则重切。",
+                            "后台只对体积超过这个值的视频切片，并按同一个值切成多片；没超过的整片上传。" +
+                                "只影响之后新收藏的链接，已收藏的条目要在详情里点「重新准备」才会按新值重切。",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedTextField(
+                            value = sliceDraft,
+                            onValueChange = { input ->
+                                sliceDraft = input.filter { it.isDigit() }.take(4)
+                            },
+                            label = { Text("每片大小（MB）") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            supportingText = { Text("范围 1–1024MB；同时作为“长视频”的判定阈值。") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = scale.touchMin),
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
                         ) {
-                            ChoiceButton(
-                                label = "按大小",
-                                selected = settings.sliceRuleMode == AppSettings.SLICE_MODE_SIZE,
-                                scale = scale,
-                                modifier = Modifier.weight(1f),
-                                onClick = { viewModel.setSliceRuleMode(AppSettings.SLICE_MODE_SIZE) },
-                            )
-                            ChoiceButton(
-                                label = "按时长",
-                                selected = settings.sliceRuleMode == AppSettings.SLICE_MODE_DURATION,
-                                scale = scale,
-                                modifier = Modifier.weight(1f),
-                                onClick = { viewModel.setSliceRuleMode(AppSettings.SLICE_MODE_DURATION) },
-                            )
-                        }
-                        if (settings.sliceRuleMode == AppSettings.SLICE_MODE_SIZE) {
-                            Text("每片大小上限", style = MaterialTheme.typography.bodyLarge)
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+                            Button(
+                                onClick = {
+                                    val value = sliceDraft.toLongOrNull()
+                                        ?.coerceIn(MIN_SLICE_MB, MAX_SLICE_MB)
+                                        ?: (settings.sliceRuleBytes / 1_000_000L)
+                                    viewModel.setSliceRuleSizeMb(value)
+                                    sliceDraft = value.toString()
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = scale.touchMin),
                             ) {
-                                listOf(2L, 8L, 32L, 128L).forEach { mb ->
-                                    val bytes = mb * 1_000_000L
-                                    ChoiceButton(
-                                        label = "${mb}MB",
-                                        selected = settings.sliceRuleBytes == bytes,
-                                        scale = scale,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { viewModel.setSliceRuleSizeMb(mb) },
-                                    )
-                                }
+                                Text("应用片大小")
                             }
-                            InfoLine("当前上限", "${settings.sliceRuleBytes / 1_000_000}MB")
-                        } else {
-                            Text("每片时长上限", style = MaterialTheme.typography.bodyLarge)
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
-                            ) {
-                                listOf(60L, 300L, 600L, 1800L).forEach { seconds ->
-                                    ChoiceButton(
-                                        label = if (seconds >= 60) "${seconds / 60}分" else "${seconds}秒",
-                                        selected = settings.sliceRuleSeconds == seconds,
-                                        scale = scale,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { viewModel.setSliceRuleSeconds(seconds) },
-                                    )
-                                }
-                            }
-                            InfoLine("当前上限", "${settings.sliceRuleSeconds} 秒")
+                            Text(
+                                text = "当前 ${settings.sliceRuleBytes / 1_000_000L} MB",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            )
                         }
                     }
                 }

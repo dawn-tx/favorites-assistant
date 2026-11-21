@@ -23,7 +23,7 @@ function pickFreePort(offset = 0) {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
     probe.listen(0, '127.0.0.1', () => {
-      const value = probe.address().port + offset;
+      const value = probe.address().port;
       probe.close(() => resolve(value));
     });
     probe.on('error', reject);
@@ -96,7 +96,7 @@ after(async () => {
   if (tempDataFile) rmSync(tempDataFile, { force: true });
 });
 
-test('备份失败不影响 ready：源站不可达时内容仍可用，store_id 留空', async () => {
+test('上传失败不影响 ready：源站不可达时内容仍可用，store_id 留空', async () => {
   child = spawnServer({ TRANSFER_MS: '10', BACKUP_TIMEOUT_MS: '200', MOCK_ORIGIN_BASE: 'http://127.0.0.1:1' });
   await waitStartup(child);
   const url = 'https://example.com/backup-fails';
