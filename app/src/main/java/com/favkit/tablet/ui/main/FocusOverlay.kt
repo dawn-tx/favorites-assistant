@@ -1237,7 +1237,6 @@ private fun FocusInfo(
     var newTagName by remember { mutableStateOf("") }
 
     val segment = favorite.segments.getOrNull(focus.segmentIndex)
-    val watchedMs = favorite.segmentProgress[focus.segmentIndex] ?: 0L
     val prefetchBytes = state.prefetch[favorite.id]
     val attached = favorite.tags.map { it.id }.toSet()
 
@@ -1268,7 +1267,6 @@ private fun FocusInfo(
                     if (segment.kind == MediaKind.IMAGE) "图片" else "视频",
             )
             if (segment.title.isNotBlank()) MetaRow("小标题", segment.title)
-            if (watchedMs > 0L) MetaRow("上次看到", formatClock(watchedMs))
         }
 
         SectionDark("后台信息")

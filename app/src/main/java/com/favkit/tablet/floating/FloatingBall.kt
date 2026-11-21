@@ -21,7 +21,7 @@ import com.favkit.tablet.ui.components.FavColors
 /**
  * 悬浮球本体：只负责画，不处理触摸。
  *
- * 拖拽由服务层在 ComposeView 的 OnTouchListener 上用 `rawX/rawY` 处理 —— 窗口本身跟着手指移动，
+ * 拖拽由服务层在外层包装 View 上用 `rawX/rawY` 处理 —— 窗口本身跟着手指移动，
  * 如果在视图内坐标里算位移，窗口移动与局部坐标变化会互相抵消，球就拖不动，也就到不了贴边半隐。
  *
  * [halfHidden] 时只露出贴边的一条窄边，数字/图标藏在屏幕外，不画出来。

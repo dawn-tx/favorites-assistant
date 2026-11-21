@@ -60,9 +60,9 @@ data class FavoriteRow(
     val locallyCached: Boolean = false,
     /** 软删除时间：非空表示已标记删除，等待后台补传后物理清除 */
     val deletedAt: Long? = null,
-    /** 「段号:毫秒」逗号分隔的段级进度；见 SegmentProgressCodec */
+    /** 旧版本记录的段级播放进度；现在不写不读，列保留以避免动数据库版本 */
     val segmentProgress: String? = null,
-    /** 上次停在第几段 */
+    /** 旧版本记录的「上次停在第几段」；现在不写不读 */
     val lastSegmentIndex: Int? = null,
 )
 

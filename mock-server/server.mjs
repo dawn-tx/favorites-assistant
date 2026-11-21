@@ -19,6 +19,7 @@
  */
 import { createHash, createHmac } from 'node:crypto';
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, renameSync } from 'node:fs';
+import { writeFile as writeFileAsync, rename as renameAsync } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { once } from 'node:events';
@@ -145,10 +146,52 @@ function loadData() {
 const state = loadData();
 mkdirSync(STORE_DIR, { recursive: true });
 
+/**
+ * 持久化改成「80ms 合并 + 同步写」：上传任务会连续写很多次，逐次同步写整个 data.json
+ * 会把同进程的媒体代理堵住；Windows 上并发读目标文件还会让 rename 抛 EPERM。
+ * 关键状态点用 [flushData] 立即落盘，其余写入合并到下一次定时器。
+ */
+let saveTimer = null;
+const RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4));
+
 function saveData() {
-  const tmp = `${DATA_FILE}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2));
-  renameSync(tmp, DATA_FILE);
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    writeState();
+  }, 80);
+}
+
+function writeState() {
+  const text = JSON.stringify(state, null, 2);
+  const tmp = `${DATA_FILE}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, text);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        renameSync(tmp, DATA_FILE);
+        return;
+      } catch (error) {
+        if (attempt === 4) throw error;
+        Atomics.wait(RETRY_WAIT, 0, 0, 20);
+      }
+    }
+  } catch (error) {
+    console.error(`保存 ${DATA_FILE} 失败：${error.message}`);
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 临时文件可能已经被 rename 掉
+    }
+  }
+}
+
+function flushData() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  writeState();
 }
 
 // ---------- HTTP 基座 ----------
@@ -704,7 +747,7 @@ function runNextJob() {
 async function runParseJob(job) {
   const row = state.favorites[job.url];
   if (!row) {
-    saveData();
+    flushData();
     return; // 等解析期间被删了，任务作废
   }
 
@@ -742,7 +785,7 @@ async function runParseJob(job) {
       state.jobs.push(job);
     }
   }
-  saveData();
+  flushData();
 }
 
 /**
@@ -752,7 +795,7 @@ async function runParseJob(job) {
 async function runUploadJob(job) {
   const row = state.favorites[job.url];
   if (!row) {
-    saveData();
+    flushData();
     return;
   }
 
@@ -787,7 +830,7 @@ async function runUploadJob(job) {
     row.upload_state = 'pending';
   }
   row.upload_updated_at = Date.now();
-  saveData();
+  flushData();
 }
 
 async function uploadAsset(asset) {
@@ -796,7 +839,7 @@ async function uploadAsset(asset) {
     if (asset.slice.media_size > BACKUP_MAX_BYTES) throw new Error('素材超过备份上限');
     const init = Buffer.from(asset.slice.init_base64, 'base64');
     const media = await fetchRangeBytes(asset.source_url, asset.slice.start, asset.slice.end);
-    writeAtomic(file, Buffer.concat([init, media]));
+    await writeAtomic(file, Buffer.concat([init, media]));
   } else {
     const response = await fetch(asset.source_url, {
       headers: { 'accept-encoding': 'identity' },
@@ -805,7 +848,7 @@ async function uploadAsset(asset) {
     if (!response.ok) throw new Error(`源站 HTTP ${response.status}`);
     const body = Buffer.from(await response.arrayBuffer());
     if (body.length > BACKUP_MAX_BYTES) throw new Error('素材超过备份上限');
-    writeAtomic(file, body);
+    await writeAtomic(file, body);
   }
   return `st-${asset.key}`;
 }
@@ -852,10 +895,10 @@ function removeJobsFor(url) {
   state.jobs = state.jobs.filter((job) => job.url !== url);
 }
 
-function writeAtomic(file, bytes) {
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, bytes);
-  renameSync(tmp, file);
+async function writeAtomic(file, bytes) {
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await writeFileAsync(tmp, bytes);
+  await renameAsync(tmp, file);
 }
 
 /** 按闭区间从源站取字节；源站不支持 Range 时长度对不上，直接判失败 */
@@ -960,7 +1003,7 @@ function writeFavorite({ url, note, tags, sourceApp, favoriteAt, sliceRule }, { 
     const changed = USER_FIELDS.some((field) => JSON.stringify(existing[field]) !== JSON.stringify(next[field]));
     if (!changed) return 'unchanged';
     Object.assign(existing, next, { updated_at: Date.now() });
-    saveData();
+    flushData();
     return 'updated';
   }
   state.favorites[url] = {
@@ -980,7 +1023,7 @@ function writeFavorite({ url, note, tags, sourceApp, favoriteAt, sliceRule }, { 
     upload_state: 'pending',
   };
   enqueueJob(url, 'parse');
-  saveData();
+  flushData();
   return 'created';
 }
 
@@ -997,7 +1040,7 @@ function deleteFavorite(url) {
   removeFavoriteAssets(url);
   delete state.favorites[url];
   removeJobsFor(url);
-  saveData();
+  flushData();
   return true;
 }
 
@@ -1439,7 +1482,7 @@ const server = createServer(async (req, res) => {
           enqueueJob(target, 'parse');
           favorites.push(publicRow(row));
         }
-        saveData();
+        flushData();
         send(res, 200, { ok: true, server_time: Date.now(), favorites, unknown_urls: unknownUrls });
       } catch (error) {
         const status = error instanceof HttpError ? error.status : 500;
@@ -1535,7 +1578,7 @@ const server = createServer(async (req, res) => {
           if (outcome === 'created') created += 1;
           else existed += 1;
         }
-        saveData();
+        flushData();
         console.log(`回调 applied created=${created} existed=${existed} invalid=${invalid}`);
         send(res, 200, { ok: true, received: items.length, created, existed, invalid });
       } catch (error) {
@@ -1630,6 +1673,7 @@ server.listen(PORT, HOST, () => {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     console.log(`收到 ${signal}，正在关闭 mock 服务`);
+    flushData();
     server.close(() => process.exit(0));
   });
 }

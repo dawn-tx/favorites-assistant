@@ -130,7 +130,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     private val prefetches = ConcurrentHashMap<String, Pair<PrefetchHandle, Job>>()
-    private var tickCount = 0
+    private val nextPrefetches = ConcurrentHashMap<String, Job>()
 
     /** 后台下一页的游标；进程死了就归零，重取第一页靠 id 去重，不会翻倍 */
     private var remoteCursor: String? = null
@@ -283,7 +283,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.player.pausePlayback()
             return
         }
-        val start = favorite.lastSegmentIndex.takeIf { it in favorite.segments.indices } ?: 0
+        val start = 0
         focusFlow.value = FocusUiState(id, start)
         loadSegment(favorite, start, autoPlay = false)
     }
@@ -294,12 +294,11 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     /**
      * 关闭遮罩层：停下播放。
      *
-     * 墙上没有播放器，遮罩层一关就没有任何界面能再控制这个实例了 —— 之前只落进度不暂停，
+     * 墙上没有播放器，遮罩层一关就没有任何界面能再控制这个实例了 —— 之前只解绑不暂停，
      * 用户听到的就是「关了还在放」。
      */
     fun closeFocus() {
         graph.player.pausePlayback()
-        persistProgressNow()
         focusFlow.value = null
         clearContentRefreshError()
     }
@@ -318,23 +317,17 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         }
     }
 
-    /** 分段条点击、媒体区左右滑动都走这里；[FocusUiState.playerKey] 让每段各自记住看到哪 */
+    /** 分段条点击、媒体区左右滑动都走这里；[FocusUiState.playerKey] 让每段各自记住这一会话里的位置 */
     fun showSegment(index: Int) {
         val focus = focusFlow.value ?: return
         val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
         if (index !in favorite.segments.indices || index == focus.segmentIndex) return
-        persistProgressNow()
         focusFlow.value = FocusUiState(focus.itemId, index)
-        viewModelScope.launch { graph.favorites.setLastSegment(favorite.id, index) }
         // 在遮罩层里主动翻段 = 直接操作，视频段自动播起来；从墙上点开时才停在暂停态等用户按播放
         loadSegment(favorite, index, autoPlay = true)
     }
 
-    /**
-     * 一段自然播完：同一条里紧跟着的下一段还是视频，就直接接着播。
-     * 不在这里写上一段的进度 —— saveProgress 会连带改 lastSegmentIndex，和下一段的写入抢顺序；
-     * 回到已看完的那段时由 loadSegment 把「片尾续播」夹回 0。
-     */
+    /** 一段自然播完：同一条里紧跟着的下一段还是视频，就直接接着播。 */
     private fun advanceAfterEnd(playerKey: String) {
         val focus = focusFlow.value ?: return
         if (playerKey != FocusUiState(focus.itemId, focus.segmentIndex).playerKey) return
@@ -343,7 +336,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         val segment = favorite.segments.getOrNull(next) ?: return
         if (!segment.playable) return
         focusFlow.value = FocusUiState(focus.itemId, next)
-        viewModelScope.launch { graph.favorites.setLastSegment(favorite.id, next) }
         loadSegment(favorite, next, autoPlay = true)
     }
 
@@ -351,11 +343,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
      * 遮罩层竖向 pager 滑到落定的那条：换成它。
      *
      * [id] 为 null（页序里的这条已被删掉）或就是当前那条时什么都不做 —— pager 落定与
-     * ViewModel 换焦点因此不会互相打转。进度先落盘再切，上一条看到哪儿不会丢。
+     * ViewModel 换焦点因此不会互相打转。
      */
     fun focusFromPager(id: String?) {
         if (id == null || id == focusFlow.value?.itemId) return
-        persistProgressNow()
         openFocus(id)
     }
 
@@ -383,21 +374,29 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             graph.player.pausePlayback()
             return
         }
-        val saved = favorite.segmentProgress[index] ?: 0L
-        // 上次已经看到片尾的不再「从片尾续播」：自动接续之后回来，就从头看这一段
-        val resumeAt = if (segment.durationMs > 0 && saved >= segment.durationMs - 1_000) 0L else saved
         graph.player.open(
             itemId = FocusUiState(favorite.id, index).playerKey,
             url = segment.url,
-            resumeAtMs = resumeAt,
+            resumeAtMs = 0L,
             speed = _state.value.settings?.defaultPlaybackSpeed ?: 1f,
             autoPlay = autoPlay,
         )
+        prefetchNext(favorite, index)
+    }
+
+    /** 播当前段时把下一段拉进缓存：切片边界与自动接续时少一次重新缓冲 */
+    private fun prefetchNext(favorite: Favorite, index: Int) {
+        val next = favorite.segments.getOrNull(index + 1)?.takeIf { it.playable } ?: return
+        if (nextPrefetches.containsKey(next.url)) return
+        val job = viewModelScope.launch {
+            runCatching { graph.media.prefetch(next.url, onProgress = {}, isCancelled = { false }) }
+            nextPrefetches.remove(next.url)
+        }
+        nextPrefetches[next.url] = job
     }
 
     fun togglePlay() {
         graph.player.togglePlay()
-        persistProgressNow()
     }
 
     fun seekTo(positionMs: Long) = graph.player.seekTo(positionMs)
@@ -407,19 +406,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { graph.settings.setDefaultPlaybackSpeed(speed) }
     }
 
-    /** 遮罩层每约 500ms 调用一次，进度每 6 次回写一次，避免频繁落盘 */
+    /** 遮罩层每约 500ms 调用一次，只刷新播放器状态；不记录播放进度 */
     fun tick() {
         graph.player.syncTick()
-        tickCount += 1
-        if (tickCount % 6 == 0) persistProgressNow()
-    }
-
-    /** 把「第几段看到哪」写回本地；播放器还没装载时别用 0 去覆盖已有进度 */
-    fun persistProgressNow() {
-        val focus = focusFlow.value ?: return
-        val (position, _) = graph.player.snapshotProgress()
-        if (position <= 0L) return
-        viewModelScope.launch { graph.favorites.saveProgress(focus.itemId, focus.segmentIndex, position) }
     }
     // endregion
 
@@ -839,7 +828,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             handle.cancelled = true
             job.cancel()
         }
-        persistProgressNow()
         graph.player.release()
         super.onCleared()
     }

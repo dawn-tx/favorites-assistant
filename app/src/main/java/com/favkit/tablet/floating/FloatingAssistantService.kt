@@ -24,6 +24,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.favkit.tablet.App
 import com.favkit.tablet.R
 import com.favkit.tablet.core.Notifications
@@ -193,6 +196,10 @@ class FloatingAssistantService : Service() {
         }
         // Compose 子视图不参与命中：所有触摸由这层拦截，服务层用 raw 坐标改窗口位置
         val view = TouchInterceptLayout(this) { event -> handleBallTouch(event) }
+        // ComposeView 现在挂在包装层下面；owner 同时挂到窗口根，避免挂载时找不到 ViewTreeLifecycleOwner
+        view.setViewTreeLifecycleOwner(host)
+        view.setViewTreeViewModelStoreOwner(host)
+        view.setViewTreeSavedStateRegistryOwner(host)
         view.addView(
             content,
             FrameLayout.LayoutParams(

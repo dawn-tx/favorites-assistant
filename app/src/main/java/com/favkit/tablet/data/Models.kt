@@ -93,10 +93,6 @@ data class Favorite(
     val mediaState: MediaState = MediaState.UNKNOWN,
     val locallyCached: Boolean = false,
     val tags: List<Tag> = emptyList(),
-    /** 段号 → 该段看到过的位置。纯本地数据，不参与上传 */
-    val segmentProgress: Map<Int, Long> = emptyMap(),
-    /** 上次停在第几段 */
-    val lastSegmentIndex: Int = 0,
 ) {
     /** 后台给了可看可播的素材 */
     val resolved: Boolean get() = segments.isNotEmpty()
@@ -140,17 +136,6 @@ data class Favorite(
                 videos > 1 -> "${videos}段"
                 else -> ""
             }
-        }
-
-    /**
-     * 「看过多少」：各段已看时长之和 ÷ 所有视频段时长之和。
-     * 图集段不算分母也不算分子（翻到第几张不是进度）。
-     */
-    val watchedRatio: Float
-        get() {
-            val totalMs = durationMs
-            if (totalMs <= 0L) return 0f
-            return segmentProgress.values.sumOf { it }.toFloat() / totalMs.toFloat()
         }
 }
 

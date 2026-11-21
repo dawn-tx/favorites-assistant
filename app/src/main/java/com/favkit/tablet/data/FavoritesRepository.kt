@@ -166,16 +166,6 @@ class FavoritesRepository(
         return ids
     }
 
-    /** 记下「第 [segmentIndex] 段看到哪」。旧段的位置留在 map 里，回到第 3 张、第 2 段都还能续上。 */
-    suspend fun saveProgress(id: String, segmentIndex: Int, positionMs: Long) {
-        val row = favoritesDao.byId(id) ?: return
-        val merged = LinkedHashMap(SegmentProgressCodec.decode(row.segmentProgress))
-        merged[segmentIndex] = positionMs.coerceAtLeast(0L)
-        favoritesDao.saveProgress(id, segmentIndex, SegmentProgressCodec.encode(merged))
-    }
-
-    suspend fun setLastSegment(id: String, segmentIndex: Int) = favoritesDao.setLastSegment(id, segmentIndex)
-
     suspend fun setLocallyCached(id: String, cached: Boolean) = favoritesDao.setLocallyCached(id, cached)
 
     /** 清空视频缓存后要跟着做的一次性批量复位 */
@@ -331,8 +321,6 @@ class FavoritesRepository(
         mediaState = MediaState.of(mediaState),
         locallyCached = locallyCached,
         tags = tags,
-        segmentProgress = SegmentProgressCodec.decode(segmentProgress),
-        lastSegmentIndex = lastSegmentIndex ?: 0,
     )
 }
 

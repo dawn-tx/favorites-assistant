@@ -83,23 +83,12 @@ interface FavoritesDao {
     @Query("DELETE FROM favorites WHERE id IN (:ids) AND deletedAt IS NOT NULL")
     suspend fun deleteTombstone(ids: List<String>)
 
-    /**
-     * 播放进度属于本地数据，不上传：看了多少由这台设备自己记，换台设备不该被远端覆盖。
-     * [progress] 是整条「段号:毫秒」串，一列文本换一次 UPDATE，比建一张进度表再逐段更新便宜。
-     */
-    @Query("UPDATE favorites SET lastSegmentIndex = :segmentIndex, segmentProgress = :progress WHERE id = :id")
-    suspend fun saveProgress(id: String, segmentIndex: Int, progress: String?)
-
     @Query("UPDATE favorites SET locallyCached = :cached WHERE id = :id")
     suspend fun setLocallyCached(id: String, cached: Boolean)
 
     /** 清空视频缓存时一起把标记抹掉：字节都没了还留着「已缓存」，卡片状态点和遮罩层提示就在说假话 */
     @Query("UPDATE favorites SET locallyCached = 0")
     suspend fun clearLocallyCached()
-
-    /** 图集段没有播放位置，只有段号，所以单独一条 UPDATE，不借用 saveProgress */
-    @Query("UPDATE favorites SET lastSegmentIndex = :segmentIndex WHERE id = :id")
-    suspend fun setLastSegment(id: String, segmentIndex: Int)
 
     /** 本地缓存里现有多少条：0 就是换机/清数据后的空库，冷启动该自动去后台取第一页 */
     @Query("SELECT COUNT(*) FROM favorites WHERE deletedAt IS NULL")

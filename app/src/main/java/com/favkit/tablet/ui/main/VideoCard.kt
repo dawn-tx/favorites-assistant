@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
@@ -281,24 +280,6 @@ private fun Mosaic(favorite: Favorite, segments: List<MediaSegment>, decodeDp: D
             }
         } else {
             Puzzle(segments, decodeDp, stripTiles, Modifier.matchParentSize())
-        }
-
-        val ratio = favorite.watchedRatio
-        if (ratio > 0f && segments.any { it.kind == MediaKind.VIDEO }) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .height(3.dp)
-                    .background(Color(0x66000000)),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(ratio)
-                        .height(3.dp)
-                        .background(MaterialTheme.colorScheme.primary),
-                )
-            }
         }
     }
 }

@@ -42,28 +42,3 @@ internal object MediaCodec {
         return segments(dtos)
     }
 }
-
-/**
- * 段级播放进度：「段号:毫秒」逗号分隔。
- *
- * 一整条收藏的进度用一列文本换一次 UPDATE；解析结果每次都被后台响应整体覆盖，
- * 本地进度绝不能放在会被覆盖的那批字段里。
- */
-internal object SegmentProgressCodec {
-
-    fun encode(progress: Map<Int, Long>): String? =
-        if (progress.isEmpty()) null else progress.entries.joinToString(",") { "${it.key}:${it.value}" }
-
-    fun decode(raw: String?): Map<Int, Long> {
-        if (raw.isNullOrBlank()) return emptyMap()
-        return raw.split(',')
-            .mapNotNull { entry ->
-                val parts = entry.split(':')
-                if (parts.size != 2) return@mapNotNull null
-                val index = parts[0].toIntOrNull() ?: return@mapNotNull null
-                val position = parts[1].toLongOrNull() ?: return@mapNotNull null
-                index to position.coerceAtLeast(0L)
-            }
-            .toMap()
-    }
-}
