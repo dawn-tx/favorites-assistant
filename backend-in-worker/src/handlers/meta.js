@@ -30,9 +30,9 @@ export function handleMeta(env, cfg) {
     slice_service: cfg.sliceServiceUrl ? 'remote' : 'none',
     slice_info_cache: {
       ttl_ms: cfg.sliceInfoTtlMs,
-      cleanup_ms: 60_000,
+      cleanup_ms: 60 * 60 * 1000,
       touch_ms: cfg.sliceInfoTouchMs,
-      note: '切片的 init 与区间是派生缓存：已有备份且空闲超过 ttl 的清掉，代理时按索引重新向切片服务补取；没有备份的片不清理',
+      note: '切片的 init 与区间是派生缓存：已有备份且空闲超过 ttl 的清掉，代理时按索引重新向切片服务补取；没有备份的片不清理。清理由每小时 :23 的 cron 执行',
     },
     upload: {
       max_height: cfg.uploadMaxHeight,

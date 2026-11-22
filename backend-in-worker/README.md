@@ -77,7 +77,8 @@ D1 只存元数据，表结构按「重复数据只留一份」组织：
 
 同一测试夹具（1 视频 2 片 + 1 图 + 1 封面）实测：旧结构约 1.29KB，新结构约 0.69KB。
 注意：真实切片每片的 `init` 通常不同（`moov` 会按片重写），`inits` 去重主要作用于重复解析与跨收藏复用；
-热态仍约 1.5KB/片（init 存原始字节），20 片约 30KB、50 片约 75KB；切片信息清理后约 4KB/条。
+init 原始字节约 8.3KB/片，热态约 8.5KB/片（20 片约 170KB、36 片约 300KB、50 片约 430KB）；
+切片信息清理后每片只剩 asset 行（约 0.2KB），D1 占用会明显下降。
 
 ## 部署（不在本地安装 Wrangler）
 
@@ -112,6 +113,107 @@ curl -s https://<worker>.workers.dev/api/v1/health
 curl -s https://<worker>.workers.dev/api/v1/meta
 ```
 
+## 配置说明
+
+运行时配置全部来自 `wrangler.toml` 的 `[vars]` 与 `wrangler secret`；`src/config.js` 在首次请求时解析并缓存。
+数字类变量在 TOML 里写成字符串（如 `"300000"`），留空或非法时回落到默认值。
+表里没有出现在 `wrangler.toml` 的变量，需要时直接加到 `[vars]` 即可覆盖默认值。
+`/meta` 会回显大部分生效值（`next_wait_ms`、`slice_rule`、上传批大小、调度节奏等）。
+
+### 绑定、入口与定时器
+
+| 项 | 当前值 | 说明 |
+|---|---|---|
+| D1 绑定 `DB` | `database_name = "favorites"` | **必需**；先执行 `src/store/schema.sql`。没有 KV / R2 绑定 |
+| `main` | `src/index.js` | Worker 入口 |
+| `compatibility_date` | `2025-09-01` | 运行时兼容日期 |
+| `observability.enabled` | `true` | 打开 Workers Logs，便于看 `exceededCpu` |
+| cron 1 | `* * * * *` | 每分钟跑任务队列（解析 + 备份） |
+| cron 2 | `23 * * * *` | 每小时清理空闲切片信息 |
+| cron 3 | `41 4 * * *` | 每天回收无引用的 `inits` / `sources` |
+
+免费版每个账号最多 5 个 cron，这里用了 3 个；其余两个留给别的 Worker。
+
+### 路由与鉴权
+
+| 变量 / secret | 默认 | 作用 |
+|---|---|---|
+| `BASE_PATH` | `/api/v1` | 所有数据接口与媒体地址的前缀，必须与 App 设置里的接口地址后缀一致 |
+| `SYNC_TOKEN`（secret） | 空 | 空 = 数据接口不校验；非空则要求 `Authorization: Bearer <token>`。`/health`、`/meta`、`/media` 永远免鉴权 |
+| `INGEST_PATH` | `/ingest/callback` | B 回调路径；完整路径是 `${BASE_PATH}${INGEST_PATH}`，免鉴权 |
+| `INGEST_SOURCE_APP` | `第三方` | 回调进来的条目的 `source_app`，载荷里带什么都不认 |
+
+### 客户端节奏
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `UPLOAD_WAIT_MS` | `3000` | `/sync`、`/resolve` 回执里的 `next_wait_ms` 与 `Retry-After` 基准 |
+| `UPLOAD_WAIT_JITTER_MS` | `0` | 大于 0 时按请求序号在 `0/1/2` 倍之间抖动；0 = 固定值 |
+
+### 解析与切片
+
+| 变量 / secret | 默认 | 作用 |
+|---|---|---|
+| `PARSE_SERVICE_URL` | 空 | **生产必须配置**；空时每条解析直接失败 |
+| `PARSE_SERVICE_TOKEN`（secret） | 空 | 非空时给解析服务带 Bearer |
+| `PARSE_TIMEOUT_MS` | `30000` | 调解析服务的超时 |
+| `SLICE_SERVICE_URL` | 空 | 空 = 不切片（长视频整片一段） |
+| `SLICE_TIMEOUT_MS` | `60000` | 调切片服务的超时 |
+| `SLICE_RULE` | `{"mode":"size","bytes":2000000,"align":"keyframe"}` | 没有随请求带规则时的默认片大小；也是「长视频」阈值。只收按大小或按时长两种形状，切点固定关键帧；按大小时 64KiB–1GiB |
+| `UPLOAD_MAX_HEIGHT` | `1080` | 每个视频选一档：高度不超过它的最高可达档；没有则取最小档 |
+| `MAX_SLICES_PER_FAVORITE` | `50` | **单条收藏所有视频合计**最多切多少片；超出预算的视频退回整片 |
+| `TRANSFER_MAX_ATTEMPTS` | `3` | 解析失败重试次数 |
+| `TRANSFER_RETRY_MS` | `2000` | 解析重试退避基数（第 n 次等 `n × 该值`） |
+
+`SLICE_RULE` 只是默认值；App 在 `/sync`、`/resolve` 里带的规则会按条落库，优先级更高。
+
+### 媒体、密钥与切片缓存
+
+| 变量 / secret | 默认 | 作用 |
+|---|---|---|
+| `MEDIA_KEY_SECRET`（secret） | 空 | 虚拟 key 的 HMAC 密钥；空则用确定性 SHA-256。公网部署建议配置 |
+| `SOURCE_PROBE_MS` | `2500` | 源站 HEAD/Range 探活超时 |
+| `SOURCE_CHECK_TTL_MS` | `60000` | 探活结果缓存时长；0 = 每次都探（联调用） |
+| `SLICE_INFO_TTL_MS` | `2592000000`（30 天） | 切片 init/区间作为派生缓存的空闲上限；只有已有备份的片才会被清 |
+| `SLICE_INFO_TOUCH_MS` | `600000`（10 分钟） | 媒体请求更新 `last_used_at` 的合并间隔，避免每个 Range 都写 D1 |
+
+### 外部存储
+
+| 变量 / secret | 默认 | 作用 |
+|---|---|---|
+| `MEDIA_BASE_URL` | 空 | 交给存储服务的虚拟地址前缀，**必须包含 `/api/v1` 且公网可达**；空时上传直接失败 |
+| `STORAGE_UPLOAD_URL` | 空 | 上传接口；空时上传失败（收藏仍 `ready`，只是没有备份） |
+| `STORAGE_TOKEN`（secret） | 空 | 非空时上传接口带 Bearer |
+| `STORAGE_GET_URL` | 空 | **预留**：给下载实现用；当前媒体回落还没接，读取但不生效 |
+| `STORAGE_BATCH_SIZE` | `10` | 单次上传最多几条；代码硬顶 10 |
+| `STORAGE_TIMEOUT_MS` | `300000`（5 分钟） | **单次批量上传调用**等存储「复制完成并返回 id」的超时；超时按整批失败退避 |
+
+### 任务队列与备份
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `JOBS_PER_TICK` | `4` | 每分钟最多领几条解析任务；0 = 关闭解析（联调用） |
+| `UPLOAD_JOBS_PER_TICK` | `2` | 每分钟最多领几条上传任务；0 = 关闭上传 |
+| `UPLOAD_ITEMS_PER_TICK` | `20` | 每条上传任务每轮最多处理几个 asset；按 `STORAGE_BATCH_SIZE` 切批 |
+| `UPLOAD_JOB_LOCK_MS` | `600000`（10 分钟） | 上传任务锁；必须长于一次存储调用，否则下一分钟会重复领 |
+| `UPLOAD_MAX_ATTEMPTS` | `3` | 整条上传任务的重试次数（真失败才计次，预算用尽不计） |
+| `UPLOAD_RETRY_MS` | `2000` | 上传重试退避基数 |
+
+三者关系：`STORAGE_TIMEOUT_MS`（5 分钟）< `UPLOAD_JOB_LOCK_MS`（10 分钟）< cron 单次墙钟（15 分钟）。
+
+### 固定值（不能通过 env 改）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 解析任务锁 | 90 秒 | 防止两个 tick 同时解析同一条 |
+| 请求体上限 | 4MiB | 超出回 413 |
+| `/favorites/lookup` 上限 | 200 个 url | 超出回 400 |
+| 单次上传条数硬顶 | 10 | 即使把 `STORAGE_BATCH_SIZE` 配大也会被夹到 10 |
+| 调度器子请求预算 | 45 | 每轮留出余量给主请求；见 `src/budget.js` |
+| 媒体请求子请求预算 | 10 | 探活 + 补切片 + 回源 |
+| 媒体成功响应缓存头 | `public, max-age=31536000, immutable` | 错误响应仍 `no-store` |
+| 切片清理 / 孤儿回收 | 每小时 :23 / 每天 04:41 | 由 `wrangler.toml` 的 cron 决定 |
+
 ## 与 mock-server 的行为差异
 
 | 方面 | mock-server | Worker 版 |
@@ -138,7 +240,8 @@ D1 免费：单库 500MB、每次调用最多 50 次查询。媒体字节不再�
   18MB/片时一批约 180MB，上传任务锁 `UPLOAD_JOB_LOCK_MS=10 分钟`、存储超时 `STORAGE_TIMEOUT_MS=5 分钟`，
   避免复制未完成就被下一轮 cron 重复领取。
 - **切片上限按收藏算**：`MAX_SLICES_PER_FAVORITE=50`，超出片数预算的视频退回整片一段。
-  按 18MB/片、20–50 片估，单条收藏热态约 30–80KB（D1），免费版单库 500MB 能放约 6 千–1.5 万条。
+  按 18MB/片、真实 init 约 8.3KB 估，单条收藏热态约 170KB（20 片）到 430KB（50 片）；
+  免费版单库 500MB 大约放 1200–3000 条热态长视频，切片信息清理后可到几万条。
 - **D1 写尽量合并**：解析落库、删收藏、回调批量插入都走 `db.batch()`（一次调用只算 1 次查询）。
 
 ## 已知边界
