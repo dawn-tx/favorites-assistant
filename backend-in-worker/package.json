@@ -1,0 +1,10 @@
+{
+  "name": "favorites-backend-worker",
+  "private": true,
+  "type": "module",
+  "description": "收藏助手个人版后台：Cloudflare Worker + D1（元数据）+ 外部存储（媒体转存）",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs",
+    "test:large": "node --test test/large-file.test.mjs"
+  }
+}

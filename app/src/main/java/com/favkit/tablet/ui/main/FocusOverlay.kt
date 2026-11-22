@@ -15,6 +15,7 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -458,6 +459,10 @@ private fun FeedPage(
     val segments = favorite.segments
     val notice = noticeOf(state)
     val current = segments.getOrNull(focus.segmentIndex)
+    // 底部段条按「视频组 + 图片」折叠；当前段所在的视频组决定左侧竖向片条是否出现
+    val stripItems = remember(favorite.id, favorite.segments) { buildStripItems(favorite.segments) }
+    val stripIndex = currentStripIndex(stripItems, focus.segmentIndex)
+    val videoGroup = currentVideoGroup(stripItems, focus.segmentIndex)
     // 图集段没有时间进度、也没有倍速可言：播放条与居中那颗键都只给视频段
     val isVideo = current != null && current.kind != MediaKind.IMAGE
     var controlsVisible by remember(favorite.id) { mutableStateOf(true) }
@@ -542,12 +547,13 @@ private fun FeedPage(
                         )
                     }
                 }
-                if (segments.isNotEmpty()) {
+                if (stripItems.isNotEmpty()) {
                     SegmentStrip(
-                        segments = segments,
-                        current = focus.segmentIndex,
+                        items = stripItems,
+                        currentItem = stripIndex,
+                        currentSegment = focus.segmentIndex,
                         tileHeight = scale.touchMin,
-                        onClick = viewModel::showSegment,
+                        onSelect = viewModel::showSegment,
                     )
                 }
                 FeedInfoBlock(
@@ -564,6 +570,20 @@ private fun FeedPage(
                         onSpeedOpenChange = { speedMenuOpen = it },
                     )
                 }
+            }
+            // 切片视频：底部段条只留一个占位，片间切换收进左侧竖向片条
+            videoGroup?.takeIf { it.sliceCount > 1 }?.let { group ->
+                SliceStrip(
+                    segments = segments,
+                    group = group,
+                    current = focus.segmentIndex,
+                    scale = scale,
+                    onSelect = viewModel::showSegment,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(start = CONTROLS_SIDE_PAD, top = scale.touchMin, bottom = scale.touchMin)
+                        .fillMaxHeight(0.5f),
+                )
             }
             if (isVideo && speedMenuOpen) {
                 // 档位竖列浮在倍速按钮正上方：同一个 Compose 层里画（不是 DropdownMenu 那种独立弹窗，
@@ -1106,21 +1126,22 @@ private fun EmptySegmentPage(segment: MediaSegment) {
 }
 
 /**
- * 段条：一眼看清这条内容由几段、什么构成，点哪段跳哪段。
+ * 段条：视频只占一个占位（角标标出片数），图片仍逐个显示；点视频跳到它的第 1 片。
  *
  * 用 `LazyRow` 而不是 `Row + horizontalScroll`：图集最多十几到几十张，
- * 全部一次解码会把内存预算顶穿；并且当前段要能自动滚进视野。
+ * 全部一次解码会把内存预算顶穿；并且当前项要能自动滚进视野。
  */
 @Composable
 private fun SegmentStrip(
-    segments: List<MediaSegment>,
-    current: Int,
+    items: List<StripItem>,
+    currentItem: Int,
+    currentSegment: Int,
     tileHeight: Dp,
-    onClick: (Int) -> Unit,
+    onSelect: (Int) -> Unit,
 ) {
     val stripState = rememberLazyListState()
-    LaunchedEffect(current, segments.size) {
-        if (current in segments.indices) stripState.animateScrollToItem(current)
+    LaunchedEffect(currentItem, items.size) {
+        if (currentItem in items.indices) stripState.animateScrollToItem(currentItem)
     }
     LazyRow(
         state = stripState,
@@ -1129,8 +1150,20 @@ private fun SegmentStrip(
             .padding(vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        itemsIndexed(segments, key = { index, _ -> index }) { index, segment ->
-            val active = index == current
+        itemsIndexed(items, key = { index, _ -> index }) { index, item ->
+            val active = index == currentItem
+            val coverUrl = when (item) {
+                is StripItem.VideoGroup -> item.coverUrl
+                is StripItem.ImageItem -> item.segment.url
+            }
+            val badge = when (item) {
+                is StripItem.VideoGroup -> if (item.sliceCount > 1) "${item.sliceCount} 段" else ""
+                is StripItem.ImageItem -> (index + 1).toString()
+            }
+            val clickLabel = when (item) {
+                is StripItem.VideoGroup -> "看第 ${index + 1} 个内容"
+                is StripItem.ImageItem -> "看第 ${index + 1} 张图片"
+            }
             Box(
                 modifier = Modifier
                     .height(tileHeight)
@@ -1139,25 +1172,104 @@ private fun SegmentStrip(
                     .background(if (active) FavColors.accent else Color(0x26FFFFFF))
                     .padding(if (active) 2.dp else 0.dp)
                     .clip(RoundedCornerShape(7.dp))
-                    .clickable(onClickLabel = "看第 ${index + 1} 段") { onClick(index) },
+                    .clickable(onClickLabel = clickLabel) {
+                        when (item) {
+                            is StripItem.VideoGroup -> {
+                                // 已经在这个视频里就无动作，不打断当前播放
+                                if (currentSegment !in item.startSegment..item.endSegment) {
+                                    onSelect(item.startSegment)
+                                }
+                            }
+                            is StripItem.ImageItem -> onSelect(item.segmentIndex)
+                        }
+                    },
             ) {
                 VideoCover(
-                    coverUrl = if (segment.kind == MediaKind.IMAGE) segment.url else segment.coverUrl,
+                    coverUrl = coverUrl,
                     contentDescription = null,
                     scrim = false,
                     decodeDp = tileHeight,
                     modifier = Modifier.fillMaxSize(),
                 )
+                if (badge.isNotEmpty()) {
+                    Text(
+                        text = badge,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(3.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0x99000000))
+                            .padding(horizontal = 4.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 左侧竖向片条：只在当前视频有多个切片时出现，点哪片跳哪片。
+ *
+ * 同一视频的切片共用封面，先用「封面 + 片序号」区分；当前片高亮并自动滚进视野。
+ */
+@Composable
+private fun SliceStrip(
+    segments: List<MediaSegment>,
+    group: StripItem.VideoGroup,
+    current: Int,
+    scale: TabletScale,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val indexes = (group.startSegment..group.endSegment).filter { it in segments.indices }
+    if (indexes.isEmpty()) return
+    val state = rememberLazyListState()
+    LaunchedEffect(current, group.startSegment, indexes.size) {
+        val local = current - group.startSegment
+        if (local in indexes.indices) state.animateScrollToItem(local)
+    }
+    LazyColumn(
+        state = state,
+        modifier = modifier
+            .width(scale.touchMin)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0x66000000))
+            .padding(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        itemsIndexed(indexes, key = { _, segmentIndex -> segmentIndex }) { _, segmentIndex ->
+            val segment = segments[segmentIndex]
+            val active = segmentIndex == current
+            val sliceNumber = segmentIndex - group.startSegment + 1
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(if (active) FavColors.accent else Color(0x26FFFFFF))
+                    .padding(if (active) 2.dp else 0.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .clickable(onClickLabel = "看第 $sliceNumber 片") { onSelect(segmentIndex) },
+            ) {
+                VideoCover(
+                    coverUrl = segment.coverUrl,
+                    contentDescription = null,
+                    scrim = false,
+                    decodeDp = scale.touchMin,
+                    modifier = Modifier.fillMaxSize(),
+                )
                 Text(
-                    text = (index + 1).toString(),
+                    text = sliceNumber.toString(),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.White,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(3.dp)
+                        .padding(2.dp)
                         .clip(RoundedCornerShape(4.dp))
                         .background(Color(0x99000000))
-                        .padding(horizontal = 4.dp),
+                        .padding(horizontal = 3.dp),
                 )
             }
         }

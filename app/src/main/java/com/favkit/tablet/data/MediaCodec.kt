@@ -29,6 +29,7 @@ internal object MediaCodec {
                 url = dto.url,
                 durationMs = dto.durationMs,
                 quality = dto.quality,
+                videoIndex = dto.videoIndex,
             )
         }
 

@@ -58,6 +58,8 @@ data class MediaSegment(
     val url: String,
     val durationMs: Long,
     val quality: String = "",
+    /** 视频段属于哪一路视频（同一视频的切片相同）；图片段为空 */
+    val videoIndex: Int? = null,
 ) {
     val playable: Boolean get() = kind == MediaKind.VIDEO && url.isNotBlank()
     val viewable: Boolean get() = kind == MediaKind.IMAGE && url.isNotBlank()

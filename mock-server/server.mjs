@@ -938,6 +938,8 @@ function renderSegments(row) {
     duration_ms: asset.duration_ms,
     quality: asset.quality,
     store_id: asset.store_id || '',
+    // 视频切片的分组序号：App 用它把同一视频的片折叠成段条上的一个占位
+    video_index: asset.video_index ?? null,
   }));
 }
 

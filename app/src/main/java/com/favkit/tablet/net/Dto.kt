@@ -64,6 +64,11 @@ data class SegmentDto(
     val url: String = "",
     @SerialName("duration_ms") val durationMs: Long = 0L,
     val quality: String = "",
+    /**
+     * 视频段属于哪一路视频（同一视频的切片相同）；图片段为空。
+     * 旧后台没有这个字段，App 会退回平铺的段条。
+     */
+    @SerialName("video_index") val videoIndex: Int? = null,
 )
 
 /**
