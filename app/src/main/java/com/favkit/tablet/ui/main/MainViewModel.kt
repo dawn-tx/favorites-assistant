@@ -19,7 +19,6 @@ import com.favkit.tablet.floating.SaveOutcome
 import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.net.LookupOutcome
 import com.favkit.tablet.net.PullOutcome
-import com.favkit.tablet.sync.SyncBadge
 import com.favkit.tablet.util.VideoLinkDetector
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
