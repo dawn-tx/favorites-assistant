@@ -228,6 +228,21 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 协议面完全一致：响应字段、游标、状态机、`retry-after` / `next_wait_ms`、媒体相对地址与
 `Cache-Control: public, max-age=31536000, immutable` 都不变。
 
+## WebSocket 控制面
+
+除 HTTP 外，开了一条 `GET /api/v1/ws`（需 `Authorization: Bearer`，`https` 对应 `wss`）：
+
+- 连接进 Durable Object `LibraryHub`（SQLite 版，免费版可用；用它做多连接广播）。
+- App 可在同一连接上发 `hello / list / lookup / resolve / ping`，请求带 `id`，响应同 `id`。
+- 服务端在收藏变化时推送：
+  - `{ "t": "favorites", "favorites": [完整收藏行...] }`（解析完成、备注变更、ingest 新增）；
+  - `{ "t": "deleted", "urls": [...] }`。
+  每 20 条收藏 / 100 个 url 一帧。
+- 推送是增强：WS 断开或未配置 `LIB` 绑定都不影响 HTTP 接口；App 断线重连后跑一次对账补齐。
+- 上传仍走 `POST /sync`，媒体仍走 HTTP；WS 只承载控制面。
+- DO 免费额度：10 万请求/天、13,000 GB-s/天；WS 入站消息按 20:1 计费，出站与协议 ping 不计费，
+  连接用 Hibernation API，空闲不烧时长。
+
 ## 免费版额度怎么用
 
 Workers 免费版：**每天 10 万次请求、每次调用 10ms CPU、最多 50 个子请求**；
@@ -264,7 +279,7 @@ cd backend-in-worker
 node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs
 ```
 
-覆盖：协议主链路 17 例、媒体与存储上传 10 例、回调/鉴权/上传/清理 11 例、上传策略 6 例、子请求预算 3 例。
+覆盖：协议主链路 17 例、媒体与存储上传 10 例、回调/鉴权/上传/清理 11 例、上传策略 6 例、子请求预算 3 例、WebSocket 中枢 6 例。
 
 大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
 以及切片服务 `:3000`；不可达时自动跳过）：

@@ -226,6 +226,12 @@ class FavoritesRepository(
         return ImportReport(imported, refreshed, skipped, broken)
     }
 
+    /** 前台兜底轮询用的待就绪 url（已同步、内容还在准备） */
+    suspend fun pendingUrls(limit: Int): List<String> = favoritesDao.pendingUrls(limit)
+
+    /** 本地排队删除、还没上传的墓碑 url */
+    suspend fun dirtyTombstones(): Set<String> = favoritesDao.dirtyTombstoneUrls().toSet()
+
     /**
      * 对账的本地快照：所有活行的 `url → 后台更新时刻`。
      *

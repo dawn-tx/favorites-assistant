@@ -121,3 +121,29 @@ export async function tick(worker, env, cron = '* * * * *') {
   await worker.scheduled({ cron }, env, { waitUntil: (task) => pending.push(task) });
   if (pending.length > 0) await Promise.allSettled(pending);
 }
+
+/**
+ * 桩 Durable Object 绑定：记录 notify 调用，不参与真实 WebSocket。
+ * 给 /sync、/ingest、解析任务的推送路径做断言用。
+ */
+export function createFakeHub() {
+  const calls = [];
+  return {
+    calls,
+    binding: {
+      idFromName: () => 'library',
+      get: () => ({
+        fetch: async (url, init) => {
+          let body = null;
+          try {
+            body = init?.body ? JSON.parse(String(init.body)) : null;
+          } catch {
+            body = null;
+          }
+          calls.push({ url: String(url), body });
+          return new Response('ok');
+        },
+      }),
+    },
+  };
+}

@@ -6,12 +6,13 @@ import { getAssetsByFavoriteIds } from '../store/assets.js';
 import { enqueueStatement } from '../store/jobs.js';
 import { publicRow } from '../render.js';
 import { deleteFavoriteWithMedia } from '../scheduled/runner.js';
+import { notifyHub } from '../hub.js';
 
 /**
  * POST /sync：App 的上传入口，一次一条。写收藏（UPSERT）/ 删收藏（DELETE），
  * 被拒就是整请求 4xx + 一句中文原因。成功后把这条的最新状态回给 App。
  */
-export async function handleSync(request, env, cfg) {
+export async function handleSync(request, env, cfg, ctx) {
   if (!authorized(request, cfg)) return rejectUnauthorized();
   try {
     const body = await readJsonBody(request, cfg.maxBodyBytes);
@@ -30,6 +31,7 @@ export async function handleSync(request, env, cfg) {
       const target = typeof op.url === 'string' ? op.url.trim() : '';
       if (!target) throw new HttpError(400, '第 1 条操作（DELETE）缺少 url');
       await deleteFavoriteWithMedia(env, cfg, target);
+      ctx?.waitUntil(notifyHub(env, { deleted: [target] }));
       const wait = nextWaitMs(cfg);
       return jsonResponse(
         200,
@@ -55,6 +57,8 @@ export async function handleSync(request, env, cfg) {
 
     const outcome = await upsertFavorite(env, cfg, { url, note, tags, sourceApp, favoriteAt, sliceRule });
     const row = await getFavorite(env.DB, url);
+    const favorites = row ? [publicRow(row, outcome.assets)] : [];
+    ctx?.waitUntil(notifyHub(env, { favorites }));
     const wait = nextWaitMs(cfg);
     return jsonResponse(
       200,
@@ -62,7 +66,7 @@ export async function handleSync(request, env, cfg) {
         ok: true,
         server_time: Date.now(),
         applied: 1,
-        favorites: row ? [publicRow(row, outcome.assets)] : [],
+        favorites,
         next_wait_ms: wait,
       },
       { 'retry-after': String(Math.max(0, Math.ceil(wait / 1000))) },

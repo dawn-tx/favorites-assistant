@@ -27,6 +27,14 @@ interface FavoritesDao {
     @Query("SELECT * FROM favorites WHERE url = :url ORDER BY deletedAt DESC LIMIT 1")
     suspend fun byUrlIncludingDeleted(url: String): FavoriteRow?
 
+    /** 前台兜底轮询：只问那些已经同步、内容还没就绪的活行 */
+    @Query("SELECT url FROM favorites WHERE mediaState = 'pending' AND deletedAt IS NULL AND badge = 'SYNCED' LIMIT :limit")
+    suspend fun pendingUrls(limit: Int): List<String>
+
+    /** 本地已经排队删除、还没传到后台的墓碑：推送/对账都不能把它们复活 */
+    @Query("SELECT url FROM favorites WHERE deletedAt IS NOT NULL AND badge != 'SYNCED'")
+    suspend fun dirtyTombstoneUrls(): List<String>
+
     /**
      * 只认墓碑的 url 查询：给「删掉之后又收藏同一链接」那条路复用旧行用。
      *

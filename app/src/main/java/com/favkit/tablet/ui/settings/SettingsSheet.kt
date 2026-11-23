@@ -332,49 +332,6 @@ fun SettingsSheet(
                         modifier = Modifier.padding(scale.gapSm),
                         verticalArrangement = Arrangement.spacedBy(scale.gapSm),
                     ) {
-                        SectionTitle("对账")
-                        ToggleRow(
-                            label = "自动对账",
-                            hint = "开启后：进前台、上传队列排空时自动翻一遍后台清单做差集。" +
-                                "默认关闭；关闭时只在设置里手动点「立即对账」，首次空库仍会取第一页。",
-                            checked = settings.autoReconcile,
-                            scale = scale,
-                            onCheckedChange = viewModel::setAutoReconcile,
-                        )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(scale.gapSm),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            OutlinedButton(
-                                onClick = viewModel::reconcileNow,
-                                enabled = !state.reconciling,
-                                modifier = Modifier.heightIn(min = scale.touchMin),
-                            ) {
-                                Text(if (state.reconciling) "对账中…" else "立即对账")
-                            }
-                            Text(
-                                "翻清单补新增、刷新变更、删掉后台已删的行。",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                        state.reconcileResult?.let { result ->
-                            Text(
-                                text = result,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (result.startsWith("对账失败")) FavColors.fail
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-
-                Cardish(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(scale.gapSm),
-                        verticalArrangement = Arrangement.spacedBy(scale.gapSm),
-                    ) {
                         SectionTitle("全局悬浮收藏助手")
                         ToggleRow(
                             label = "常驻悬浮球",

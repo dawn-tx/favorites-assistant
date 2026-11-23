@@ -1,6 +1,7 @@
 import { jsonResponse, readJsonBody } from '../http.js';
 import { validUrl } from '../validate.js';
 import { countJobs } from '../store/jobs.js';
+import { notifyHub } from '../hub.js';
 
 /**
  * POST /<INGEST_PATH>：B 的回调入口。格式由 B 定死，我们只负责适配。
@@ -12,7 +13,7 @@ import { countJobs } from '../store/jobs.js';
  */
 const MAX_INGEST_ITEMS = 200;
 
-export async function handleIngest(request, env, cfg) {
+export async function handleIngest(request, env, cfg, ctx) {
   try {
     const body = await readJsonBody(request, cfg.maxBodyBytes);
     const items = extractIngestItems(body);
@@ -42,6 +43,7 @@ export async function handleIngest(request, env, cfg) {
 
     const now = Date.now();
     let created = 0;
+    const createdUrls = [];
     if (targets.length > 0) {
       const results = await env.DB.batch(
         targets.map((url) =>
@@ -53,9 +55,12 @@ export async function handleIngest(request, env, cfg) {
           ).bind(url, cfg.ingestSourceApp, now, now, JSON.stringify(cfg.defaultSliceRule)),
         ),
       );
-      for (const result of results) {
-        if ((result.meta?.changes ?? 0) > 0) created += 1;
-      }
+      results.forEach((result, index) => {
+        if ((result.meta?.changes ?? 0) > 0) {
+          created += 1;
+          createdUrls.push(targets[index]);
+        }
+      });
       if (created > 0) {
         await env.DB.batch(
           targets.map((url) =>
@@ -64,6 +69,22 @@ export async function handleIngest(request, env, cfg) {
                ON CONFLICT(url, kind) DO NOTHING`,
             ).bind(url),
           ),
+        );
+        // 新进来的条目直接推给在线设备；内容就绪时解析任务还会再推一次
+        ctx?.waitUntil(
+          notifyHub(env, {
+            favorites: createdUrls.map((url) => ({
+              url,
+              note: '',
+              tags: [],
+              source_app: cfg.ingestSourceApp,
+              favorite_at: now,
+              updated_at: now,
+              media_state: 'pending',
+              failed_reason: '',
+              media: null,
+            })),
+          }),
         );
       }
     }

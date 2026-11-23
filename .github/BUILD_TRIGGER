@@ -9,7 +9,7 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 28
-code: 4fae4ce
-note: 遮罩层段条按视频分组：切片折叠成一个占位，片间切换收进左侧竖向片条；
-      同包含新增的 Cloudflare Worker 后台（D1 元数据 + 外部存储转存）。
+build: 29
+code: b9b062c
+note: App 加 WebSocket 控制面与完整行推送（列表自动从准备中变可看），设置页移除对账开关/立即对账，
+      改为进前台自动对账；后端新增 Durable Object 中枢 /ws 与 HTTP 降级，文档同步更新。

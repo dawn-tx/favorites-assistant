@@ -31,6 +31,8 @@ import {
 } from '../store/assets.js';
 import { getFavoritesByUrls } from '../store/favorites.js';
 import { enqueueStatement } from '../store/jobs.js';
+import { publicRow } from '../render.js';
+import { notifyHub } from '../hub.js';
 
 /**
  * 免费版一次调用最多 50 个子请求（D1 查询、fetch 都算），所以调度器带着预算跑：
@@ -87,6 +89,9 @@ async function runParseJobs(env, cfg, now, budget) {
       if (staleStoreIds.length > 0) {
         await deleteStoredMedia({ env, cfg, storeIds: staleStoreIds }).catch(() => {});
       }
+      // 内容就绪立刻推给在线设备：这是列表从「准备中」变成可看的关键一步
+      const fresh = (await getFavoritesByUrls(env.DB, [row.url]))[0];
+      if (fresh) await notifyHub(env, { favorites: [publicRow(fresh, result.assets)] });
       done += 1;
     } catch (error) {
       if (error?.budgetExhausted) {
@@ -164,6 +169,16 @@ async function handleParseFailure(env, cfg, row, job, error) {
   const attempts = (job.attempts ?? 0) + 1;
   if (attempts >= cfg.transferMaxAttempts) {
     await db.batch([markFavoriteFailedStatement(db, row.url, error.message), completeJobStatement(db, job.id)]);
+    // 失败也要让列表知道（显示原因、停止「准备中」）
+    try {
+      const failed = (await getFavoritesByUrls(db, [row.url]))[0];
+      if (failed) {
+        const assets = await getAssetsByFavoriteIds(db, [failed.id]);
+        await notifyHub(env, { favorites: [publicRow(failed, assets)] });
+      }
+    } catch {
+      // 推送失败不影响失败落库
+    }
     return;
   }
   const nextAt = Date.now() + cfg.transferRetryMs * attempts;

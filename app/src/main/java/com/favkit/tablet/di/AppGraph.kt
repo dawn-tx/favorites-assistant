@@ -9,6 +9,8 @@ import com.favkit.tablet.data.db.AppDatabase
 import com.favkit.tablet.media.ImageStore
 import com.favkit.tablet.media.MediaCache
 import com.favkit.tablet.media.TabletPlayer
+import com.favkit.tablet.net.ControlClient
+import com.favkit.tablet.net.RealtimeSocket
 import com.favkit.tablet.net.SyncApi
 import com.favkit.tablet.net.SyncGate
 import com.favkit.tablet.sync.Connectivity
@@ -32,8 +34,13 @@ class AppGraph private constructor(private val app: Application) {
 
     val gate: SyncGate by lazy { SyncGate() }
     val api: SyncApi by lazy { SyncApi(settings, gate) }
+
+    /** 控制面：WS 在线走 WS，失败自动回退 HTTP */
+    val realtime: RealtimeSocket by lazy { RealtimeSocket(settings) }
+    val control: ControlClient by lazy { ControlClient(api, settings, realtime) }
+
     // 对账要发请求、落库，两样都是别人已经建好的对象；sync 不反过来被它们持有，无环
-    val sync: SyncManager by lazy { SyncManager(app, db, favorites, api, connectivity) }
+    val sync: SyncManager by lazy { SyncManager(app, db, favorites, control, connectivity) }
 
     companion object {
         @Volatile

@@ -54,12 +54,7 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
         while (System.currentTimeMillis() - startedAt < MAX_RUN_MS) {
             if (!graph.connectivity.isOnline) return Result.retry()
             val op = ops.nextDue(System.currentTimeMillis())
-            if (op == null) {
-                // 自动对账开启时，队列排空 = 本机刚把自己攒的改动传完，顺手对一次账。
-                // 放在这一档而不是开头：开头时本机还有东西要发，对账结果会被自己的在途改动盖住。
-                if (graph.settings.current().autoReconcile) sweepQuietly(graph)
-                return Result.success()
-            }
+            if (op == null) return Result.success()
             val dto = runCatching { graph.sync.decodePayload(op) }.getOrNull()
             if (dto == null) {
                 // 载荷无法解析（例如升级后字段变更），丢弃而不是无限阻塞队列
@@ -123,21 +118,6 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
             }
         }
         return if (ops.dueCount(System.currentTimeMillis()) > 0) Result.retry() else Result.success()
-    }
-
-    /**
-     * 对账的失败面全吞在这里：它是纯读，队列状态不因它变，所以本轮的返回值照旧是 success ——
-     * 换成 failure 会让 WorkManager 给一个「没有待传条目」的轮次退避重排，把失败原因顶成上传失败。
-     *
-     * 失败会经由 `SyncManager.sweepError` 让界面底部的悬浮条说出来，所以这里不需要额外记账。
-     * 取消不在吞的范围里：worker 被停时协程必须原样断出去。
-     */
-    private suspend fun sweepQuietly(graph: AppGraph) {
-        try {
-            graph.sync.sweep()
-        } catch (failure: Exception) {
-            if (failure is CancellationException) throw failure
-        }
     }
 
     private fun farFuture(): Long = Long.MAX_VALUE / 4

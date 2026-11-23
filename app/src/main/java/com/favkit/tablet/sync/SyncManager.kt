@@ -12,11 +12,11 @@ import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.FavoritesRepository
 import com.favkit.tablet.data.db.AppDatabase
 import com.favkit.tablet.data.db.PendingOpRow
+import com.favkit.tablet.net.ControlClient
 import com.favkit.tablet.net.FavoriteDto
 import com.favkit.tablet.net.LookupOutcome
 import com.favkit.tablet.net.OpDto
 import com.favkit.tablet.net.PullOutcome
-import com.favkit.tablet.net.SyncApi
 import com.favkit.tablet.net.toDeleteOp
 import com.favkit.tablet.net.toUpsertOp
 import java.util.concurrent.Executors
@@ -24,12 +24,15 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
@@ -39,14 +42,14 @@ import kotlinx.serialization.json.Json
  * 2) [SyncWorker] 串行消费队列；两条之间的等待由 [com.favkit.tablet.net.SyncGate] 在出站口统一把控；
  * 3) 网络类失败静默退避重试 [MAX_ATTEMPTS] 次，用尽后留在队列里，靠联网回调或下次改动自动补传；
  * 4) 后台明确拒绝（4xx 或确认条数对不上）的条目保留在队列并标 FAILED，绝不静默丢弃；
- * 5) 自动对账开启时，队列排空后由 [sweep] 翻一遍后台清单做差集：补进新增、刷新变更、删掉后台已经没有的活行；
- *    默认关闭，设置页可手动触发。
+ * 5) 进前台时由界面触发一次 [sweep]：翻一遍后台清单做差集，补进新增、刷新变更、删掉后台已经没有的活行；
+ *    WS 在线期间的增删改由服务端推送直接落库，不依赖这一轮。
  */
 class SyncManager(
     context: Context,
     db: AppDatabase,
     private val favorites: FavoritesRepository,
-    private val api: SyncApi,
+    private val control: ControlClient,
     private val connectivity: Connectivity,
 ) {
 
@@ -74,11 +77,12 @@ class SyncManager(
     /**
      * 同一时刻只允许一笔对账在跑。
      *
-     * 自动对账开启时有两档触发 —— [SyncWorker] 排空队列那一档（worker 本身是 unique work，已经串了）与
-     * 进前台那一档（`MainActivity.onResume`），两条链路并发是常态而不是将来时；设置页的「立即对账」是第三条。
+     * 触发点有两档：进前台（MainViewModel.onEnterForeground）与底部提示条上的「重试」。
+     * 两条链路并发是常态而不是将来时；撞上了直接回 BUSY，什么都不做。
      */
     private val sweeping = AtomicBoolean(false)
     private val _running = MutableStateFlow(false)
+    private var foregroundPoll: Job? = null
 
     val queuedCount: Flow<Int> = pendingOps.observeCount()
 
@@ -96,7 +100,7 @@ class SyncManager(
     /**
      * 最近一次对账的失败原因，null = 上次对账成功或还没对过。
      *
-     * 这条**要**在界面上说出来：对账是唯一能把别的设备/另一个 App 写进来的东西带回来的路，
+     * 这条**要**在界面上说出来：WS 断线期间漏掉的删除只能靠这一轮完整差集补判，
      * 它一直失败而界面只显示「待同步 0」，用户会以为一切正常。界面那条底部悬浮提示条读它，
      * 下一次对账成功就自动消失。
      */
@@ -108,10 +112,75 @@ class SyncManager(
     }
 
     init {
+        // 推送落到 Room：服务端字段覆盖内容，本地未上传的 note/tags 由 importRemote 保留
+        control.realtime.onFavorites = { rows ->
+            scope.launch { runCatching { applyRemoteRows(rows) } }
+        }
+        control.realtime.onDeleted = { urls ->
+            scope.launch { applyRemoteDeletes(urls) }
+        }
+        // 重连后补一次 pending 查询：断线期间的 ready 推送会丢；完整差集交给进前台那一轮
+        control.realtime.onConnected = {
+            scope.launch { runCatching { pollPendingOnce() } }
+        }
         // 联网跳变即补传。网络状态由 AppGraph 里共享的那一份提供，亮屏/回前台会主动重算。
         scope.launch {
             connectivity.onlineTransitions().collect { flush() }
         }
+    }
+
+    /**
+     * 前台兜底轮询：WS 没连上时，每 10 秒问一次本地还在 pending 的收藏，最多两分钟。
+     * 这是「WS 在线靠推送、离线靠对账」之外第三条路，专门补弱网/后台导致的漏推。
+     */
+    fun attachRealtime() {
+        control.realtime.connect()
+        if (foregroundPoll?.isActive == true) return
+        foregroundPoll = scope.launch {
+            val deadline = System.currentTimeMillis() + PENDING_POLL_WINDOW_MS
+            while (isActive && System.currentTimeMillis() < deadline) {
+                delay(PENDING_POLL_MS)
+                if (control.realtime.connected) return@launch
+                val urls = runCatching { favorites.pendingUrls(PENDING_POLL_LIMIT) }.getOrDefault(emptyList())
+                if (urls.isEmpty()) return@launch
+                pollPendingOnce(urls)
+            }
+        }
+    }
+
+    private suspend fun pollPendingOnce() {
+        val urls = runCatching { favorites.pendingUrls(PENDING_POLL_LIMIT) }.getOrDefault(emptyList())
+        pollPendingOnce(urls)
+    }
+
+    private suspend fun pollPendingOnce(urls: List<String>) {
+        if (urls.isEmpty()) return
+        when (val outcome = control.lookup(urls)) {
+            is LookupOutcome.Loaded -> runCatching { favorites.importRemote(outcome.favorites) }
+            is LookupOutcome.Failed -> Unit
+        }
+    }
+
+    fun detachRealtime() {
+        control.realtime.disconnect()
+        foregroundPoll?.cancel()
+        foregroundPoll = null
+    }
+
+    /** 推送里的删除同样只删干净行：脏行归上传链路收敛 */
+    private suspend fun applyRemoteDeletes(urls: List<String>) {
+        if (urls.isEmpty()) return
+        val marks = runCatching { favorites.localIndex() }.getOrElse { return }
+        val clean = urls.filter { marks[it]?.dirty == false }
+        if (clean.isNotEmpty()) runCatching { favorites.dropByUrls(clean) }
+    }
+
+    /** 推送里的收藏：本地排队删除的墓碑不能被「后台还有这条」复活 */
+    private suspend fun applyRemoteRows(rows: List<FavoriteDto>) {
+        if (rows.isEmpty()) return
+        val tombstoned = favorites.dirtyTombstones()
+        val usable = rows.filterNot { it.url in tombstoned }
+        if (usable.isNotEmpty()) favorites.importRemote(usable)
     }
 
     /** 把一条收藏的当前状态排进上传队列（整行覆盖，后台按 url 落库） */
@@ -201,7 +270,7 @@ class SyncManager(
         var pages = 0
         var complete = false
         while (pages < MAX_MANIFEST_PAGES) {
-            when (val page = api.pullManifest(cursor, MANIFEST_PAGE)) {
+            when (val page = control.pullManifest(cursor, MANIFEST_PAGE)) {
                 is PullOutcome.Failed -> return Sweep.FAILED(page.reason)
                 is PullOutcome.Loaded -> {
                     manifest += page.favorites
@@ -218,10 +287,13 @@ class SyncManager(
         if (!complete) return Sweep.FAILED("清单页数超过上限，这一轮放弃删除判断")
 
         val local = favorites.localIndex()
+        val tombstoned = favorites.dirtyTombstones()
         val remoteUrls = manifest.mapTo(HashSet()) { it.url }
 
-        // 需要取内容的：本地没有的（新增），或后台更新时刻变了的（内容/备注变了）
+        // 需要取内容的：本地没有的（新增），或后台更新时刻变了的（内容/备注变了）；
+        // 本地排队删除的墓碑不取，免得被远端还在的行复活
         val needContent = manifest.filter { row ->
+            if (row.url in tombstoned) return@filter false
             val known = local[row.url]
             known == null || row.updatedAt == 0L || row.updatedAt != known.serverUpdatedAt
         }.map { it.url }
@@ -229,7 +301,7 @@ class SyncManager(
         var refreshed = 0
         var broken = 0
         for (batch in needContent.distinct().chunked(LOOKUP_BATCH)) {
-            when (val outcome = api.lookup(batch)) {
+            when (val outcome = control.lookup(batch)) {
                 // 内容没取到就不继续：这一轮到此为止，删也先不删（下面那句只在完整走完后执行）
                 is LookupOutcome.Failed -> return Sweep.PARTIAL(outcome.reason, refreshed)
                 is LookupOutcome.Loaded -> {
@@ -288,6 +360,11 @@ class SyncManager(
 
         /** lookup 一次最多 200 个 url：与后台契约同值，超出的在这里分批，不指望后台静默截断 */
         private const val LOOKUP_BATCH = 200
+
+        /** 前台兜底轮询：WS 不在线时每 10 秒问一次待就绪条目，最多坚持 2 分钟 */
+        private const val PENDING_POLL_MS = 10_000L
+        private const val PENDING_POLL_WINDOW_MS = 2 * 60_000L
+        private const val PENDING_POLL_LIMIT = 50
     }
 }
 

@@ -52,3 +52,13 @@ STORAGE_TIMEOUT_MS = "300000"
 binding = "DB"
 database_name = "favorites"
 database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# 个人库的 WebSocket 中枢：一个实例持有全部在线连接并广播变更。
+# 必须是 SQLite 后端（免费版只支持 SQLite 版 DO）。
+[[durable_objects.bindings]]
+name = "LIB"
+class_name = "LibraryHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LibraryHub"]

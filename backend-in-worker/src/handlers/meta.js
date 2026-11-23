@@ -52,5 +52,12 @@ export function handleMeta(env, cfg) {
       upload_items_per_tick: cfg.uploadItemsPerTick,
       note: 'Workers 没有常驻进程：解析/备份是 D1 队列 + 每分钟 cron；免费版一次调用最多 50 个子请求，所以每轮只跑一小批',
     },
+    ws: {
+      path: 'ws',
+      requires_auth: cfg.syncToken !== '',
+      messages: ['hello', 'list', 'lookup', 'resolve', 'ping'],
+      push: ['favorites', 'deleted'],
+      note: '控制面 WebSocket：清单、lookup、重新准备与推送走 WS；上传仍走 POST /sync，媒体仍走 HTTP。推送是完整收藏行，删除推 url 列表',
+    },
   });
 }

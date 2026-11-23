@@ -81,6 +81,8 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // 熄屏/Doze 可能漏掉一次联网恢复回调：回前台先按当前网络重算一次，避免一直显示离线
         appGraph.connectivity.refresh()
+        // 控制面 WS 只在前台保持：推送负责 pending → ready 与别的设备的变更
+        appGraph.sync.attachRealtime()
         // 用户开启过助手且已授权，就把它拉起来；服务本身 START_STICKY，常驻不轮询
         lifecycleScope.launch {
             val snapshot = appGraph.settings.current()
@@ -92,6 +94,12 @@ class MainActivity : ComponentActivity() {
         // launch 会就地跑到第一个挂起点，冷启动时那等于在首帧之前发出请求（还会顺手把 ViewModel 建出来）。
         // decorView 未 attach 时 post 进的是 attach 队列，真跑起来是第一次 traversal 之后的下一条消息。
         window.decorView.post { mainModel.onEnterForeground() }
+    }
+
+    override fun onPause() {
+        // 后台不保持 WS：Android 会挂起连接，留着重连反而耗电；回前台再连并走一次兜底
+        appGraph.sync.detachRealtime()
+        super.onPause()
     }
 
     private fun enableAssistantNow() {
