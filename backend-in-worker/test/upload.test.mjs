@@ -79,6 +79,10 @@ test('批量上传：按 STORAGE_BATCH_SIZE 切批，每批 ≤10 条，全部�
   const batches = storage.state.requests;
   assert.ok(batches.length >= 2, `应切成多批，实际 ${batches.length} 批`);
   assert.ok(batches.every((batch) => batch.length <= 2), '每批不应超过配置的批大小');
+  for (const item of batches.flat()) {
+    assert.equal(item.favorite?.url, url, '每条都应带收藏 url');
+    assert.equal(typeof item.favorite?.summary, 'string', '每条都应带 summary');
+  }
 });
 
 test('阈值：选中视频不超过片大小时整片一段', async () => {

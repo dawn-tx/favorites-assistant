@@ -121,12 +121,14 @@ test('图片与封面同样走代理', async () => {
   assert.equal((await coverRes.arrayBuffer()).byteLength, origin.constants.IMAGE.length);
 });
 
-test('上传交给外部存储：请求是按顺序的 [{type,media}]，段上写回返回的 id', async () => {
+test('上传交给外部存储：请求是按顺序的 [{type,media,favorite}]，段上写回返回的 id', async () => {
   assert.ok(storage.state.calls > 0, '存储服务应被调用');
   assert.ok(storage.state.requests.every((batch) => batch.length <= 10));
   const all = storage.state.requests.flat();
   assert.ok(all.every((item) => item.type === 'video' || item.type === 'image'));
   assert.ok(all.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/`)));
+  assert.ok(all.every((item) => item.favorite?.url === videoRow.url));
+  assert.ok(all.every((item) => item.favorite?.summary === videoRow.media.summary));
 
   for (const segment of videoRow.media.segments) {
     assert.ok(segment.store_id.startsWith('st-'), `store_id 应来自存储服务：${segment.store_id}`);

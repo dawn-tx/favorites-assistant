@@ -223,7 +223,11 @@ async function runUploadJobs(env, cfg, now, budget) {
       index += batch.length;
       try {
         // 上传的是本 Worker 的虚拟媒体地址；存储服务自己回源复制，复制完成才返回 id
-        const ids = await uploadAssetsToStorage(cfg, batch);
+        // 同一批一定来自这条收藏：把 url/summary 一并带上，每条都重复一份
+        const ids = await uploadAssetsToStorage(cfg, batch, {
+          url: row.url,
+          summary: row.media?.summary ?? '',
+        });
         const statements = batch.map((asset, i) => {
           asset.storeId = ids[i];
           return setAssetStoreStatement(env.DB, asset.key, ids[i], '');

@@ -54,9 +54,15 @@ export function startStorage() {
     for (const item of items) {
       const type = item?.type;
       const media = item?.media;
+      const favorite = item?.favorite;
       if ((type !== 'video' && type !== 'image') || typeof media !== 'string' || !/^https?:/.test(media)) {
         res.writeHead(400, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: '条目形状不对' }));
+        return;
+      }
+      if (!favorite || typeof favorite.url !== 'string' || !favorite.url || typeof favorite.summary !== 'string') {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: '条目缺少 favorite.url/summary' }));
         return;
       }
       const response = await fetch(media);
@@ -69,7 +75,7 @@ export function startStorage() {
       const stored = await readAndHash(response, KEEP_BYTES);
       const id = `st-${state.nextId}`;
       state.nextId += 1;
-      state.files.set(id, { type, media, ...stored });
+      state.files.set(id, { type, media, favorite, ...stored });
       ids.push(id);
     }
     res.writeHead(200, { 'content-type': 'application/json' });

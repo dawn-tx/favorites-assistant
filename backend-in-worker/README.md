@@ -44,12 +44,15 @@ backend-in-worker/
 
 ```
 POST {STORAGE_UPLOAD_URL}
-[{ "type": "video", "media": "https://<worker>/api/v1/media/<key>.mp4" },
- { "type": "image", "media": "https://<worker>/api/v1/media/<key2>.jpg" }]
+[{ "type": "video", "media": "https://<worker>/api/v1/media/<key>.mp4",
+   "favorite": { "url": "https://www.bilibili.com/video/BV...", "summary": "解析服务返回的一句话说明" } },
+ { "type": "image", "media": "https://<worker>/api/v1/media/<key2>.jpg",
+   "favorite": { "url": "https://www.bilibili.com/video/BV...", "summary": "解析服务返回的一句话说明" } }]
 
 → ["id1", "id2"]        // 按上传顺序，单次最多 10 条
 ```
 
+- 一批只属于**同一个收藏**，所以每条都带同一个 `favorite: { url, summary }`；`summary` 为空串时也会带上字段。
 - 每个切片也是独立文件：Worker 的虚拟地址本来就是 `init + 源区间` 合成后的完整片，
   所以存储服务拿到的就是可直接播放的字节。
 - 整批失败（任一条回源失败、非 2xx、id 数量不符）就按整条任务退避重试；

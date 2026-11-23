@@ -42,7 +42,7 @@ export function handleMeta(env, cfg) {
       covers: true,
       batch_size: cfg.storageBatchSize,
       max_slices_per_favorite: cfg.maxSlicesPerFavorite,
-      note: '每个视频只传一档；超过片大小才切片；图片与封面全传。上传时把本服务的虚拟媒体地址交给外部存储服务回源转存，单次最多 10 条，返回的 id 写回 store_id；单条收藏切片总数有上限，超出的视频退回整片',
+      note: '每个视频只传一档；超过片大小才切片；图片与封面全传。上传时把本服务的虚拟媒体地址与收藏的 favorite:{url,summary} 交给外部存储服务回源转存，单次最多 10 条，返回的 id 写回 store_id；单条收藏切片总数有上限，超出的视频退回整片',
     },
     scheduler: {
       kind: 'cron',

@@ -4,7 +4,8 @@ import { mediaPath, segmentExt } from '../keys.js';
  * 外部存储服务适配层。
  *
  * 上传：把一批 asset 的**虚拟媒体地址**交给存储服务，由它回源转存。
- * 请求体是数组 `[{ type: 'video' | 'image', media: url }]`，单次最多 10 条；
+ * 请求体是数组 `[{ type, media, favorite: { url, summary } }]`，单次最多 10 条；
+ * 每条都带同一个收藏的 url 与 summary（一批只属于一个收藏）。
  * 响应是按上传顺序排列的 id 数组。当前按「整体失败」处理：任何一条失败就整批重试。
  *
  * 下载与删除先搭框架：接上存储方契约后，在下面两个函数里返回对应结果即可。
@@ -17,23 +18,29 @@ function mediaUrl(cfg, asset) {
   return `${base}${mediaPath(asset.key, segmentExt(asset.kind))}`;
 }
 
-export function buildUploadItems(cfg, assets) {
+export function buildUploadItems(cfg, assets, favorite) {
+  const favoriteInfo = {
+    url: favorite?.url ?? '',
+    summary: favorite?.summary ?? '',
+  };
   return assets.map((asset) => ({
     type: asset.kind === 'video' ? 'video' : 'image',
     media: mediaUrl(cfg, asset),
+    favorite: { ...favoriteInfo },
   }));
 }
 
 /**
  * 调外部存储上传一批 asset，返回与入参顺序一致的 id 数组。
+ * [favorite] 是这批 asset 所属的收藏（同一批一定来自同一条收藏）。
  * 复制完成才返回；非 2xx、JSON 不合法、id 数量对不上都按整批失败抛出。
  */
-export async function uploadAssetsToStorage(cfg, assets) {
+export async function uploadAssetsToStorage(cfg, assets, favorite) {
   if (!cfg.storageUploadUrl) throw new Error('未配置 STORAGE_UPLOAD_URL');
   if (assets.length === 0) return [];
   if (assets.length > MAX_BATCH) throw new Error(`一次最多上传 ${MAX_BATCH} 条素材`);
 
-  const items = buildUploadItems(cfg, assets);
+  const items = buildUploadItems(cfg, assets, favorite);
   const headers = { 'content-type': 'application/json' };
   if (cfg.storageToken) headers.authorization = `Bearer ${cfg.storageToken}`;
 
