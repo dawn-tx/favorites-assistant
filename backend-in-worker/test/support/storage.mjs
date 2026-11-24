@@ -17,6 +17,12 @@ export function startStorage() {
     requests: [],
     files: new Map(),
     nextId: 1,
+    /** 剩余多少次上传请求回 429；retryAfterSeconds 控制响应头 */
+    throttle: 0,
+    retryAfterSeconds: 0,
+    throttled: 0,
+    /** 每次被接受的上传调用的时间戳，用来断言节奏 */
+    callTimes: [],
   };
 
   const server = createServer(async (req, res) => {
@@ -49,6 +55,18 @@ export function startStorage() {
     }
 
     state.calls += 1;
+    state.callTimes.push(Date.now());
+    if (state.throttle > 0) {
+      state.throttle -= 1;
+      state.throttled += 1;
+      res.writeHead(429, {
+        'content-type': 'application/json',
+        'retry-after': String(state.retryAfterSeconds),
+      });
+      res.end(JSON.stringify({ error: 'busy' }));
+      return;
+    }
+
     state.requests.push(items);
     const ids = [];
     for (const item of items) {

@@ -31,6 +31,26 @@ export function buildUploadItems(cfg, assets, favorite) {
 }
 
 /**
+ * 存储服务限流：调用方应按 retryAfterMs 把整条任务延后，而不是记一次失败重试。
+ */
+export class StorageThrottleError extends Error {
+  constructor(message, retryAfterMs) {
+    super(message);
+    this.name = 'StorageThrottleError';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function parseRetryAfter(value, fallbackMs) {
+  if (!value) return fallbackMs;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const date = Date.parse(value);
+  if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  return fallbackMs;
+}
+
+/**
  * 调外部存储上传一批 asset，返回与入参顺序一致的 id 数组。
  * [favorite] 是这批 asset 所属的收藏（同一批一定来自同一条收藏）。
  * 复制完成才返回；非 2xx、JSON 不合法、id 数量对不上都按整批失败抛出。
@@ -54,6 +74,14 @@ export async function uploadAssetsToStorage(cfg, assets, favorite) {
     });
   } catch (error) {
     throw new Error(`存储服务不可达：${error.message}`);
+  }
+  if (response.status === 429) {
+    const detail = await response.text().catch(() => '');
+    const wait = parseRetryAfter(response.headers.get('retry-after'), cfg.uploadWaitMs);
+    throw new StorageThrottleError(
+      `存储服务限流：HTTP 429${detail ? `：${detail.slice(0, 120)}` : ''}`,
+      wait,
+    );
   }
   if (!response.ok) {
     const detail = await response.text().catch(() => '');

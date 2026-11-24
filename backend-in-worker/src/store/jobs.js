@@ -64,6 +64,11 @@ export function releaseJobStatement(db, id) {
   return db.prepare('UPDATE jobs SET locked_until = 0 WHERE id = ?').bind(id);
 }
 
+/** 被存储服务限流：不记 attempts，只把任务推到 retryAfter 之后 */
+export function deferJobStatement(db, id, nextAt) {
+  return db.prepare('UPDATE jobs SET next_at = ?, locked_until = 0 WHERE id = ?').bind(nextAt, id);
+}
+
 export async function countJobs(db) {
   const row = await db.prepare('SELECT COUNT(*) AS n FROM jobs').first();
   return Number(row?.n) || 0;

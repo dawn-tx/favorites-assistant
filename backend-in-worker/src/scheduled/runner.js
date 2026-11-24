@@ -1,9 +1,10 @@
 import { parseFavorite } from '../parse.js';
-import { deleteStoredMedia, MAX_BATCH, uploadAssetsToStorage } from '../policy/index.js';
+import { deleteStoredMedia, MAX_BATCH, StorageThrottleError, uploadAssetsToStorage } from '../policy/index.js';
 import { createBudget } from '../budget.js';
 import {
   claimJobs,
   completeJobStatement,
+  deferJobStatement,
   releaseJobStatement,
   retryJobStatement,
 } from '../store/jobs.js';
@@ -40,6 +41,11 @@ import { notifyHub } from '../hub.js';
  * db.batch() 在 D1 里算一次查询，所有写操作都尽量合并成一批。
  */
 const SUBREQUEST_BUDGET = 45;
+
+/** 单次调用内最多为「存储调用间隔」睡这么久，超出就交回下一轮 cron */
+const UPLOAD_PACING_WINDOW_MS = 15_000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function runScheduled(env, cfg, now = Date.now(), budgetLeft = SUBREQUEST_BUDGET) {
   const budget = createBudget(budgetLeft);
@@ -192,7 +198,11 @@ async function runUploadJobs(env, cfg, now, budget) {
   budget.left -= 1;
 
   let uploaded = 0;
-  for (const job of jobs) {
+  const startedAt = Date.now();
+  let lastStorageAt = 0;
+
+  for (let jobIndex = 0; jobIndex < jobs.length; jobIndex += 1) {
+    const job = jobs[jobIndex];
     if (budget.left < 5) {
       await releaseJobStatement(env.DB, job.id).run();
       continue;
@@ -213,12 +223,26 @@ async function runUploadJobs(env, cfg, now, budget) {
     let index = 0;
     let failures = 0;
     let budgetExhausted = false;
+    let throttled = null;
     while (index < maxItems) {
       // 一次存储调用 = 1 个子请求；再留 2 个给「写回 id + 失败记录」的 D1 batch
       if (budget.left < 4) {
         budgetExhausted = true;
         break;
       }
+      // UPLOAD_WAIT_MS 原本就是给存储服务 429 留的节奏：两次存储调用之间至少隔这么久。
+      // 长等待不占着当前调用睡，直接放回队列交给下一轮 cron。
+      if (cfg.uploadWaitMs > 0 && lastStorageAt > 0) {
+        const wait = cfg.uploadWaitMs - (Date.now() - lastStorageAt);
+        if (wait > 0) {
+          if (Date.now() - startedAt + wait > UPLOAD_PACING_WINDOW_MS) {
+            budgetExhausted = true;
+            break;
+          }
+          await sleep(wait);
+        }
+      }
+      lastStorageAt = Date.now();
       const batch = pending.slice(index, index + Math.min(batchSize, maxItems - index));
       index += batch.length;
       try {
@@ -236,6 +260,12 @@ async function runUploadJobs(env, cfg, now, budget) {
         uploaded += batch.length;
         budget.left -= 2;
       } catch (error) {
+        if (error instanceof StorageThrottleError) {
+          // 限流不是失败：整条任务按 Retry-After / UPLOAD_WAIT_MS 延后，不计 attempts
+          throttled = error;
+          budget.left -= 1;
+          break;
+        }
         failures += 1;
         // 整体失败：这一批都记错误，等待整条任务退避重试
         await env.DB.batch(
@@ -245,6 +275,18 @@ async function runUploadJobs(env, cfg, now, budget) {
         budget.left -= 2;
       }
     }
+
+    if (throttled) {
+      const retryMs = Math.max(Number(throttled.retryAfterMs) || 0, cfg.uploadWaitMs);
+      await deferJobStatement(env.DB, job.id, Date.now() + retryMs).run();
+      // 本轮已经领到但还没处理的其它上传任务也放回去，别握着锁陪跑
+      for (let rest = jobIndex + 1; rest < jobs.length; rest += 1) {
+        await releaseJobStatement(env.DB, jobs[rest].id).run();
+      }
+      console.warn(`存储服务限流，任务延后 ${retryMs}ms：${row.url}（${throttled.message}）`);
+      break;
+    }
+
     budget.left -= 1;
     await finishUploadJob(env, cfg, row, job, assets, failures, budgetExhausted);
   }

@@ -153,7 +153,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `UPLOAD_WAIT_MS` | `3000` | `/sync`、`/resolve` 回执里的 `next_wait_ms` 与 `Retry-After` 基准 |
+| `UPLOAD_WAIT_MS` | `3000` | `/sync`、`/resolve` 回执里的 `next_wait_ms` 与 `Retry-After` 基准；同时是 Worker 两次存储上传调用的最小间隔，也是存储服务 429 未给 `Retry-After` 时的退避值 |
 | `UPLOAD_WAIT_JITTER_MS` | `0` | 大于 0 时按请求序号在 `0/1/2` 倍之间抖动；0 = 固定值 |
 
 ### 解析与切片
@@ -301,7 +301,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | `SOURCE_CHECK_TTL_MS` | `60s` | 媒体请求的源探活缓存；过期就多一个子请求 | 调到 5 分钟可减少子请求/源站压力；不影响 Worker 请求数 |
 | `SLICE_INFO_TOUCH_MS` | `10 分钟` | 播放时更新 `last_used_at` 的 D1 写频率 | 调到 30–60 分钟可明显减少 D1 行写；清理判断会变粗 |
 | `SLICE_INFO_TTL_MS` | `30 天` | 越长 D1 里保留的 init 越多；越短回放时越可能补取切片（子请求） | 额度优先可设 7–15 天；依赖下载回落时更短 |
-| `UPLOAD_WAIT_MS` / `UPLOAD_WAIT_JITTER_MS` | `3000` / `0` | 只影响 App 两条上传之间的节奏，不改变请求总数 | 只影响突发速率，不影响每日额度 |
+| `UPLOAD_WAIT_MS` / `UPLOAD_WAIT_JITTER_MS` | `3000` / `0` | App 两条上传之间的节奏；同时是 Worker 调存储的间隔与 429 退避缺省值。不改变请求总数 | 只影响突发速率与限流退避，不影响每日额度 |
 | `UPLOAD_MAX_HEIGHT` | `1080` | 影响单请求字节量与存储体积，不影响请求数 | 只在乎流量/存储时降低 |
 | cron `* * * * *` | 每分钟 | 1440 次请求/天 | 改成 `*/2` 省约 720/天，`*/5` 省约 1150/天；写操作后的 `waitUntil` 仍会抢跑，代价是重试最坏多等几分钟 |
 | cron `23 * * * *` / `41 4 * * *` | 24 + 1 次/天 | 清理与孤儿回收 | 可各降为每天一次，省得很少 |
@@ -349,7 +349,7 @@ cd backend-in-worker
 node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs
 ```
 
-覆盖：协议主链路 17 例、媒体与存储上传 10 例、回调/鉴权/上传/清理 11 例、上传策略 7 例、子请求预算 3 例、WebSocket 中枢 6 例。
+覆盖：协议主链路 17 例、媒体与存储上传 10 例、回调/鉴权/上传/清理 11 例、上传策略 9 例、子请求预算 3 例、WebSocket 中枢 6 例。
 
 大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
 以及切片服务 `:3000`；不可达时自动跳过）：

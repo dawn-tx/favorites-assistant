@@ -159,6 +159,42 @@ test('大视频切片失败按解析失败处理，不退化为整片', async ()
   assert.equal(Number(assets.n), 0, '切片失败不应写入整片 asset');
 });
 
+test('存储 429：按 Retry-After 延后整条任务，不计失败', async () => {
+  storage.state.throttle = 1;
+  storage.state.retryAfterSeconds = 0;
+  storage.state.throttled = 0;
+  try {
+    const env = await makeEnv({ UPLOAD_MAX_ATTEMPTS: '1', UPLOAD_WAIT_MS: '0' });
+    const url = 'https://example.com/throttled';
+    await sync(env, url);
+    const { row, record } = await waitTerminal(env, url);
+    assert.equal(record.upload_state, 'ready');
+    assert.ok(row.media.segments.every((segment) => segment.store_id));
+    assert.ok(storage.state.throttled >= 1, '应至少收到一次 429');
+    const attempts = await env.DB.prepare('SELECT upload_attempts FROM favorites WHERE url = ?').bind(url).first();
+    assert.equal(Number(attempts.upload_attempts), 0, '429 不能计入上传失败次数');
+  } finally {
+    storage.state.throttle = 0;
+    storage.state.retryAfterSeconds = 0;
+  }
+});
+
+test('存储调用按 UPLOAD_WAIT_MS 间隔', async () => {
+  storage.state.callTimes.length = 0;
+  const env = await makeEnv({
+    STORAGE_BATCH_SIZE: '1',
+    UPLOAD_ITEMS_PER_TICK: '4',
+    UPLOAD_WAIT_MS: '50',
+  });
+  const url = 'https://example.com/paced';
+  await sync(env, url);
+  await waitTerminal(env, url);
+  const times = storage.state.callTimes;
+  assert.ok(times.length >= 3, `应有多次存储调用，实际 ${times.length}`);
+  const gaps = times.slice(1).map((at, i) => at - times[i]);
+  assert.ok(gaps.every((gap) => gap >= 30), `调用间隔应接近 50ms：${gaps.join(',')}`);
+});
+
 test('切片上限按收藏算：超出片数预算的视频退回整片', async () => {
   const env = await makeEnv({ MAX_SLICES_PER_FAVORITE: '1' });
   const url = 'https://example.com/slice-cap';
