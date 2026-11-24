@@ -1,23 +1,6 @@
-import { probeSource } from './probe.js';
-import { resolveMedia } from './parser.js';
-import { fetchSlices } from './slice-service.js';
+import { fetchSlices, pickReachableVariant, resolveMedia } from './policy/index.js';
 import { assetIdentity, contentVersion, mediaKey } from './keys.js';
 import { DEFAULT_SLICE_RULE, parseSliceRule } from './config.js';
-
-/**
- * 选档：范围内（高度 ≤ uploadMaxHeight）按高到低找可达档；都没有就按从小到大探范围外的档。
- * 全部不可达时仍返回第一个候选（整片、体积未知），不把内容整条丢掉。
- */
-async function pickReachableVariant(cfg, variants, budget) {
-  const within = variants.filter((variant) => variant.height <= cfg.uploadMaxHeight).sort((a, b) => b.height - a.height);
-  const above = variants.filter((variant) => variant.height > cfg.uploadMaxHeight).sort((a, b) => a.height - b.height);
-  const ordered = [...within, ...above];
-  for (const variant of ordered) {
-    const probe = await probeSource(cfg, variant.url, budget);
-    if (probe.ok) return { variant, probe };
-  }
-  return { variant: ordered[0], probe: { ok: false, size: 0, etag: '', rangeSupported: false } };
-}
 
 function distinctHost(url) {
   try {
@@ -78,26 +61,35 @@ async function buildDrafts(cfg, resolved, rule, budget, sliceBudget) {
     let etag = probe.etag;
     let fileSize = probe.size;
     let slices = null;
-    if (probe.ok && probe.size > sliceBytes && probe.rangeSupported && cfg.sliceServiceUrl) {
+    const needsSlicing = probe.ok && probe.size > sliceBytes;
+    if (needsSlicing) {
+      // 大视频必须在切片这一次成功：不再退回「整片一个 asset」——
+      // 回落整片会让单条收藏变成巨大的单文件，既违背切片规则，也会把备份/播放放大成一次超大请求。
+      if (!cfg.sliceServiceUrl) {
+        throw new Error(`视频 ${probe.size} 字节超过切片阈值，但未配置 SLICE_SERVICE_URL`);
+      }
+      if (!probe.rangeSupported) {
+        throw new Error('视频超过切片阈值，但源站不支持 Range，无法切片');
+      }
+      let sliced;
       try {
-        const sliced = await fetchSlices(cfg, variant.url, sliceRule, budget);
-        if (sliced) {
-          // 上限按「整条收藏」算：超出片数预算的视频退回整片，保证 CPU/行数有界
-          if (sliced.slices.length > sliceBudget.left) {
-            console.warn(
-              `切片数 ${sliced.slices.length} 超过本条收藏剩余预算 ${sliceBudget.left}，退回整片`,
-            );
-          } else {
-            sliceBudget.left -= sliced.slices.length;
-            sourceUrl = sliced.sourceUrl;
-            etag = sliced.etag || etag;
-            fileSize = sliced.fileSize || fileSize;
-            slices = sliced.slices;
-          }
-        }
+        sliced = await fetchSlices(cfg, variant.url, sliceRule, budget);
       } catch (error) {
         if (error?.budgetExhausted) throw error;
-        console.warn(`切片失败，降级为整片一段：${error.message}`);
+        throw new Error(`切片失败：${error.message}`);
+      }
+      if (!sliced) throw new Error('切片失败：切片服务没有返回结果');
+      // 片数上限是配额保护：超出预算时仍退回整片，和「切片失败」区分开
+      if (sliced.slices.length > sliceBudget.left) {
+        console.warn(
+          `切片数 ${sliced.slices.length} 超过本条收藏剩余预算 ${sliceBudget.left}，退回整片`,
+        );
+      } else {
+        sliceBudget.left -= sliced.slices.length;
+        sourceUrl = sliced.sourceUrl;
+        etag = sliced.etag || etag;
+        fileSize = sliced.fileSize || fileSize;
+        slices = sliced.slices;
       }
     }
 

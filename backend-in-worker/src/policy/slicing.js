@@ -1,4 +1,4 @@
-import { base64ToBytes, sha256Hex } from './hash.js';
+import { base64ToBytes, sha256Hex } from '../hash.js';
 
 /**
  * 远程切片服务：只返回元数据与每片的 init 段，媒体正文仍按区间回源读取。

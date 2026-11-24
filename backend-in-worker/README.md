@@ -18,14 +18,17 @@ backend-in-worker/
 │   ├── hash.js              WebCrypto（SHA-256 / HMAC / base64）
 │   ├── keys.js              虚拟 key、内容版本、内容指纹
 │   ├── render.js            publicRow / minRow / segments
-│   ├── parser.js            解析服务适配（唯一认识原始字段的地方）
-│   ├── slice-service.js     远程切片服务 + 单飞
+│   ├── policy/
+│   │   ├── index.js         汇总导出四块可替换策略
+│   │   ├── parser.js        解析服务原始字段 → ResolvedMedia
+│   │   ├── selection.js     多分辨率选档与探活顺序
+│   │   ├── slicing.js       远程切片服务 + 单飞
+│   │   └── storage.js       外部存储上传请求体 / 下载删除框架
 │   ├── probe.js             源探活（HEAD → Range 回退，带缓存）
-│   ├── parse.js             解析编排：选档 → 探活 → 切片 → 建 assets
+│   ├── parse.js             解析编排：切片预算 → 建 assets
 │   ├── range.js             Range 头解析
 │   ├── budget.js            子请求预算（免费版 50 次/调用）
 │   ├── media/
-│   │   ├── storage.js       外部存储适配：上传 /（下载与删除的框架）
 │   │   └── proxy.js         媒体代理：源站 / 单片合成 / 存储备份回落
 │   ├── store/
 │   │   ├── schema.sql       D1 建表
@@ -60,7 +63,7 @@ POST {STORAGE_UPLOAD_URL}
 - 返回的 id 原样写进 `assets.store_id`，App 的 `segments[].store_id` 会带出来（App 不读，排障用）。
 - **暂不处理重复**：同一文件重复上传会拿到新 id，以后接下载/删除时再按需要加本地索引。
 
-`src/media/storage.js` 里的 `downloadStoredMedia()` / `deleteStoredMedia()` 目前是空框架：
+`src/policy/storage.js` 里的 `downloadStoredMedia()` / `deleteStoredMedia()` 目前是空框架：
 
 - 下载接上后，`GET /media/<key>` 在源站失效时会直接透传存储服务返回的文件（需支持 Range / HEAD）；
   在接入之前，源站失效会明确回 `502`，不会假装有备份。
@@ -160,7 +163,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | `PARSE_SERVICE_URL` | 空 | **生产必须配置**；空时每条解析直接失败 |
 | `PARSE_SERVICE_TOKEN`（secret） | 空 | 非空时给解析服务带 Bearer |
 | `PARSE_TIMEOUT_MS` | `30000` | 调解析服务的超时 |
-| `SLICE_SERVICE_URL` | 空 | 空 = 不切片（长视频整片一段） |
+| `SLICE_SERVICE_URL` | 空 | 空 = 不启用切片；超过切片阈值的大视频会**解析失败**（不再退为整片），小视频仍整片。生产必须配置 |
 | `SLICE_TIMEOUT_MS` | `60000` | 调切片服务的超时 |
 | `SLICE_RULE` | `{"mode":"size","bytes":2000000,"align":"keyframe"}` | 没有随请求带规则时的默认片大小；也是「长视频」阈值。只收按大小或按时长两种形状，切点固定关键帧；按大小时 64KiB–1GiB |
 | `UPLOAD_MAX_HEIGHT` | `1080` | 每个视频选一档：高度不超过它的最高可达档；没有则取最小档 |
@@ -246,31 +249,95 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 - DO 免费额度：10 万请求/天、13,000 GB-s/天；WS 入站消息按 20:1 计费，出站与协议 ping 不计费，
   连接用 Hibernation API，空闲不烧时长。
 
-## 免费版额度怎么用
+## 免费版额度与配置调节（重点）
 
-Workers 免费版：**每天 10 万次请求、每次调用 10ms CPU、最多 50 个子请求**；
-D1 免费：单库 500MB、每次调用最多 50 次查询。媒体字节不再经过 Worker 存储，也不占 KV 写配额。
+### 哪些算额度，哪些不算
 
-- **一次 tick 只跑一小批**：`JOBS_PER_TICK=4`、`UPLOAD_JOBS_PER_TICK=2`、`UPLOAD_ITEMS_PER_TICK=20`，
-  调度器内部还有 45 个子请求的预算（`src/budget.js`）。预算见底时任务原样放回、**不记失败次数**，
-  下一分钟接着跑；解析链路每次真正发请求前都会扣预算，不会把调用打到 1102。
-- **上传很省子请求**：一批 ≤10 条只算 1 次外部调用，复制工作由存储服务完成。
-  18MB/片时一批约 180MB，上传任务锁 `UPLOAD_JOB_LOCK_MS=10 分钟`、存储超时 `STORAGE_TIMEOUT_MS=5 分钟`，
-  避免复制未完成就被下一轮 cron 重复领取。
-- **切片上限按收藏算**：`MAX_SLICES_PER_FAVORITE=50`，超出片数预算的视频退回整片一段。
-  按 18MB/片、真实 init 约 8.3KB 估，单条收藏热态约 170KB（20 片）到 430KB（50 片）；
-  免费版单库 500MB 大约放 1200–3000 条热态长视频，切片信息清理后可到几万条。
-- **D1 写尽量合并**：解析落库、删收藏、回调批量插入都走 `db.batch()`（一次调用只算 1 次查询）。
+| 项 | 免费额度 | 说明 |
+|---|---|---|
+| Worker 请求 | **100,000 / 天** | 所有 HTTP 请求 + **每次 cron 触发** + WebSocket 建立连接；**WS 消息不计 Worker 请求**（消息在 DO 侧按 20:1 计费） |
+| Worker CPU | **10 ms / 次** | 网络等待不计；流式转发大文件时，JS 拼流的开销会计入 |
+| 子请求 | **50 / 次调用** | `fetch`、D1、KV、R2 都算；`db.batch()` 只算 1 次 D1 查询；媒体请求约 3 个 |
+| D1 行读 | **5,000,000 / 天** | 清单页按返回行数、lookup 按命中的行、媒体按 1 行 |
+| D1 行写 | **100,000 / 天** | `INSERT/UPDATE/DELETE` 都算；**索引也会各写一行** |
+| D1 存储 | 单库 **500 MB** / 账号 **5 GB** | 只存元数据与 init，不存媒体正文 |
+| DO 请求 | **100,000 / 天** | WS 连接建立 + 入站消息（20:1 折算）+ alarm |
+| 外部存储 | 不占 Cloudflare 额度 | 但存储服务回源虚拟地址时，那次请求会算一次 Worker 请求 |
+| 客户端缓存 | 不占任何服务端额度 | 只有第一次真正落到 Worker |
+
+两个容易误解的点：
+
+- **Workers 缓存命中仍按请求计费**（只省 CPU 和上游取数）。所以边缘缓存/Cache Rule 不能降低 10 万/天的请求数；要降请求数只能靠客户端缓存或让媒体直连存储。
+- **cron 每次触发都是一次请求**。当前三条 cron 合计约 `1440 + 24 + 1 = 1465 次/天`（约 1.5%）。
+
+### 一条收藏的账
+
+设 `A = 切片数 + 图片数 + 封面数`：
+
+| 动作 | 额度 |
+|---|---|
+| 首次播放（按整片预取） | 约 **A 次 Worker 请求**；没有预取、播放器按 Range 切片时会更多 |
+| 备份上传 | 约 **A 次 Worker 请求**（存储逐条回源虚拟地址）+ `ceil(A / STORAGE_BATCH_SIZE)` 次存储 API 调用（子请求） |
+| D1 行写 | 约 `2A + sources + inits + 7` |
+| 对账 | 清单档读 `total` 行；请求数 ≈ `ceil(total / 清单页大小)`（App 侧 300/页） |
+| 解析 CPU | 随 A 与 init 大小增长；50 片已经接近免费版 10ms 的边界 |
+
+50 片 × 18MB 的例子：首播约 50 次请求、备份约 50 次请求、D1 行写约 160；一天 1000 条这样的收藏就把 10 万请求吃满。
+
+### 会影响额度的配置
+
+| 配置 | 默认 | 影响 | 怎么调 |
+|---|---|---|---|
+| `MAX_SLICES_PER_FAVORITE` | `50` | 直接决定 A、备份请求、D1 行写、解析 CPU | 请求/CPU 吃紧就降到 20–30；视频会被更早退回整片 |
+| App 的切片大小（`slice_rule.bytes`） | 18MB（暂定） | 片越大 A 越少：18MB→36MB 约等于请求/行数减半 | 想省额度优先调大；代价是单次传输更大、seek 粒度更粗 |
+| `SLICE_RULE`（仅默认值） | 2MB | 只影响没有随请求带规则的入口（B 回调等） | 有 App 请求时以 App 的规则为准 |
+| `UPLOAD_ITEMS_PER_TICK` | `20` | 每次 cron 最多处理多少 asset；**不改变每日 cron 次数** | 降下来更稳地守住 50 子请求/10ms；升上去只是缩短积压 |
+| `UPLOAD_JOBS_PER_TICK` / `JOBS_PER_TICK` | `2` / `4` | 同上，控制单次调用的工作量 | 大批量收藏、经常 1102 时调小 |
+| `STORAGE_BATCH_SIZE` | `10` | 存储 API 调用次数；**不会减少每个 asset 的回源请求** | 保持 10（接口上限） |
+| `STORAGE_TIMEOUT_MS` | `5 分钟` | 太短会判失败并重试 → 重复存储调用 + 重复回源请求 | 片大时不要低于单批复制时间；保持小于上传锁 |
+| `UPLOAD_JOB_LOCK_MS` | `10 分钟` | 太短会让下一轮 cron 重复领取同一任务 → 重复备份请求 | 必须大于一次存储调用耗时；更大片子调到 15 分钟 |
+| `UPLOAD_MAX_ATTEMPTS` / `UPLOAD_RETRY_MS` | `3` / `2s` | 每次重试都重复存储调用 + 回源；失败通常是源站挂了，重试收益低 | 额度优先可降到 2 次；别为了“成功”无限加 |
+| `TRANSFER_MAX_ATTEMPTS` / `TRANSFER_RETRY_MS` | `3` / `2s` | 每次重试重复解析服务 + 探活 + 切片 | 保持 3；解析服务不稳定时再加 |
+| `SOURCE_CHECK_TTL_MS` | `60s` | 媒体请求的源探活缓存；过期就多一个子请求 | 调到 5 分钟可减少子请求/源站压力；不影响 Worker 请求数 |
+| `SLICE_INFO_TOUCH_MS` | `10 分钟` | 播放时更新 `last_used_at` 的 D1 写频率 | 调到 30–60 分钟可明显减少 D1 行写；清理判断会变粗 |
+| `SLICE_INFO_TTL_MS` | `30 天` | 越长 D1 里保留的 init 越多；越短回放时越可能补取切片（子请求） | 额度优先可设 7–15 天；依赖下载回落时更短 |
+| `UPLOAD_WAIT_MS` / `UPLOAD_WAIT_JITTER_MS` | `3000` / `0` | 只影响 App 两条上传之间的节奏，不改变请求总数 | 只影响突发速率，不影响每日额度 |
+| `UPLOAD_MAX_HEIGHT` | `1080` | 影响单请求字节量与存储体积，不影响请求数 | 只在乎流量/存储时降低 |
+| cron `* * * * *` | 每分钟 | 1440 次请求/天 | 改成 `*/2` 省约 720/天，`*/5` 省约 1150/天；写操作后的 `waitUntil` 仍会抢跑，代价是重试最坏多等几分钟 |
+| cron `23 * * * *` / `41 4 * * *` | 24 + 1 次/天 | 清理与孤儿回收 | 可各降为每天一次，省得很少 |
+
+### 推荐档位
+
+| 目标 | 切片 | `MAX_SLICES_PER_FAVORITE` | 每 tick | 探活 TTL | touch | slice TTL | cron |
+|---|---|---|---|---|---|---|---|
+| **额度优先** | 32–64MB | 30 | 10 | 5 分钟 | 60 分钟 | 7–15 天 | `*/5 * * * *` |
+| 平衡 | 18–24MB | 40 | 20 | 2 分钟 | 30 分钟 | 15 天 | `*/2 * * * *` |
+| 体验优先 | 18MB | 50 | 20 | 60 秒 | 10 分钟 | 30 天 | 每分钟 |
+
+### 不能只靠后端配置解决的部分
+
+- **客户端缓存/预取**：A 个对象只请求一次、重复播放零请求；这是省请求数最大的一项，且不受后端配置影响。
+- **媒体直连存储**：现在虚拟地址都要经过 Worker；302 只省 CPU，不省请求。要让媒体完全不占 Worker 请求，只能让 App 直接使用存储/CDN 的签名直链。
+- **备份放大**：逐片备份是 A 次回源请求；整源备份一次（或懒备份）能把备份请求从 A 降到 1，但会改变存储形态/回落方式。
+- **边缘缓存**：省 CPU 与上游，不省请求数（Workers 缓存命中仍计费）。
+
+### 观察口径
+
+- Cloudflare Dashboard 的 Workers Requests、D1 Row Metrics、DO Requests 是真实额度；
+  `/health` 只报收藏/任务数，**不是额度计数器**。
+- 先看 `/media`、`/sync`、cron 各占多少请求，再决定是调切片、降 cron，还是转向客户端缓存/存储直链。
 
 ## 已知边界
 
 1. **存储服务必须能访问 `MEDIA_BASE_URL`**：它按虚拟地址回源；如果 Worker 前面套了 Access 或私有网络，这条路会断。
    虚拟地址里的不可猜 key 就是凭据，媒体接口本身免鉴权（播放器/Coil 不带 header）。
-2. **下载/删除还没接**：源站失效时目前回 `502`；删收藏不会清远端文件。框架在 `src/media/storage.js`。
+2. **下载/删除还没接**：源站失效时目前回 `502`；删收藏不会清远端文件。框架在 `src/policy/storage.js`。
 3. **后台不是实时**：解析最多滞后一个 cron 周期（60 秒）；写入接口会 `waitUntil` 抢跑一次，
    但免费版仍可能被 CPU 预算截断，没跑完的由 cron 接着跑。
 4. **D1 单库 500MB**：只存元数据与切片 init（原始字节 BLOB），不存媒体正文。
-5. **没有文档之外的新字段**：协议里多出来的只有 `/meta` 的 `storage` / `scheduler` 说明项，
+5. **大视频切片失败按解析失败处理**：视频超过切片阈值后，切片服务未配置、源站不支持 Range 或切片调用失败，都会重试后落 `failed`，不再退化为整片；
+   `MAX_SLICES_PER_FAVORITE` 超限仍退回整片，那是配额保护，不是切片失败。
+6. **没有文档之外的新字段**：协议里多出来的只有 `/meta` 的 `storage` / `scheduler` 说明项，
    App 侧 `ignoreUnknownKeys` 会忽略。
 
 ## 测试
@@ -282,7 +349,7 @@ cd backend-in-worker
 node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs
 ```
 
-覆盖：协议主链路 17 例、媒体与存储上传 10 例、回调/鉴权/上传/清理 11 例、上传策略 6 例、子请求预算 3 例、WebSocket 中枢 6 例。
+覆盖：协议主链路 17 例、媒体与存储上传 10 例、回调/鉴权/上传/清理 11 例、上传策略 7 例、子请求预算 3 例、WebSocket 中枢 6 例。
 
 大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
 以及切片服务 `:3000`；不可达时自动跳过）：

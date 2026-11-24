@@ -2,11 +2,10 @@ import { parseRangeHeader } from '../range.js';
 import { markSourceDead, probeSource } from '../probe.js';
 import { getAsset } from '../store/assets.js';
 import { ensureInitIds, restoreAssetSliceStatement, touchAssetStatement } from '../store/assets.js';
-import { fetchSlicesShared } from '../slice-service.js';
-import { DEFAULT_SLICE_RULE, parseSliceRule } from '../config.js';
 import { getFavoriteById } from '../store/favorites.js';
+import { DEFAULT_SLICE_RULE, parseSliceRule } from '../config.js';
 import { createBudget } from '../budget.js';
-import { downloadStoredMedia } from './storage.js';
+import { downloadStoredMedia, fetchSlicesShared } from '../policy/index.js';
 
 /**
  * 虚拟 key 里带内容版本：同一媒体地址的字节不会变，可长期缓存；错误响应仍 no-store。

@@ -157,7 +157,11 @@ test('上传：每段都拿到 store_id，封面与图片也上传', async () =>
 
 test('上传失败不影响 ready：存储不可达时内容仍可用、store_id 留空', async () => {
   // 第一轮只跑解析（关掉上传），把条目推到 ready；再让存储下线，用同一份 DB 跑备份
-  const parseOnly = await makeEnv({ SLICE_SERVICE_URL: '', UPLOAD_JOBS_PER_TICK: '0' });
+  const parseOnly = await makeEnv({
+    SLICE_SERVICE_URL: '',
+    UPLOAD_JOBS_PER_TICK: '0',
+    SLICE_RULE: JSON.stringify({ mode: 'size', bytes: 400_000 }),
+  });
   const url = 'https://example.com/backup-fails';
   await call(worker, parseOnly, 'POST', '/api/v1/sync', {
     device_id: 'tab-test',
@@ -168,7 +172,11 @@ test('上传失败不影响 ready：存储不可达时内容仍可用、store_id
   const afterParse = await call(worker, parseOnly, 'GET', '/api/v1/favorites?limit=10');
   assert.equal(afterParse.json.favorites.find((item) => item.url === url).media_state, 'ready');
 
-  const uploadOnly = await makeEnv({ SLICE_SERVICE_URL: '', UPLOAD_MAX_ATTEMPTS: '1' });
+  const uploadOnly = await makeEnv({
+    SLICE_SERVICE_URL: '',
+    UPLOAD_MAX_ATTEMPTS: '1',
+    SLICE_RULE: JSON.stringify({ mode: 'size', bytes: 400_000 }),
+  });
   uploadOnly.DB = parseOnly.DB;
   storage.state.down = true;
   try {

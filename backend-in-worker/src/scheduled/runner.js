@@ -1,5 +1,5 @@
 import { parseFavorite } from '../parse.js';
-import { deleteStoredMedia, MAX_BATCH, uploadAssetsToStorage } from '../media/storage.js';
+import { deleteStoredMedia, MAX_BATCH, uploadAssetsToStorage } from '../policy/index.js';
 import { createBudget } from '../budget.js';
 import {
   claimJobs,

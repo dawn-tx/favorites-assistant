@@ -138,6 +138,27 @@ test('没配 MEDIA_BASE_URL：上传失败但不影响内容，错误会落到 a
   assert.ok(errors.results.some((item) => /MEDIA_BASE_URL/.test(item.error)));
 });
 
+test('大视频切片失败按解析失败处理，不退化为整片', async () => {
+  const env = await makeEnv({
+    SLICE_SERVICE_URL: 'http://127.0.0.1:1/slice',
+    TRANSFER_MAX_ATTEMPTS: '1',
+  });
+  const url = 'https://example.com/slice-fail';
+  await sync(env, url);
+  let row;
+  for (let i = 0; i < 20; i += 1) {
+    await tick(worker, env);
+    row = (await rows(env)).find((item) => item.url === url);
+    if (row?.media_state === 'failed') break;
+  }
+  assert.equal(row.media_state, 'failed');
+  assert.match(row.failed_reason, /切片/);
+  const assets = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM assets a JOIN favorites f ON f.id = a.favorite_id WHERE f.url = ?',
+  ).bind(url).first();
+  assert.equal(Number(assets.n), 0, '切片失败不应写入整片 asset');
+});
+
 test('切片上限按收藏算：超出片数预算的视频退回整片', async () => {
   const env = await makeEnv({ MAX_SLICES_PER_FAVORITE: '1' });
   const url = 'https://example.com/slice-cap';
