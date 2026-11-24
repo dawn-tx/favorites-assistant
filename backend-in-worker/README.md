@@ -43,13 +43,16 @@ backend-in-worker/
 
 ## 外部存储怎么接
 
-上传时**不传源站地址**，而是把本 Worker 的虚拟媒体地址交给存储服务：
+上传时按素材类型决定传给存储服务的地址：
+
+- **切片视频**：传本 Worker 的虚拟合成地址（`init + 源区间`），存储服务回源 Worker 拿到可直接播放的完整片；
+- **整片视频、图片、封面**：直接传源站地址，不再经过 Worker。
 
 ```
 POST {STORAGE_UPLOAD_URL}
 [{ "type": "video", "media": "https://<worker>/api/v1/media/<key>.mp4",
    "favorite": { "url": "https://www.bilibili.com/video/BV...", "summary": "解析服务返回的一句话说明" } },
- { "type": "image", "media": "https://<worker>/api/v1/media/<key2>.jpg",
+ { "type": "image", "media": "https://source.example/cover.jpg",
    "favorite": { "url": "https://www.bilibili.com/video/BV...", "summary": "解析服务返回的一句话说明" } }]
 
 → ["id1", "id2"]        // 按上传顺序，单次最多 10 条
@@ -57,7 +60,8 @@ POST {STORAGE_UPLOAD_URL}
 
 - 一批只属于**同一个收藏**，所以每条都带同一个 `favorite: { url, summary }`；`summary` 为空串时也会带上字段。
 - 每个切片也是独立文件：Worker 的虚拟地址本来就是 `init + 源区间` 合成后的完整片，
-  所以存储服务拿到的就是可直接播放的字节。
+  所以存储服务拿到的就是可直接播放的字节；整片/图片/封面由存储服务直接回源源站。
+- 直传源地址的条目不消耗 Worker 请求；只有切片回源 Worker 才计一次请求。
 - 整批失败（任一条回源失败、非 2xx、id 数量不符）就按整条任务退避重试；
   收藏本身仍是 `ready`，失败只体现在 `upload_state` 与 asset 的 `error`。
 - 返回的 id 原样写进 `assets.store_id`，App 的 `segments[].store_id` 会带出来（App 不读，排障用）。
@@ -66,6 +70,7 @@ POST {STORAGE_UPLOAD_URL}
 `src/policy/storage.js` 里的 `downloadStoredMedia()` / `deleteStoredMedia()` 目前是空框架：
 
 - 下载接上后，`GET /media/<key>` 在源站失效时会直接透传存储服务返回的文件（需支持 Range / HEAD）；
+  `GET /media/full/<key>` 是同一素材的整段入口：忽略 `Range`，成功固定 `200`、`Accept-Ranges: none`，不会再回 `206`。
   在接入之前，源站失效会明确回 `502`，不会假装有备份。
 - 删除接上后，删收藏/重新解析会在行删除之后调用它清理远端文件；现在为 no-op。
 
@@ -186,7 +191,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 | 变量 / secret | 默认 | 作用 |
 |---|---|---|
-| `MEDIA_BASE_URL` | 空 | 交给存储服务的虚拟地址前缀，**必须包含 `/api/v1` 且公网可达**；空时上传直接失败 |
+| `MEDIA_BASE_URL` | 空 | 切片上传时交给存储服务的 Worker 地址前缀，**必须包含 `/api/v1` 且公网可达**；只用于切片，整片/图片/封面直传源地址 |
 | `STORAGE_UPLOAD_URL` | 空 | 上传接口；空时上传失败（收藏仍 `ready`，只是没有备份） |
 | `STORAGE_TOKEN`（secret） | 空 | 非空时上传接口带 Bearer |
 | `STORAGE_GET_URL` | 空 | **预留**：给下载实现用；当前媒体回落还没接，读取但不生效 |
@@ -224,7 +229,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | 方面 | mock-server | Worker 版 |
 |---|---|---|
 | 元数据 | `data.json` 单文件 | D1 `favorites` / `assets` / `jobs` |
-| 媒体备份 | `store/` 本地文件 | 外部存储服务；上传虚拟媒体地址，拿回 id |
+| 媒体备份 | `store/` 本地文件 | 外部存储服务；切片传 Worker 合成地址，整片/图片/封面直传源地址，拿回 id |
 | 后台任务 | 进程内单线程循环、`setInterval` | D1 任务队列 + 每 3 分钟 cron；写入后用 `waitUntil` 抢跑一次 |
 | 切片清理 | `setInterval` | 每 5 小时第 23 分的 cron |
 | 孤儿回收 | 不需要 | 每天 04:41 的 cron 回收无引用的 `inits` / `sources` |
@@ -261,7 +266,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | D1 行写 | **100,000 / 天** | `INSERT/UPDATE/DELETE` 都算；**索引也会各写一行** |
 | D1 存储 | 单库 **500 MB** / 账号 **5 GB** | 只存元数据与 init，不存媒体正文 |
 | DO 请求 | **100,000 / 天** | WS 连接建立 + 入站消息（20:1 折算）+ alarm |
-| 外部存储 | 不占 Cloudflare 额度 | 但存储服务回源虚拟地址时，那次请求会算一次 Worker 请求 |
+| 外部存储 | 不占 Cloudflare 额度 | 切片回源 Worker 时算一次 Worker 请求；整片/图片/封面直传源站，不占 Worker |
 | 客户端缓存 | 不占任何服务端额度 | 只有第一次真正落到 Worker |
 
 两个容易误解的点：
@@ -276,7 +281,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | 动作 | 额度 |
 |---|---|
 | 首次播放（按整片预取） | 约 **A 次 Worker 请求**；没有预取、播放器按 Range 切片时会更多 |
-| 备份上传 | 约 **A 次 Worker 请求**（存储逐条回源虚拟地址）+ `ceil(A / STORAGE_BATCH_SIZE)` 次存储 API 调用（子请求） |
+| 备份上传 | 切片约 **S 次 Worker 请求**（存储逐条回源合成地址），整片/图片/封面直传源站不占 Worker；另有 `ceil(A / STORAGE_BATCH_SIZE)` 次存储 API 调用（子请求）。`S` = 切片数，`A` = 全部素材数 |
 | D1 行写 | 约 `2A + sources + inits + 7` |
 | 对账 | 清单档读 `total` 行；请求数 ≈ `ceil(total / 清单页大小)`（App 侧 300/页） |
 | 解析 CPU | 随 A 与 init 大小增长；50 片已经接近免费版 10ms 的边界 |
@@ -315,7 +320,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 ### 不能只靠后端配置解决的部分
 
 - **客户端缓存/预取**：A 个对象只请求一次、重复播放零请求；这是省请求数最大的一项，且不受后端配置影响。
-- **媒体直连存储**：现在虚拟地址都要经过 Worker；302 只省 CPU，不省请求。要让媒体完全不占 Worker 请求，只能让 App 直接使用存储/CDN 的签名直链。
+- **媒体直连存储**：现在播放地址都要经过 Worker；302 只省 CPU，不省请求。要让媒体完全不占 Worker 请求，只能让 App 直接使用存储/CDN 的签名直链。
 - **备份放大**：逐片备份是 A 次回源请求；整源备份一次（或懒备份）能把备份请求从 A 降到 1，但会改变存储形态/回落方式。
 - **边缘缓存**：省 CPU 与上游，不省请求数（Workers 缓存命中仍计费）。
 
@@ -327,7 +332,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 ## 已知边界
 
-1. **存储服务必须能访问 `MEDIA_BASE_URL`**：它按虚拟地址回源；如果 Worker 前面套了 Access 或私有网络，这条路会断。
+1. **切片上传要求存储服务能访问 `MEDIA_BASE_URL`**：切片按虚拟地址回源 Worker 合成；整片/图片/封面直连源站，不依赖它。
    虚拟地址里的不可猜 key 就是凭据，媒体接口本身免鉴权（播放器/Coil 不带 header）。
 2. **下载/删除还没接**：源站失效时目前回 `502`；删收藏不会清远端文件。框架在 `src/policy/storage.js`。
 3. **后台不是实时**：解析最多滞后一个 cron 周期（180 秒）；写入接口会 `waitUntil` 抢跑一次，

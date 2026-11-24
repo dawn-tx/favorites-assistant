@@ -37,10 +37,10 @@ async function assetSourceAlive(cfg, asset, budget) {
   return true;
 }
 
-/** 整片/图片/封面：把客户端 Range 原样转给源站，返回 null 表示需要回落备份 */
-async function proxySource(request, asset) {
+/** 整片/图片/封面：把客户端 Range 原样转给源站；full 模式忽略 Range，只回 200 */
+async function proxySource(request, asset, full) {
   const headers = { 'accept-encoding': 'identity' };
-  const range = request.headers.get('range');
+  const range = full ? null : request.headers.get('range');
   if (range) headers.range = range;
 
   let upstream;
@@ -61,15 +61,15 @@ async function proxySource(request, asset) {
 
   const outHeaders = new Headers({
     'content-type': upstream.headers.get('content-type') || mediaType(asset),
-    'accept-ranges': 'bytes',
+    'accept-ranges': full ? 'none' : 'bytes',
     'cache-control': MEDIA_CACHE_CONTROL,
   });
-  for (const name of ['content-length', 'content-range', 'etag', 'last-modified']) {
+  for (const name of full ? ['content-length', 'etag', 'last-modified'] : ['content-length', 'content-range', 'etag', 'last-modified']) {
     const value = upstream.headers.get(name);
     if (value) outHeaders.set(name, value);
   }
   return new Response(request.method === 'HEAD' ? null : upstream.body, {
-    status: upstream.status,
+    status: full ? 200 : upstream.status,
     headers: outHeaders,
   });
 }
@@ -78,11 +78,12 @@ async function proxySource(request, asset) {
  * 单片 = init 段（后台私有字节）+ 源文件媒体区间。客户端 Range 要在这两段之间换算，
  * 不能直接把 Range 转给源站。
  */
-async function serveSliceFromSource(request, asset) {
+async function serveSliceFromSource(request, asset, full) {
   const init = asset.slice.initBytes;
   const mediaSize = asset.slice.mediaSize;
   const total = init.length + mediaSize;
-  const range = parseRangeHeader(request.headers.get('range'), total);
+  // full 模式完全不看 Range：无效 Range 也按整段回 200
+  const range = full ? null : parseRangeHeader(request.headers.get('range'), total);
   if (range === 'invalid') {
     return new Response(null, { status: 416, headers: { 'content-range': `bytes */${total}`, 'cache-control': 'no-store' } });
   }
@@ -124,15 +125,15 @@ async function serveSliceFromSource(request, asset) {
   const headers = new Headers({
     'content-type': 'video/mp4',
     'content-length': String(end - start + 1),
-    'accept-ranges': 'bytes',
+    'accept-ranges': full ? 'none' : 'bytes',
     'cache-control': MEDIA_CACHE_CONTROL,
   });
   if (range) headers.set('content-range', `bytes ${start}-${end}/${total}`);
-  if (request.method === 'HEAD') return new Response(null, { status: range ? 206 : 200, headers });
+  if (request.method === 'HEAD') return new Response(null, { status: full || !range ? 200 : 206, headers });
 
   const prefix = needInit ? init.subarray(initStart, initEnd) : null;
   const body = concatStream(prefix, upstream?.body ?? null);
-  return new Response(body, { status: range ? 206 : 200, headers });
+  return new Response(body, { status: full || !range ? 200 : 206, headers });
 }
 
 /** 把一段内存前缀与上游流拼成一个 ReadableStream；上游为空时只回前缀 */
@@ -177,9 +178,15 @@ function concatStream(prefix, upstreamBody) {
  * 下载实现接上后直接把客户端 Range 转给存储服务即可。
  * 当前下载只是框架（`downloadStoredMedia` 返回 null），所以回落会明确回 502。
  */
-async function serveFromStorage(request, env, cfg, asset) {
+async function serveFromStorage(request, env, cfg, asset, full) {
   if (!asset.storeId) return null;
-  const response = await downloadStoredMedia({ env, cfg, asset, request });
+  let target = request;
+  if (full && request.headers.has('range')) {
+    const headers = new Headers(request.headers);
+    headers.delete('range');
+    target = new Request(request, { headers });
+  }
+  const response = await downloadStoredMedia({ env, cfg, asset, request: target });
   return response ?? null;
 }
 
@@ -240,8 +247,10 @@ async function touchAsset(env, cfg, asset) {
  * key 由不可逆哈希派生且只存在于后台；这里只服务已登记的 key，不构成任意 URL 转发。
  */
 export async function handleMedia(request, env, cfg, relativePath) {
-  const match = /^\/media\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
+  const fullMatch = /^\/media\/full\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
+  const match = fullMatch ?? /^\/media\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
   if (!match) return sendMediaError(request, 404, '未知的素材地址');
+  const full = Boolean(fullMatch);
   const asset = await getAsset(env.DB, match[1]);
   if (!asset) return sendMediaError(request, 404, '素材地址不存在或已过期');
 
@@ -260,8 +269,8 @@ export async function handleMedia(request, env, cfg, relativePath) {
   if (alive) {
     if (await ensureSliceInfo(env, cfg, asset, budget)) {
       const served = asset.slice
-        ? await serveSliceFromSource(request, asset)
-        : await proxySource(request, asset);
+        ? await serveSliceFromSource(request, asset, full)
+        : await proxySource(request, asset, full);
       if (served) return served;
       console.log(`源地址失效，改用备份：${asset.key}`);
     } else {
@@ -269,7 +278,7 @@ export async function handleMedia(request, env, cfg, relativePath) {
     }
   }
 
-  const backup = await serveFromStorage(request, env, cfg, asset);
+  const backup = await serveFromStorage(request, env, cfg, asset, full);
   if (backup) return backup;
   return sendMediaError(request, 502, '源地址已失效，备份不可用');
 }

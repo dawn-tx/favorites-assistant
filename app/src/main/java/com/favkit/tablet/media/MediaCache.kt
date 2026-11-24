@@ -58,7 +58,7 @@ class MediaCache(context: Context, private val settings: AppSettings) {
     private fun newFactory(target: SimpleCache): CacheDataSource.Factory = CacheDataSource.Factory()
         .setCache(target)
         .setUpstreamDataSourceFactory(DefaultDataSource.Factory(appContext, upstream))
-        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or CacheDataSource.FLAG_BLOCK_ON_CACHE)
 
     fun mediaSourceFactory(): MediaSource.Factory = DefaultMediaSourceFactory(cachedFactory)
 

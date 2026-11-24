@@ -3,7 +3,7 @@
 # 绑定：
 #   DB        —— D1：收藏、资产、任务元数据
 #
-# 媒体备份不放 Worker 侧：上传时把「本服务的虚拟媒体地址」交给外部存储服务回源转存，
+# 媒体备份不放 Worker 侧：切片上传交给外部存储服务的是本服务的合成地址，整片/图片/封面直传源地址，
 # 拿回 id 写进 assets.store_id。下载/删除的适配层在 src/media/storage.js（当前是框架）。
 #
 # 首次部署后执行一次建表：
@@ -40,6 +40,7 @@ UPLOAD_ITEMS_PER_TICK = "20"
 # 一次上传要复制 10×18MB；锁必须长于一次存储调用，否则下一轮会重复领。
 UPLOAD_JOB_LOCK_MS = "600000"
 # 外部存储服务（上传接口单次最多 10 条）
+# 只有切片上传用这个 Worker 合成地址；整片/图片/封面直接传源站地址。
 MEDIA_BASE_URL = "https://REPLACE_WITH_YOUR_WORKER.workers.dev/api/v1"
 STORAGE_UPLOAD_URL = ""
 STORAGE_GET_URL = ""

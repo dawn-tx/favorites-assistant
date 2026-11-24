@@ -22,6 +22,7 @@ import com.favkit.tablet.net.PullOutcome
 import com.favkit.tablet.util.VideoLinkDetector
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -129,8 +130,16 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         var cancelled: Boolean = false
     }
 
+    private class AheadPrefetch(
+        val favoriteId: String,
+        val untilIndex: Int,
+        val handle: PrefetchHandle,
+        val job: Job,
+    )
+
     private val prefetches = ConcurrentHashMap<String, Pair<PrefetchHandle, Job>>()
-    private val nextPrefetches = ConcurrentHashMap<String, Job>()
+    private val prefetchingUrls = ConcurrentHashMap.newKeySet<String>()
+    private var aheadPrefetch: AheadPrefetch? = null
 
     /** 后台下一页的游标；进程死了就归零，重取第一页靠 id 去重，不会翻倍 */
     private var remoteCursor: String? = null
@@ -270,6 +279,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
      */
     fun openFocus(id: String) {
         val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
+        cancelAheadPrefetch()
         focusFlow.value = FocusUiState(id, 0)
         filtersFlow.value = false
         // 内容还没就绪：用户点开的那一下就是最合理的询问时机，问一次就走，不做轮询
@@ -293,6 +303,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
      * 用户听到的就是「关了还在放」。
      */
     fun closeFocus() {
+        cancelAheadPrefetch()
         graph.player.pausePlayback()
         focusFlow.value = null
         clearContentRefreshError()
@@ -317,6 +328,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         val focus = focusFlow.value ?: return
         val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
         if (index !in favorite.segments.indices || index == focus.segmentIndex) return
+        cancelAheadPrefetch()
         focusFlow.value = FocusUiState(focus.itemId, index)
         // 在遮罩层里主动翻段 = 直接操作，视频段自动播起来；从墙上点开时才停在暂停态等用户按播放
         loadSegment(favorite, index, autoPlay = true)
@@ -376,18 +388,56 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             speed = _state.value.settings?.defaultPlaybackSpeed ?: 1f,
             autoPlay = autoPlay,
         )
-        prefetchNext(favorite, index)
+        prefetchAhead(favorite, index)
     }
 
-    /** 播当前段时把下一段拉进缓存：切片边界与自动接续时少一次重新缓冲 */
-    private fun prefetchNext(favorite: Favorite, index: Int) {
-        val next = favorite.segments.getOrNull(index + 1)?.takeIf { it.playable } ?: return
-        if (nextPrefetches.containsKey(next.url)) return
-        val job = viewModelScope.launch {
-            runCatching { graph.media.prefetch(next.url, onProgress = {}, isCancelled = { false }) }
-            nextPrefetches.remove(next.url)
+    /** 滚动预取：每次只把当前段之后的 3 片放进缓存，播到下一段再续看窗口 */
+    private fun prefetchAhead(favorite: Favorite, index: Int) {
+        val current = aheadPrefetch
+        if (current != null && current.favoriteId == favorite.id && index + 1 <= current.untilIndex) return
+        cancelAheadPrefetch()
+        if (prefetches.containsKey(favorite.id)) return
+        val ahead = favorite.segments
+            .withIndex()
+            .drop(index + 1)
+            .filter { it.value.playable && it.value.url.isNotBlank() && !isPlaylist(it.value.url) }
+            .take(AUTO_PREFETCH_AHEAD)
+        if (ahead.isEmpty()) return
+        val handle = PrefetchHandle()
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                for ((_, segment) in ahead) {
+                    if (handle.cancelled) break
+                    // 自动与自动之间按 URL 单飞；手动预取开始前会先停掉窗口任务
+                    if (!prefetchingUrls.add(segment.url)) continue
+                    try {
+                        graph.media.prefetch(segment.url, onProgress = {}, isCancelled = { handle.cancelled })
+                    } finally {
+                        prefetchingUrls.remove(segment.url)
+                    }
+                }
+            } finally {
+                if (aheadPrefetch?.handle === handle) aheadPrefetch = null
+            }
         }
-        nextPrefetches[next.url] = job
+        aheadPrefetch = AheadPrefetch(favorite.id, ahead.last().index, handle, job)
+        job.start()
+    }
+
+    private fun cancelAheadPrefetch() {
+        aheadPrefetch?.let { task ->
+            task.handle.cancelled = true
+            task.job.cancel()
+        }
+        aheadPrefetch = null
+    }
+
+    private suspend fun stopAheadPrefetch() {
+        val task = aheadPrefetch ?: return
+        aheadPrefetch = null
+        task.handle.cancelled = true
+        task.job.cancel()
+        task.job.join()
     }
 
     fun togglePlay() {
@@ -681,36 +731,47 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             return
         }
         val handle = PrefetchHandle()
-        val job = viewModelScope.launch {
-            var total = 0L
-            var complete = true
-            for (url in urls) {
-                if (handle.cancelled) {
-                    complete = false
-                    break
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            // 手动整片缓存优先：先停掉滚动窗口，避免同一 URL 被两条链路同时拉
+            try {
+                stopAheadPrefetch()
+                var total = 0L
+                var complete = true
+                for (url in urls) {
+                    if (handle.cancelled) {
+                        complete = false
+                        break
+                    }
+                    if (!prefetchingUrls.add(url)) continue
+                    val base = total
+                    try {
+                        val written = graph.media.prefetch(
+                            url = url,
+                            onProgress = { cached -> prefetchFlow.update { it + (id to base + cached) } },
+                            isCancelled = { handle.cancelled },
+                        )
+                        if (written <= 0) {
+                            complete = false
+                            break
+                        }
+                        total += written
+                        prefetchFlow.update { it + (id to total) }
+                    } finally {
+                        prefetchingUrls.remove(url)
+                    }
                 }
-                val base = total
-                val written = graph.media.prefetch(
-                    url = url,
-                    onProgress = { cached -> prefetchFlow.update { it + (id to base + cached) } },
-                    isCancelled = { handle.cancelled },
-                )
-                if (written <= 0) {
-                    complete = false
-                    break
+                if (complete && !handle.cancelled) {
+                    graph.favorites.setLocallyCached(id, true)
+                    messageFlow.value = "已缓存到本地，离线可直接播放"
                 }
-                total += written
-                prefetchFlow.update { it + (id to total) }
+            } finally {
+                prefetches.remove(id)
+                prefetchFlow.update { it - id }
+                cacheBytesFlow.value = graph.media.totalCachedBytes()
             }
-            if (complete && !handle.cancelled) {
-                graph.favorites.setLocallyCached(id, true)
-                messageFlow.value = "已缓存到本地，离线可直接播放"
-            }
-            prefetches.remove(id)
-            prefetchFlow.update { it - id }
-            cacheBytesFlow.value = graph.media.totalCachedBytes()
         }
         prefetches[id] = handle to job
+        job.start()
     }
 
     /** 切片清单（HLS）当资源读只会读到几 KB 的播放列表，不能算「已缓存」 */
@@ -819,6 +880,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     // endregion
 
     override fun onCleared() {
+        cancelAheadPrefetch()
         prefetches.values.forEach { (handle, job) ->
             handle.cancelled = true
             job.cancel()
@@ -830,6 +892,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     companion object {
         /** 一页收藏的条数：够铺两三屏，又不至于一次把几年的收藏全拽下来 */
         private const val PAGE_SIZE = 50
+
+        /** 自动预取的滚动窗口：只提前 3 片，避免长视频把缓存挤空 */
+        private const val AUTO_PREFETCH_AHEAD = 3
 
         fun factory(graph: AppGraph) = viewModelFactory {
             initializer { MainViewModel(graph) }

@@ -96,6 +96,19 @@ test('阈值：选中视频不超过片大小时整片一段', async () => {
   assert.ok(videos[0].store_id.startsWith('st-'));
 });
 
+test('整片/图片/封面直传源地址：没配 MEDIA_BASE_URL 也能完成上传', async () => {
+  const env = createTestEnv({
+    ...baseVars(),
+    MEDIA_BASE_URL: '',
+    STORAGE_UPLOAD_URL: `${storage.base}/upload`,
+  });
+  const url = 'https://example.com/direct-source';
+  await sync(env, url, { mode: 'size', bytes: 400_000 });
+  const { row, record } = await waitTerminal(env, url);
+  assert.equal(record.upload_state, 'ready');
+  assert.ok(row.media.segments.every((segment) => segment.store_id), '整片与图片都应拿到 store_id');
+});
+
 test('跨轮分批：每轮只传 1 条也不消耗重试次数，最终凑齐', async () => {
   const env = await makeEnv({ UPLOAD_ITEMS_PER_TICK: '1', STORAGE_BATCH_SIZE: '1', UPLOAD_MAX_ATTEMPTS: '2' });
   const url = 'https://example.com/slow-batches';

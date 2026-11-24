@@ -79,7 +79,7 @@ export function loadConfig(env = {}) {
     sourceProbeMs: int(env.SOURCE_PROBE_MS, 5_000),
     sourceCheckTtlMs: int(env.SOURCE_CHECK_TTL_MS, 60_000),
 
-    // 外部存储服务：上传收的是本 Worker 的虚拟媒体地址，所以要有公网可达的前缀
+    // 外部存储服务：只有切片视频要回源 Worker 的合成地址，所以这个前缀只服务切片上传
     mediaBaseUrl: String(env.MEDIA_BASE_URL ?? '').replace(/\/+$/, ''),
     storageUploadUrl: env.STORAGE_UPLOAD_URL || '',
     storageGetUrl: env.STORAGE_GET_URL || '',

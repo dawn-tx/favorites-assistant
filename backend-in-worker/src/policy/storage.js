@@ -3,7 +3,9 @@ import { mediaPath, segmentExt } from '../keys.js';
 /**
  * 外部存储服务适配层。
  *
- * 上传：把一批 asset 的**虚拟媒体地址**交给存储服务，由它回源转存。
+ * 上传：把一批 asset 的媒体地址交给存储服务，由它回源转存。
+ * 只有**切片视频**需要 Worker 合成（init + 源区间），所以传虚拟地址；
+ * 整片、图片与封面直接传源站地址，不再绕 Worker。
  * 请求体是数组 `[{ type, media, favorite: { url, summary } }]`，单次最多 10 条；
  * 每条都带同一个收藏的 url 与 summary（一批只属于一个收藏）。
  * 响应是按上传顺序排列的 id 数组。当前按「整体失败」处理：任何一条失败就整批重试。
@@ -13,8 +15,12 @@ import { mediaPath, segmentExt } from '../keys.js';
 const MAX_BATCH = 10;
 
 function mediaUrl(cfg, asset) {
+  if (asset.sliceIndex == null) {
+    if (!asset.sourceUrl) throw new Error('素材缺少源地址，无法直传存储');
+    return asset.sourceUrl;
+  }
   const base = String(cfg.mediaBaseUrl ?? '').replace(/\/+$/, '');
-  if (!base) throw new Error('未配置 MEDIA_BASE_URL（存储服务需要能访问 Worker 的媒体地址）');
+  if (!base) throw new Error('未配置 MEDIA_BASE_URL（切片上传需要 Worker 的合成地址）');
   return `${base}${mediaPath(asset.key, segmentExt(asset.kind))}`;
 }
 

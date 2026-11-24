@@ -9,6 +9,6 @@
 #
 # code 记录当前 APK 对应的代码提交，方便确认产物是不是新的；note 写清这次为什么要重新构建。
 # bump 与代码同提交时，产物对应的其实是本提交，code 只能写它的父提交。
-build: 30
-code: 823e5d4
-note: 修 823e5d4 的 Kotlin 编译错误：MainViewModel 误把 SyncBadge 从 sync 包导入，正确包是 data。
+build: 31
+code: dae17bf
+note: 播放器滚动预取、BLOCK_ON_CACHE 与预取单飞；后台补 /media/full 与直传源站上传。

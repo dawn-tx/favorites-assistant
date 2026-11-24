@@ -23,6 +23,8 @@ export function handleMeta(cfg) {
     media_url_style: 'relative-to-endpoint',
     media_path: 'media/<key>.<ext>',
     media_path_note: '段地址是 /media/<key>.<ext>，相对的是接口地址（含 BASE_PATH），App 负责拼接',
+    media_full_path: 'media/full/<key>.<ext>',
+    media_full_note: '同 key 的整段代理：忽略 Range，成功只回 200 且 accept-ranges: none；错误仍 404/502',
     media_requires_auth: false,
     media_cache_control: 'public, max-age=31536000, immutable',
     ready_on_parse: true,
@@ -42,7 +44,7 @@ export function handleMeta(cfg) {
       covers: true,
       batch_size: cfg.storageBatchSize,
       max_slices_per_favorite: cfg.maxSlicesPerFavorite,
-      note: '每个视频只传最高的可达档；超过片大小才切片；图片与封面全传。上传时把本服务的虚拟媒体地址与收藏的 favorite:{url,summary} 交给外部存储服务回源转存，单次最多 10 条，返回的 id 写回 store_id；单条收藏切片总数有上限，超出的视频退回整片',
+      note: '每个视频只传最高的可达档；超过片大小才切片；图片与封面全传。切片传 Worker 的合成地址，整片/图片/封面直传源地址；单次最多 10 条，返回的 id 写回 store_id；单条收藏切片总数有上限，超出的视频退回整片',
     },
     scheduler: {
       kind: 'cron',

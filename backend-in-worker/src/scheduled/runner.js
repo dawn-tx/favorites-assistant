@@ -246,7 +246,7 @@ async function runUploadJobs(env, cfg, now, budget) {
       const batch = pending.slice(index, index + Math.min(batchSize, maxItems - index));
       index += batch.length;
       try {
-        // 上传的是本 Worker 的虚拟媒体地址；存储服务自己回源复制，复制完成才返回 id
+        // 切片传本 Worker 的合成地址；整片/图片/封面直接传源地址，存储服务自己回源复制
         // 同一批一定来自这条收藏：把 url/summary 一并带上，每条都重复一份
         const ids = await uploadAssetsToStorage(cfg, batch, {
           url: row.url,

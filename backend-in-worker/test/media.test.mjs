@@ -109,6 +109,26 @@ test('HEAD 只回头，不拉源数据', async () => {
   assert.equal(res.headers.get('content-length'), String(origin.constants.INIT_A.length + origin.constants.HALF));
 });
 
+test('full 代理忽略 Range：成功固定 200 整段，不再回 206', async () => {
+  const segment = videoRow.media.segments.find((item) => item.kind === 'video');
+  const fullUrl = segment.url.replace('/media/', '/media/full/');
+  const res = await fetchMedia(fullUrl, { range: 'bytes=5-10' });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-range'), null);
+  assert.equal(res.headers.get('accept-ranges'), 'none');
+  const body = new Uint8Array(await res.arrayBuffer());
+  const { INIT_A, VIDEO, HALF } = origin.constants;
+  assert.equal(body.length, INIT_A.length + HALF);
+  assert.deepEqual(body.subarray(0, INIT_A.length), new Uint8Array(INIT_A));
+  assert.deepEqual(body.subarray(INIT_A.length), VIDEO.subarray(0, HALF));
+
+  const head = await fetchMedia(fullUrl, { range: 'bytes=5-10' }, 'HEAD');
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get('content-range'), null);
+  assert.equal(head.headers.get('accept-ranges'), 'none');
+  assert.equal(head.headers.get('content-length'), String(INIT_A.length + HALF));
+});
+
 test('图片与封面同样走代理', async () => {
   const image = videoRow.media.segments.find((item) => item.kind === 'image');
   assert.ok(image, '应有图片段');
@@ -122,12 +142,16 @@ test('图片与封面同样走代理', async () => {
   assert.equal((await coverRes.arrayBuffer()).byteLength, origin.constants.IMAGE.length);
 });
 
-test('上传交给外部存储：请求是按顺序的 [{type,media,favorite}]，段上写回返回的 id', async () => {
+test('上传交给外部存储：切片走 Worker 合成地址，图片/封面直传源地址', async () => {
   assert.ok(storage.state.calls > 0, '存储服务应被调用');
   assert.ok(storage.state.requests.every((batch) => batch.length <= 10));
   const all = storage.state.requests.flat();
   assert.ok(all.every((item) => item.type === 'video' || item.type === 'image'));
-  assert.ok(all.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/`)));
+  const videos = all.filter((item) => item.type === 'video');
+  const images = all.filter((item) => item.type === 'image');
+  assert.ok(videos.length > 0 && images.length > 0);
+  assert.ok(videos.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/`)));
+  assert.ok(images.every((item) => item.media.startsWith(originBase)), '图片与封面应直传源地址');
   assert.ok(all.every((item) => item.favorite?.url === videoRow.url));
   assert.ok(all.every((item) => item.favorite?.summary === videoRow.media.summary));
 
