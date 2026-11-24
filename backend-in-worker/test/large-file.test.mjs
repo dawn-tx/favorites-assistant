@@ -5,6 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import worker from '../src/index.js';
+import { parserConfig } from '../src/policy/parser.js';
 import { call, createTestEnv, tick } from './support/harness.mjs';
 import { startBridge } from './support/bridge.mjs';
 import { startStorage, closeServer as closeStorage } from './support/storage.mjs';
@@ -24,6 +25,7 @@ const bridges = [];
 before(async () => {
   storage = await startStorage();
   parser = await startParseStub({ sample200: SAMPLE_200, sample500: SAMPLE_500 });
+  parserConfig.url = `${parser.base}/parse`;
 
   const [ok200, ok500, okSlicer] = await Promise.all([
     reachable(SAMPLE_200, 'HEAD'),
@@ -48,9 +50,7 @@ function reachable(url, method) {
 
 async function makeEnv() {
   const env = createTestEnv({
-    PARSE_SERVICE_URL: `${parser.base}/parse`,
     SLICE_SERVICE_URL: SLICER,
-    SLICE_RULE: JSON.stringify({ mode: 'size', bytes: SLICE_BYTES, align: 'keyframe' }),
     UPLOAD_WAIT_MS: '0',
     JOBS_PER_TICK: '8',
     UPLOAD_ITEMS_PER_TICK: '20',

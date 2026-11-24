@@ -37,7 +37,7 @@ import { notifyHub } from '../hub.js';
 
 /**
  * 免费版一次调用最多 50 个子请求（D1 查询、fetch 都算），所以调度器带着预算跑：
- * 预算见底就把剩下的任务原样放回，下一分钟的 cron 接着领。
+ * 预算见底就把剩下的任务原样放回，下一轮的 cron 接着领。
  * db.batch() 在 D1 里算一次查询，所有写操作都尽量合并成一批。
  */
 const SUBREQUEST_BUDGET = 45;
@@ -332,7 +332,7 @@ async function finishUploadJob(env, cfg, row, job, assets, failures, budgetExhau
 
 /**
  * 切片信息清理：已有备份且空闲超过 TTL 的片清掉 init/区间，保留 key/位置/时长/store_id。
- * 由每小时 cron 触发，避免和任务队列抢预算。
+ * 由每 5 小时的 cron 触发，避免和任务队列抢预算。
  */
 export async function runCleanup(env, cfg, now = Date.now()) {
   const keys = await listExpiredSliceKeys(env.DB, now, cfg.sliceInfoTtlMs);
@@ -344,7 +344,7 @@ export async function runCleanup(env, cfg, now = Date.now()) {
 
 /**
  * 孤儿 init / source 回收：没有 asset 再引用的行删掉（保留 1 小时，避开正在写库的任务）。
- * 这两个查询要扫 assets 表，所以单独放每天一次的 cron，不跟每小时清理混在一起。
+ * 这两个查询要扫 assets 表，所以单独放每天一次的 cron，不跟每 5 小时的清理混在一起。
  */
 export async function runGc(env, now = Date.now()) {
   const cutoff = now - 60 * 60 * 1000;

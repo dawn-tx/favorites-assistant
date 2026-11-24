@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.js';
+import { parserConfig } from '../src/policy/parser.js';
 import { call, createTestEnv, tick } from './support/harness.mjs';
 import { listen, startOrigin } from './support/origin.mjs';
 
@@ -14,10 +15,10 @@ before(async () => {
   origin = startOrigin();
   const port = await listen(origin.server);
   originBase = `http://127.0.0.1:${port}`;
+  parserConfig.url = `${originBase}/parse`;
   env = createTestEnv({
-    PARSE_SERVICE_URL: `${originBase}/parse`,
     SLICE_SERVICE_URL: `${originBase}/slice`,
-    SLICE_RULE: JSON.stringify({ mode: 'size', bytes: origin.constants.SLICE_BYTES }),
+    USER_AGENT: 'favkit-test-agent',
     UPLOAD_WAIT_MS: '0',
     JOBS_PER_TICK: '8',
     // 这个文件只测协议面：备份关掉，不依赖外部存储
@@ -35,6 +36,7 @@ const request = (method, path, body) => call(worker, env, method, `${base}${path
 function upsert(url, { note = '', tags = [], sourceApp = 'manual', favoriteAt } = {}) {
   return request('POST', '/sync', {
     device_id: 'tab-test',
+    slice_rule: { mode: 'size', bytes: origin.constants.SLICE_BYTES },
     ops: [{ type: 'UPSERT', favorite: { url, note, tags, source_app: sourceApp, favorite_at: favoriteAt ?? Date.now() } }],
   });
 }
@@ -91,6 +93,14 @@ test('解析完成后 media 就绪：段是相对虚拟地址、updated_at 前�
   assert.ok(row.media.segments.every((seg) => !seg.url.includes('://')));
   assert.equal(row.failed_reason, '');
   assert.ok(row.updated_at > 0);
+});
+
+test('探源与解析服务请求都带 USER_AGENT', async () => {
+  await waitReady('https://www.bilibili.com/video/BV1xx411c7mD');
+  assert.ok(origin.state.parseUserAgents.length > 0, '解析服务应收到请求');
+  assert.ok(origin.state.sourceUserAgents.length > 0, '源站应收到探活请求');
+  assert.ok(origin.state.parseUserAgents.every((ua) => ua === 'favkit-test-agent'));
+  assert.ok(origin.state.sourceUserAgents.every((ua) => ua === 'favkit-test-agent'));
 });
 
 test('GET /favorites?fields=min 只回清单四列', async () => {

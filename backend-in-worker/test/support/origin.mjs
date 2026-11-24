@@ -14,7 +14,7 @@ const HALF = VIDEO.length / 2;
 const SLICE_BYTES = 65_536;
 
 export function startOrigin({ quality = '720P', height = 720 } = {}) {
-  const state = { down: false, etag: '"v1"', hits: 0 };
+  const state = { down: false, etag: '"v1"', hits: 0, parseUserAgents: [], sourceUserAgents: [] };
 
   const server = createServer((req, res) => {
     state.hits += 1;
@@ -25,9 +25,13 @@ export function startOrigin({ quality = '720P', height = 720 } = {}) {
     }
     const pathname = new URL(req.url, 'http://x').pathname;
 
-    if (pathname === '/parse' && req.method === 'POST') return handleParse(req, res);
+    if (pathname === '/parse' && req.method === 'POST') {
+      state.parseUserAgents.push(req.headers['user-agent'] || '');
+      return handleParse(req, res);
+    }
     if (pathname === '/slice' && req.method === 'POST') return handleSlice(req, res, state);
 
+    state.sourceUserAgents.push(req.headers['user-agent'] || '');
     const body = pathname.endsWith('.mp4') ? VIDEO : IMAGE;
     const contentType = pathname.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
     serveRange(req, res, body, contentType, state.etag);

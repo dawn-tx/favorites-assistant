@@ -16,7 +16,7 @@ export { LibraryHub };
  * 媒体代理免鉴权（ExoPlayer/Coil 不带 header），只服务已登记的 key。
  *
  * 写入类接口成功后顺手排一个 waitUntil：响应已经发走，这一步失败不影响请求，
- * 只把「等下一分钟 cron」的延迟压到秒级；预算只给 30，和主请求合计不超免费版 50 个子请求。
+ * 只把「等下一轮 cron」的延迟压到秒级；预算只给 30，和主请求合计不超免费版 50 个子请求。
  */
 export default {
   async fetch(request, env, ctx) {
@@ -30,7 +30,7 @@ export default {
         return await handleHealth(env);
       }
       if (path === `${cfg.basePath}/meta` && method === 'GET') {
-        return handleMeta(env, cfg);
+        return handleMeta(cfg);
       }
       if (path === `${cfg.basePath}/ws`) {
         if (!authorized(request, cfg)) return rejectUnauthorized();
@@ -68,7 +68,7 @@ export default {
   },
 
   /**
-   * 三个 cron：每分钟任务队列、每小时切片清理、每天孤儿 init/source 回收。
+   * 三个 cron：每 3 分钟任务队列、每 5 小时切片清理、每天孤儿 init/source 回收。
    * 没有常驻进程，所有后台工作都由这里驱动。
    */
   async scheduled(controller, env) {

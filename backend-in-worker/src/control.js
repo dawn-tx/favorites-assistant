@@ -71,7 +71,7 @@ export async function lookupFavorites(env, cfg, urls) {
 export async function resolveFavorites(env, cfg, urls, rawRule) {
   const rule = rawRule == null ? null : parseSliceRule(rawRule);
   if (rawRule != null && !rule) {
-    throw new HttpError(400, 'slice_rule 只支持 {mode:"duration",seconds} 或 {mode:"size",bytes}');
+    throw new HttpError(400, 'slice_rule 只支持 {mode:"size",bytes}');
   }
   const unique = normalizeUrls(urls);
   const rows = await getFavoritesByUrls(env.DB, unique);

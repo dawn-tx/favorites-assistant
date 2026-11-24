@@ -9,7 +9,7 @@ async function probeUncached(cfg, url) {
   try {
     const head = await fetch(url, {
       method: 'HEAD',
-      headers: { 'accept-encoding': 'identity' },
+      headers: { 'accept-encoding': 'identity', 'user-agent': cfg.userAgent },
       signal: AbortSignal.timeout(cfg.sourceProbeMs),
       redirect: 'follow',
     });
@@ -27,7 +27,7 @@ async function probeUncached(cfg, url) {
     }
     if (!head.ok || head.status === 405 || head.status === 501) {
       const probe = await fetch(url, {
-        headers: { range: 'bytes=0-0', 'accept-encoding': 'identity' },
+        headers: { range: 'bytes=0-0', 'accept-encoding': 'identity', 'user-agent': cfg.userAgent },
         signal: AbortSignal.timeout(cfg.sourceProbeMs),
         redirect: 'follow',
       });

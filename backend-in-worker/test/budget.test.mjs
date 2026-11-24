@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.js';
+import { parserConfig } from '../src/policy/parser.js';
 import { call, createTestEnv, tick } from './support/harness.mjs';
 import { listen, startOrigin } from './support/origin.mjs';
 import { runScheduled } from '../src/scheduled/runner.js';
@@ -15,6 +16,7 @@ before(async () => {
   origin = startOrigin();
   const port = await listen(origin.server);
   originBase = `http://127.0.0.1:${port}`;
+  parserConfig.url = `${originBase}/parse`;
 });
 
 after(async () => {
@@ -22,9 +24,7 @@ after(async () => {
 });
 
 const envVars = () => ({
-  PARSE_SERVICE_URL: `${originBase}/parse`,
   SLICE_SERVICE_URL: `${originBase}/slice`,
-  SLICE_RULE: JSON.stringify({ mode: 'size', bytes: origin.constants.SLICE_BYTES }),
   UPLOAD_WAIT_MS: '0',
   // 每轮只允许 3 个子请求：解析服务 1 + 探活 1 就不够切片了，必须跨轮
   JOBS_PER_TICK: '4',
@@ -85,7 +85,7 @@ test('解析中途预算耗尽抛 BudgetExhausted，而不是悄悄降级成整�
     () =>
       parseFavorite(
         cfg,
-        { url: 'https://example.com/exhaust', sliceRule: null },
+        { url: 'https://example.com/exhaust', sliceRule: { mode: 'size', bytes: origin.constants.SLICE_BYTES } },
         createBudget(1),
       ),
     (error) => error instanceof BudgetExhausted,

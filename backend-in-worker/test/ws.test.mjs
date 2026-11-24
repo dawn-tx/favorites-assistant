@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { LibraryHub } from '../src/index.js';
+import { parserConfig } from '../src/policy/parser.js';
 import { call, createFakeHub, createTestEnv, tick } from './support/harness.mjs';
 import { listen, startOrigin } from './support/origin.mjs';
 
@@ -13,6 +14,7 @@ before(async () => {
   origin = startOrigin();
   const port = await listen(origin.server);
   originBase = `http://127.0.0.1:${port}`;
+  parserConfig.url = `${originBase}/parse`;
 });
 
 after(async () => {
@@ -139,7 +141,6 @@ test('/sync 写入后通知中枢；删除推 deleted', async () => {
 test('解析完成后推送 ready 完整行', async () => {
   const fake = createFakeHub();
   const env = createTestEnv({
-    PARSE_SERVICE_URL: `${originBase}/parse`,
     SLICE_SERVICE_URL: '',
     UPLOAD_JOBS_PER_TICK: '0',
     JOBS_PER_TICK: '4',

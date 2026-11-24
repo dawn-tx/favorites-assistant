@@ -10,7 +10,7 @@
 #   wrangler d1 execute favorites --remote --file=src/store/schema.sql
 #
 # secret 用 `wrangler secret put` 下发：
-#   SYNC_TOKEN / MEDIA_KEY_SECRET / PARSE_SERVICE_TOKEN / STORAGE_TOKEN
+#   SYNC_TOKEN / MEDIA_KEY_SECRET / STORAGE_TOKEN
 
 name = "favorites-backend"
 main = "src/index.js"
@@ -20,26 +20,24 @@ compatibility_date = "2025-09-01"
 enabled = true
 
 [triggers]
-# 每分钟跑任务队列（解析 + 备份），每小时清理空闲切片信息，每天回收孤儿 init/source。
-crons = ["* * * * *", "23 * * * *", "41 4 * * *"]
+# 每 3 分钟跑任务队列（解析 + 备份），每 5 小时清理空闲切片信息，每天回收孤儿 init/source。
+crons = ["*/3 * * * *", "23 */5 * * *", "41 4 * * *"]
 
 [vars]
 BASE_PATH = "/api/v1"
 INGEST_PATH = "/ingest/callback"
 INGEST_SOURCE_APP = "第三方"
-PARSE_SERVICE_URL = ""
 SLICE_SERVICE_URL = ""
-UPLOAD_MAX_HEIGHT = "1080"
 UPLOAD_MAX_ATTEMPTS = "3"
-UPLOAD_WAIT_MS = "3000"
+UPLOAD_WAIT_MS = "5000"
 # 单条收藏所有视频加起来最多切多少片；超出片数预算的视频退回整片，
 # 保证免费版 10ms CPU 与 D1 行数可控（18MB/片 × 50 ≈ 900MB）。
 MAX_SLICES_PER_FAVORITE = "50"
-# 免费版一次调用最多 50 个子请求：每轮只跑一小批，剩下的下一分钟接着领。
+# 免费版一次调用最多 50 个子请求：每轮只跑一小批，剩下的下一轮（3 分钟后）接着领。
 JOBS_PER_TICK = "4"
 UPLOAD_JOBS_PER_TICK = "2"
 UPLOAD_ITEMS_PER_TICK = "20"
-# 一次上传要复制 10×18MB；锁必须长于一次存储调用，否则下一分钟会重复领。
+# 一次上传要复制 10×18MB；锁必须长于一次存储调用，否则下一轮会重复领。
 UPLOAD_JOB_LOCK_MS = "600000"
 # 外部存储服务（上传接口单次最多 10 条）
 MEDIA_BASE_URL = "https://REPLACE_WITH_YOUR_WORKER.workers.dev/api/v1"

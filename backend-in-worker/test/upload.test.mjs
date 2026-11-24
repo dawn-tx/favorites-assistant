@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.js';
+import { parserConfig } from '../src/policy/parser.js';
 import { call, createTestEnv, tick } from './support/harness.mjs';
 import { listen, startOrigin } from './support/origin.mjs';
 import { startBridge } from './support/bridge.mjs';
@@ -17,6 +18,7 @@ before(async () => {
   origin = startOrigin();
   const port = await listen(origin.server);
   originBase = `http://127.0.0.1:${port}`;
+  parserConfig.url = `${originBase}/parse`;
   storage = await startStorage();
 });
 
@@ -27,9 +29,7 @@ after(async () => {
 });
 
 const baseVars = () => ({
-  PARSE_SERVICE_URL: `${originBase}/parse`,
   SLICE_SERVICE_URL: `${originBase}/slice`,
-  SLICE_RULE: JSON.stringify({ mode: 'size', bytes: origin.constants.SLICE_BYTES }),
   UPLOAD_WAIT_MS: '0',
   JOBS_PER_TICK: '8',
   UPLOAD_ITEMS_PER_TICK: '20',
@@ -46,9 +46,10 @@ async function makeEnv(extra = {}) {
   return env;
 }
 
-const sync = (env, url) =>
+const sync = (env, url, sliceRule = { mode: 'size', bytes: origin.constants.SLICE_BYTES }) =>
   call(worker, env, 'POST', '/api/v1/sync', {
     device_id: 'tab-test',
+    slice_rule: sliceRule,
     ops: [{ type: 'UPSERT', favorite: { url, note: '', tags: [], source_app: 'manual', favorite_at: Date.now() } }],
   });
 
@@ -86,9 +87,9 @@ test('批量上传：按 STORAGE_BATCH_SIZE 切批，每批 ≤10 条，全部�
 });
 
 test('阈值：选中视频不超过片大小时整片一段', async () => {
-  const env = await makeEnv({ SLICE_RULE: JSON.stringify({ mode: 'size', bytes: 400_000 }) });
+  const env = await makeEnv();
   const url = 'https://example.com/whole';
-  await sync(env, url);
+  await sync(env, url, { mode: 'size', bytes: 400_000 });
   const { row } = await waitTerminal(env, url);
   const videos = row.media.segments.filter((segment) => segment.kind === 'video');
   assert.equal(videos.length, 1, `400KB 阈值下视频应整片一段，实际 ${videos.length} 段`);

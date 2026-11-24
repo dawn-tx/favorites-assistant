@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.js';
+import { parserConfig } from '../src/policy/parser.js';
 import { call, createTestEnv, tick } from './support/harness.mjs';
 import { listen, startOrigin } from './support/origin.mjs';
 import { startBridge, closeServer as closeBridge } from './support/bridge.mjs';
@@ -21,10 +22,9 @@ before(async () => {
   originBase = `http://127.0.0.1:${port}`;
   storage = await startStorage();
 
+  parserConfig.url = `${originBase}/parse`;
   env = createTestEnv({
-    PARSE_SERVICE_URL: `${originBase}/parse`,
     SLICE_SERVICE_URL: `${originBase}/slice`,
-    SLICE_RULE: JSON.stringify({ mode: 'size', bytes: origin.constants.SLICE_BYTES }),
     SOURCE_CHECK_TTL_MS: '0',
     UPLOAD_WAIT_MS: '0',
     JOBS_PER_TICK: '8',
@@ -38,6 +38,7 @@ before(async () => {
 
   const created = await call(worker, env, 'POST', '/api/v1/sync', {
     device_id: 'tab-test',
+    slice_rule: { mode: 'size', bytes: origin.constants.SLICE_BYTES },
     ops: [{ type: 'UPSERT', favorite: { url: 'https://example.com/media', note: '', tags: [], source_app: 'manual', favorite_at: Date.now() } }],
   });
   assert.equal(created.status, 200);
@@ -160,7 +161,10 @@ test('不存在的虚拟 key 明确 404', async () => {
 
 test('重新解析后同一段的虚拟地址不变', async () => {
   const beforeUrls = videoRow.media.segments.map((segment) => segment.url);
-  await call(worker, env, 'POST', '/api/v1/resolve', { urls: [videoRow.url] });
+  await call(worker, env, 'POST', '/api/v1/resolve', {
+    urls: [videoRow.url],
+    slice_rule: { mode: 'size', bytes: origin.constants.SLICE_BYTES },
+  });
   for (let i = 0; i < 40; i += 1) {
     const { json } = await call(worker, env, 'GET', '/api/v1/favorites?limit=10');
     const row = json.favorites.find((item) => item.url === videoRow.url);
@@ -187,7 +191,10 @@ test('压缩：同源切片共享 source 行，重解析不新增重复行', asy
   assert.ok(Number(videoAssets.n) >= 2);
 
   // 同一内容重新解析：source/init 不应出现重复行
-  await call(worker, env, 'POST', '/api/v1/resolve', { urls: [videoRow.url] });
+  await call(worker, env, 'POST', '/api/v1/resolve', {
+    urls: [videoRow.url],
+    slice_rule: { mode: 'size', bytes: origin.constants.SLICE_BYTES },
+  });
   for (let i = 0; i < 40; i += 1) {
     const { json } = await call(worker, env, 'GET', '/api/v1/favorites?limit=10');
     const row = json.favorites.find((item) => item.url === videoRow.url);

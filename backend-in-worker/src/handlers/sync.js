@@ -22,7 +22,7 @@ export async function handleSync(request, env, cfg, ctx) {
     if (body.ops.length !== 1) throw new HttpError(400, '这个后台一次只接受一条操作');
     const sliceRule = body.slice_rule == null ? null : parseSliceRule(body.slice_rule);
     if (body.slice_rule != null && !sliceRule) {
-      throw new HttpError(400, 'slice_rule 只支持 {mode:"duration",seconds} 或 {mode:"size",bytes}');
+      throw new HttpError(400, 'slice_rule 只支持 {mode:"size",bytes}');
     }
     const op = body.ops[0];
     if (!plainObject(op)) throw new HttpError(400, '第 1 条操作不是 JSON 对象');

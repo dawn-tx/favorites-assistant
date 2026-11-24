@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.js';
+import { parserConfig } from '../src/policy/parser.js';
 import { call, createTestEnv, tick } from './support/harness.mjs';
 import { listen, startOrigin } from './support/origin.mjs';
 import { startBridge } from './support/bridge.mjs';
@@ -18,6 +19,7 @@ before(async () => {
   origin = startOrigin();
   const port = await listen(origin.server);
   originBase = `http://127.0.0.1:${port}`;
+  parserConfig.url = `${originBase}/parse`;
   storage = await startStorage();
   env = await makeEnv();
 });
@@ -29,9 +31,7 @@ after(async () => {
 });
 
 const baseVars = () => ({
-  PARSE_SERVICE_URL: `${originBase}/parse`,
   SLICE_SERVICE_URL: `${originBase}/slice`,
-  SLICE_RULE: JSON.stringify({ mode: 'size', bytes: origin.constants.SLICE_BYTES }),
   UPLOAD_WAIT_MS: '0',
   JOBS_PER_TICK: '8',
   UPLOAD_ITEMS_PER_TICK: '20',
@@ -127,7 +127,6 @@ test('删掉之后 B 再推一次会复活', async () => {
 
 test('SYNC_TOKEN 非空时数据接口要 Bearer，媒体与 health 仍免鉴权', async () => {
   const secured = createTestEnv({
-    PARSE_SERVICE_URL: `${originBase}/parse`,
     SYNC_TOKEN: 's3cret',
   });
   const okHealth = await call(worker, secured, 'GET', '/api/v1/health');
@@ -160,7 +159,6 @@ test('上传失败不影响 ready：存储不可达时内容仍可用、store_id
   const parseOnly = await makeEnv({
     SLICE_SERVICE_URL: '',
     UPLOAD_JOBS_PER_TICK: '0',
-    SLICE_RULE: JSON.stringify({ mode: 'size', bytes: 400_000 }),
   });
   const url = 'https://example.com/backup-fails';
   await call(worker, parseOnly, 'POST', '/api/v1/sync', {
@@ -175,7 +173,6 @@ test('上传失败不影响 ready：存储不可达时内容仍可用、store_id
   const uploadOnly = await makeEnv({
     SLICE_SERVICE_URL: '',
     UPLOAD_MAX_ATTEMPTS: '1',
-    SLICE_RULE: JSON.stringify({ mode: 'size', bytes: 400_000 }),
   });
   uploadOnly.DB = parseOnly.DB;
   storage.state.down = true;
@@ -199,6 +196,7 @@ test('切片信息清理：空闲片清掉 init 区间，代理时按索引补�
   const url = 'https://example.com/cleanup';
   await call(worker, cleanupEnv, 'POST', '/api/v1/sync', {
     device_id: 'tab-test',
+    slice_rule: { mode: 'size', bytes: origin.constants.SLICE_BYTES },
     ops: [{ type: 'UPSERT', favorite: { url, note: '', tags: [], source_app: 'manual', favorite_at: Date.now() } }],
   });
   for (let i = 0; i < 40; i += 1) {
@@ -213,7 +211,7 @@ test('切片信息清理：空闲片清掉 init 区间，代理时按索引补�
   // 从段地址直接取 key，别按 last_used_at 猜——两个切片的时间戳可能相同
   const key = /^\/media\/([A-Za-z0-9_-]+)/.exec(segment.url)[1];
 
-  await tick(worker, cleanupEnv, '23 * * * *');
+  await tick(worker, cleanupEnv, '23 */5 * * *');
   const afterCleanup = await assetRow(cleanupEnv, key);
   assert.equal(afterCleanup.init_id, null, '空闲片应被清掉 init/区间');
   assert.equal(afterCleanup.start_offset, null);

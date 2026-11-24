@@ -31,7 +31,7 @@ function fallbackSummary(display) {
 /** 产出 draft（尚未生成 key 的 asset 雏形），封面用 coverId 引用同视频的封面 */
 async function buildDrafts(cfg, resolved, rule, budget, sliceBudget) {
   const sliceBytes = Number.isFinite(rule?.bytes) && rule.bytes > 0 ? rule.bytes : DEFAULT_SLICE_RULE.bytes;
-  const sliceRule = { mode: 'size', bytes: sliceBytes, align: 'keyframe' };
+  const sliceRule = { ...DEFAULT_SLICE_RULE, mode: 'size', bytes: sliceBytes, align: 'keyframe' };
   const drafts = [];
   const videos = Array.isArray(resolved.videos) ? resolved.videos : [];
 

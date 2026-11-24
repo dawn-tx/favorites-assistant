@@ -6,6 +6,16 @@
  *     videos: [{ title, durationMs, coverUrl, variants: [{ url, height, quality }] }],
  *     images: [{ title, url }] }
  */
+/**
+ * 解析服务配置：直接维护在模块内，不走 env。
+ * 以后接入多个解析器时，把这里扩成列表，并在 resolveMedia 里按链接选择。
+ */
+export const parserConfig = {
+  url: '',
+  token: '',
+  timeoutMs: 30_000,
+};
+
 function isHttpUrl(value) {
   if (typeof value !== 'string' || !value.trim()) return false;
   try {
@@ -23,6 +33,11 @@ function heightFromQuality(quality) {
 
 function text(value) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function parseTimeoutMs(raw) {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 30_000;
 }
 
 function durationMs(value) {
@@ -77,17 +92,18 @@ export function normalize(raw) {
 }
 
 export async function resolveMedia(cfg, url, budget) {
-  if (!cfg.parseServiceUrl) throw new Error('未配置 PARSE_SERVICE_URL');
+  const serviceUrl = parserConfig.url;
+  if (!serviceUrl) throw new Error('解析器未配置服务地址');
   budget.take();
-  const headers = { 'content-type': 'application/json' };
-  if (cfg.parseServiceToken) headers.authorization = `Bearer ${cfg.parseServiceToken}`;
+  const headers = { 'content-type': 'application/json', 'user-agent': cfg.userAgent };
+  if (parserConfig.token) headers.authorization = `Bearer ${parserConfig.token}`;
   let response;
   try {
-    response = await fetch(cfg.parseServiceUrl, {
+    response = await fetch(serviceUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(cfg.parseTimeoutMs),
+      signal: AbortSignal.timeout(parseTimeoutMs(parserConfig.timeoutMs)),
     });
   } catch (error) {
     throw new Error(`解析服务不可达：${error.message}`);

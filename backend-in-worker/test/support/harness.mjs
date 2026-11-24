@@ -115,8 +115,8 @@ export async function call(worker, env, method, path, body, headers = {}) {
   return { status: response.status, headers: response.headers, json, text, response };
 }
 
-/** 跑一次 cron（默认任务队列） */
-export async function tick(worker, env, cron = '* * * * *') {
+/** 跑一次 cron（默认 3 分钟一次的任务队列） */
+export async function tick(worker, env, cron = '*/3 * * * *') {
   const pending = [];
   await worker.scheduled({ cron }, env, { waitUntil: (task) => pending.push(task) });
   if (pending.length > 0) await Promise.allSettled(pending);

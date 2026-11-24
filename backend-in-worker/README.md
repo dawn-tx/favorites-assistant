@@ -100,13 +100,13 @@ wrangler d1 execute favorites --remote --file=src/store/schema.sql
 # 3) secrets
 wrangler secret put SYNC_TOKEN
 wrangler secret put MEDIA_KEY_SECRET
-wrangler secret put PARSE_SERVICE_TOKEN
 wrangler secret put STORAGE_TOKEN
 
 # 4) 在 wrangler.toml 里填：
-#    PARSE_SERVICE_URL / SLICE_SERVICE_URL
+#    SLICE_SERVICE_URL
 #    MEDIA_BASE_URL      —— 部署后的 Worker 公网地址（含 /api/v1），存储服务要能访问
 #    STORAGE_UPLOAD_URL  —— 外部存储的上传接口
+#    解析服务地址/令牌/超时直接改 src/policy/parser.js 的 parserConfig
 
 # 5) 部署
 wrangler deploy
@@ -121,7 +121,8 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 ## 配置说明
 
-运行时配置全部来自 `wrangler.toml` 的 `[vars]` 与 `wrangler secret`；`src/config.js` 在首次请求时解析并缓存。
+运行时配置大部分来自 `wrangler.toml` 的 `[vars]` 与 `wrangler secret`；`src/config.js` 在首次请求时解析并缓存。
+解析器的地址、令牌与超时不再走 env，直接维护在 `src/policy/parser.js` 的 `parserConfig` 里；解析器可能不止一个，以后多解析器的选择逻辑也留在该模块。
 数字类变量在 TOML 里写成字符串（如 `"300000"`），留空或非法时回落到默认值。
 表里没有出现在 `wrangler.toml` 的变量，需要时直接加到 `[vars]` 即可覆盖默认值。
 `/meta` 会回显大部分生效值（`next_wait_ms`、`slice_rule`、上传批大小、调度节奏等）。
@@ -134,8 +135,8 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | `main` | `src/index.js` | Worker 入口 |
 | `compatibility_date` | `2025-09-01` | 运行时兼容日期 |
 | `observability.enabled` | `true` | 打开 Workers Logs，便于看 `exceededCpu` |
-| cron 1 | `* * * * *` | 每分钟跑任务队列（解析 + 备份） |
-| cron 2 | `23 * * * *` | 每小时清理空闲切片信息 |
+| cron 1 | `*/3 * * * *` | 每 3 分钟跑任务队列（解析 + 备份） |
+| cron 2 | `23 */5 * * *` | 每 5 小时清理空闲切片信息 |
 | cron 3 | `41 4 * * *` | 每天回收无引用的 `inits` / `sources` |
 
 免费版每个账号最多 5 个 cron，这里用了 3 个；其余两个留给别的 Worker。
@@ -153,34 +154,32 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `UPLOAD_WAIT_MS` | `3000` | `/sync`、`/resolve` 回执里的 `next_wait_ms` 与 `Retry-After` 基准；同时是 Worker 两次存储上传调用的最小间隔，也是存储服务 429 未给 `Retry-After` 时的退避值 |
+| `UPLOAD_WAIT_MS` | `5000` | `/sync`、`/resolve` 回执里的 `next_wait_ms` 与 `Retry-After` 基准；同时是 Worker 两次存储上传调用的最小间隔，也是存储服务 429 未给 `Retry-After` 时的退避值 |
 | `UPLOAD_WAIT_JITTER_MS` | `0` | 大于 0 时按请求序号在 `0/1/2` 倍之间抖动；0 = 固定值 |
 
 ### 解析与切片
 
 | 变量 / secret | 默认 | 作用 |
 |---|---|---|
-| `PARSE_SERVICE_URL` | 空 | **生产必须配置**；空时每条解析直接失败 |
-| `PARSE_SERVICE_TOKEN`（secret） | 空 | 非空时给解析服务带 Bearer |
-| `PARSE_TIMEOUT_MS` | `30000` | 调解析服务的超时 |
+| 解析服务 | 见 `policy/parser.js` 的 `parserConfig` | 地址、令牌、超时都是模块内常量，不走 env；空地址时每条解析直接失败 |
+| `USER_AGENT` | Chrome 157 桌面版 | 探源（HEAD / Range）与调用解析服务时带上的 `User-Agent`；留空用 `src/config.js` 里的默认值 |
 | `SLICE_SERVICE_URL` | 空 | 空 = 不启用切片；超过切片阈值的大视频会**解析失败**（不再退为整片），小视频仍整片。生产必须配置 |
 | `SLICE_TIMEOUT_MS` | `60000` | 调切片服务的超时 |
-| `SLICE_RULE` | `{"mode":"size","bytes":2000000,"align":"keyframe"}` | 没有随请求带规则时的默认片大小；也是「长视频」阈值。只收按大小或按时长两种形状，切点固定关键帧；按大小时 64KiB–1GiB |
-| `UPLOAD_MAX_HEIGHT` | `1080` | 每个视频选一档：高度不超过它的最高可达档；没有则取最小档 |
+| 默认切片规则（代码固定） | `{"mode":"size","bytes":18874368,"align":"keyframe","strategy":"auto","limit":20000000}` | 唯一默认值，**不再读 `SLICE_RULE` 环境变量**；也是「长视频」阈值。App 在请求里带 `slice_rule` 时只覆盖 `bytes`，其余字段保持这套默认 |
 | `MAX_SLICES_PER_FAVORITE` | `50` | **单条收藏所有视频合计**最多切多少片；超出预算的视频退回整片 |
 | `TRANSFER_MAX_ATTEMPTS` | `3` | 解析失败重试次数 |
 | `TRANSFER_RETRY_MS` | `2000` | 解析重试退避基数（第 n 次等 `n × 该值`） |
 
-`SLICE_RULE` 只是默认值；App 在 `/sync`、`/resolve` 里带的规则会按条落库，优先级更高。
+`DEFAULT_SLICE_RULE` 只是默认值；App 在 `/sync`、`/resolve` 里带的规则会按条落库，优先级更高。规则只收按大小一种形状（`{mode:"size",bytes}`），切点固定关键帧；`bytes` 范围 64KiB–1GiB。视频选档不再设高度上限，按分辨率从高到低取第一个可达档。
 
 ### 媒体、密钥与切片缓存
 
 | 变量 / secret | 默认 | 作用 |
 |---|---|---|
 | `MEDIA_KEY_SECRET`（secret） | 空 | 虚拟 key 的 HMAC 密钥；空则用确定性 SHA-256。公网部署建议配置 |
-| `SOURCE_PROBE_MS` | `2500` | 源站 HEAD/Range 探活超时 |
+| `SOURCE_PROBE_MS` | `5000` | 源站 HEAD/Range 探活超时 |
 | `SOURCE_CHECK_TTL_MS` | `60000` | 探活结果缓存时长；0 = 每次都探（联调用） |
-| `SLICE_INFO_TTL_MS` | `2592000000`（30 天） | 切片 init/区间作为派生缓存的空闲上限；只有已有备份的片才会被清 |
+| `SLICE_INFO_TTL_MS` | `604800000`（7 天） | 切片 init/区间作为派生缓存的空闲上限；只有已有备份的片才会被清 |
 | `SLICE_INFO_TOUCH_MS` | `600000`（10 分钟） | 媒体请求更新 `last_used_at` 的合并间隔，避免每个 Range 都写 D1 |
 
 ### 外部存储
@@ -198,10 +197,10 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `JOBS_PER_TICK` | `4` | 每分钟最多领几条解析任务；0 = 关闭解析（联调用） |
-| `UPLOAD_JOBS_PER_TICK` | `2` | 每分钟最多领几条上传任务；0 = 关闭上传 |
+| `JOBS_PER_TICK` | `4` | 每 3 分钟最多领几条解析任务；0 = 关闭解析（联调用） |
+| `UPLOAD_JOBS_PER_TICK` | `2` | 每 3 分钟最多领几条上传任务；0 = 关闭上传 |
 | `UPLOAD_ITEMS_PER_TICK` | `20` | 每条上传任务每轮最多处理几个 asset；按 `STORAGE_BATCH_SIZE` 切批 |
-| `UPLOAD_JOB_LOCK_MS` | `600000`（10 分钟） | 上传任务锁；必须长于一次存储调用，否则下一分钟会重复领 |
+| `UPLOAD_JOB_LOCK_MS` | `600000`（10 分钟） | 上传任务锁；必须长于一次存储调用，否则下一轮会重复领 |
 | `UPLOAD_MAX_ATTEMPTS` | `3` | 整条上传任务的重试次数（真失败才计次，预算用尽不计） |
 | `UPLOAD_RETRY_MS` | `2000` | 上传重试退避基数 |
 
@@ -218,7 +217,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | 调度器子请求预算 | 45 | 每轮留出余量给主请求；见 `src/budget.js` |
 | 媒体请求子请求预算 | 10 | 探活 + 补切片 + 回源 |
 | 媒体成功响应缓存头 | `public, max-age=31536000, immutable` | 错误响应仍 `no-store` |
-| 切片清理 / 孤儿回收 | 每小时 :23 / 每天 04:41 | 由 `wrangler.toml` 的 cron 决定 |
+| 切片清理 / 孤儿回收 | 每 5 小时 :23 / 每天 04:41 | 由 `wrangler.toml` 的 cron 决定 |
 
 ## 与 mock-server 的行为差异
 
@@ -226,8 +225,8 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 |---|---|---|
 | 元数据 | `data.json` 单文件 | D1 `favorites` / `assets` / `jobs` |
 | 媒体备份 | `store/` 本地文件 | 外部存储服务；上传虚拟媒体地址，拿回 id |
-| 后台任务 | 进程内单线程循环、`setInterval` | D1 任务队列 + 每分钟 cron；写入后用 `waitUntil` 抢跑一次 |
-| 切片清理 | `setInterval` | 每小时第 23 分的 cron |
+| 后台任务 | 进程内单线程循环、`setInterval` | D1 任务队列 + 每 3 分钟 cron；写入后用 `waitUntil` 抢跑一次 |
+| 切片清理 | `setInterval` | 每 5 小时第 23 分的 cron |
 | 孤儿回收 | 不需要 | 每天 04:41 的 cron 回收无引用的 `inits` / `sources` |
 | 重启续跑 | 读 `jobs` 继续 | 任务在 D1，cron 自动继续 |
 
@@ -268,7 +267,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 两个容易误解的点：
 
 - **Workers 缓存命中仍按请求计费**（只省 CPU 和上游取数）。所以边缘缓存/Cache Rule 不能降低 10 万/天的请求数；要降请求数只能靠客户端缓存或让媒体直连存储。
-- **cron 每次触发都是一次请求**。当前三条 cron 合计约 `1440 + 24 + 1 = 1465 次/天`（约 1.5%）。
+- **cron 每次触发都是一次请求**。当前三条 cron 合计约 `480 + 5 + 1 = 486 次/天`（约 0.5%）。
 
 ### 一条收藏的账
 
@@ -289,8 +288,8 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | 配置 | 默认 | 影响 | 怎么调 |
 |---|---|---|---|
 | `MAX_SLICES_PER_FAVORITE` | `50` | 直接决定 A、备份请求、D1 行写、解析 CPU | 请求/CPU 吃紧就降到 20–30；视频会被更早退回整片 |
-| App 的切片大小（`slice_rule.bytes`） | 18MB（暂定） | 片越大 A 越少：18MB→36MB 约等于请求/行数减半 | 想省额度优先调大；代价是单次传输更大、seek 粒度更粗 |
-| `SLICE_RULE`（仅默认值） | 2MB | 只影响没有随请求带规则的入口（B 回调等） | 有 App 请求时以 App 的规则为准 |
+| App 的切片大小（`slice_rule.bytes`） | 18,874,368（18MiB） | 片越大 A 越少：18MB→36MB 约等于请求/行数减半 | 想省额度优先调大；代价是单次传输更大、seek 粒度更粗 |
+| 默认切片规则（代码固定） | 18,874,368 字节 | 只影响没有随请求带规则的入口（B 回调等） | 有 App 请求时以 App 的规则为准；要改只能改代码里的 `DEFAULT_SLICE_RULE` |
 | `UPLOAD_ITEMS_PER_TICK` | `20` | 每次 cron 最多处理多少 asset；**不改变每日 cron 次数** | 降下来更稳地守住 50 子请求/10ms；升上去只是缩短积压 |
 | `UPLOAD_JOBS_PER_TICK` / `JOBS_PER_TICK` | `2` / `4` | 同上，控制单次调用的工作量 | 大批量收藏、经常 1102 时调小 |
 | `STORAGE_BATCH_SIZE` | `10` | 存储 API 调用次数；**不会减少每个 asset 的回源请求** | 保持 10（接口上限） |
@@ -300,19 +299,18 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | `TRANSFER_MAX_ATTEMPTS` / `TRANSFER_RETRY_MS` | `3` / `2s` | 每次重试重复解析服务 + 探活 + 切片 | 保持 3；解析服务不稳定时再加 |
 | `SOURCE_CHECK_TTL_MS` | `60s` | 媒体请求的源探活缓存；过期就多一个子请求 | 调到 5 分钟可减少子请求/源站压力；不影响 Worker 请求数 |
 | `SLICE_INFO_TOUCH_MS` | `10 分钟` | 播放时更新 `last_used_at` 的 D1 写频率 | 调到 30–60 分钟可明显减少 D1 行写；清理判断会变粗 |
-| `SLICE_INFO_TTL_MS` | `30 天` | 越长 D1 里保留的 init 越多；越短回放时越可能补取切片（子请求） | 额度优先可设 7–15 天；依赖下载回落时更短 |
-| `UPLOAD_WAIT_MS` / `UPLOAD_WAIT_JITTER_MS` | `3000` / `0` | App 两条上传之间的节奏；同时是 Worker 调存储的间隔与 429 退避缺省值。不改变请求总数 | 只影响突发速率与限流退避，不影响每日额度 |
-| `UPLOAD_MAX_HEIGHT` | `1080` | 影响单请求字节量与存储体积，不影响请求数 | 只在乎流量/存储时降低 |
-| cron `* * * * *` | 每分钟 | 1440 次请求/天 | 改成 `*/2` 省约 720/天，`*/5` 省约 1150/天；写操作后的 `waitUntil` 仍会抢跑，代价是重试最坏多等几分钟 |
-| cron `23 * * * *` / `41 4 * * *` | 24 + 1 次/天 | 清理与孤儿回收 | 可各降为每天一次，省得很少 |
+| `SLICE_INFO_TTL_MS` | `7 天` | 越长 D1 里保留的 init 越多；越短回放时越可能补取切片（子请求） | 额度优先可设 3–7 天；依赖下载回落时更短 |
+| `UPLOAD_WAIT_MS` / `UPLOAD_WAIT_JITTER_MS` | `5000` / `0` | App 两条上传之间的节奏；同时是 Worker 调存储的间隔与 429 退避缺省值。不改变请求总数 | 只影响突发速率与限流退避，不影响每日额度 |
+| cron `*/3 * * * *` | 每 3 分钟 | 480 次请求/天 | 改成 `*/10` 省约 336/天；写操作后的 `waitUntil` 仍会抢跑，代价是重试最坏多等几分钟 |
+| cron `23 */5 * * *` / `41 4 * * *` | 5 + 1 次/天 | 清理与孤儿回收 | 可各降为每天一次，省得很少 |
 
 ### 推荐档位
 
 | 目标 | 切片 | `MAX_SLICES_PER_FAVORITE` | 每 tick | 探活 TTL | touch | slice TTL | cron |
 |---|---|---|---|---|---|---|---|
-| **额度优先** | 32–64MB | 30 | 10 | 5 分钟 | 60 分钟 | 7–15 天 | `*/5 * * * *` |
-| 平衡 | 18–24MB | 40 | 20 | 2 分钟 | 30 分钟 | 15 天 | `*/2 * * * *` |
-| 体验优先 | 18MB | 50 | 20 | 60 秒 | 10 分钟 | 30 天 | 每分钟 |
+| **额度优先** | 32–64MB | 30 | 10 | 5 分钟 | 60 分钟 | 3–7 天 | `*/10 * * * *` |
+| 平衡 | 18–24MB | 40 | 20 | 2 分钟 | 30 分钟 | 7 天 | `*/5 * * * *` |
+| 体验优先 | 18MB | 50 | 20 | 60 秒 | 10 分钟 | 7 天 | `*/3 * * * *` |
 
 ### 不能只靠后端配置解决的部分
 
@@ -332,7 +330,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 1. **存储服务必须能访问 `MEDIA_BASE_URL`**：它按虚拟地址回源；如果 Worker 前面套了 Access 或私有网络，这条路会断。
    虚拟地址里的不可猜 key 就是凭据，媒体接口本身免鉴权（播放器/Coil 不带 header）。
 2. **下载/删除还没接**：源站失效时目前回 `502`；删收藏不会清远端文件。框架在 `src/policy/storage.js`。
-3. **后台不是实时**：解析最多滞后一个 cron 周期（60 秒）；写入接口会 `waitUntil` 抢跑一次，
+3. **后台不是实时**：解析最多滞后一个 cron 周期（180 秒）；写入接口会 `waitUntil` 抢跑一次，
    但免费版仍可能被 CPU 预算截断，没跑完的由 cron 接着跑。
 4. **D1 单库 500MB**：只存元数据与切片 init（原始字节 BLOB），不存媒体正文。
 5. **大视频切片失败按解析失败处理**：视频超过切片阈值后，切片服务未配置、源站不支持 Range 或切片调用失败，都会重试后落 `failed`，不再退化为整片；
