@@ -1,6 +1,8 @@
 import { jsonResponse, readJsonBody } from '../http.js';
 import { validUrl } from '../validate.js';
+import { shardForUrl } from '../keys.js';
 import { countJobs } from '../store/jobs.js';
+import { metaDb } from '../store/shards.js';
 import { notifyHub } from '../hub.js';
 
 /**
@@ -42,17 +44,18 @@ export async function handleIngest(request, env, cfg, ctx) {
     }
 
     const now = Date.now();
+    const meta = metaDb(env);
     let created = 0;
     const createdUrls = [];
     if (targets.length > 0) {
-      const results = await env.DB.batch(
+      const results = await meta.batch(
         targets.map((url) =>
-          env.DB.prepare(
-            `INSERT INTO favorites (url, note, tags, source_app, favorite_at, updated_at, media, media_state,
+          meta.prepare(
+            `INSERT INTO favorites (url, shard, note, tags, source_app, favorite_at, updated_at, media, media_state,
                failed_reason, resolved_at, slice_rule, upload_state)
-             VALUES (?, '', '[]', ?, ?, ?, NULL, 'pending', '', 0, ?, 'pending')
+             VALUES (?, ?, '', '[]', ?, ?, ?, NULL, 'pending', '', 0, ?, 'pending')
              ON CONFLICT(url) DO NOTHING`,
-          ).bind(url, cfg.ingestSourceApp, now, now, JSON.stringify(cfg.defaultSliceRule)),
+          ).bind(url, shardForUrl(url, cfg.shardCount), cfg.ingestSourceApp, now, now, JSON.stringify(cfg.defaultSliceRule)),
         ),
       );
       results.forEach((result, index) => {
@@ -62,9 +65,9 @@ export async function handleIngest(request, env, cfg, ctx) {
         }
       });
       if (created > 0) {
-        await env.DB.batch(
+        await meta.batch(
           targets.map((url) =>
-            env.DB.prepare(
+            meta.prepare(
               `INSERT INTO jobs (url, kind, attempts, next_at, locked_until) VALUES (?, 'parse', 0, 0, 0)
                ON CONFLICT(url, kind) DO NOTHING`,
             ).bind(url),
@@ -112,11 +115,12 @@ function extractIngestItems(body) {
 
 /** /health：免鉴权存活检查，报收藏 / 状态 / 任务计数 */
 export async function handleHealth(env) {
+  const meta = metaDb(env);
   const [totalRow, pendingRow, failedRow, jobs] = await Promise.all([
-    env.DB.prepare('SELECT COUNT(*) AS n FROM favorites').first(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM favorites WHERE media_state = 'pending'").first(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM favorites WHERE media_state = 'failed'").first(),
-    countJobs(env.DB),
+    meta.prepare('SELECT COUNT(*) AS n FROM favorites').first(),
+    meta.prepare("SELECT COUNT(*) AS n FROM favorites WHERE media_state = 'pending'").first(),
+    meta.prepare("SELECT COUNT(*) AS n FROM favorites WHERE media_state = 'failed'").first(),
+    countJobs(meta),
   ]);
   return jsonResponse(200, {
     ok: true,

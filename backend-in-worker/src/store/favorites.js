@@ -1,6 +1,6 @@
 import { favoriteFromRow, stringifyJson } from './mappers.js';
 
-const COLUMNS = `id, url, note, tags, source_app, favorite_at, updated_at, media, media_state, failed_reason,
+const COLUMNS = `id, url, shard, note, tags, source_app, favorite_at, updated_at, media, media_state, failed_reason,
   resolved_at, slice_rule, upload_state, upload_updated_at, upload_attempts, upload_next_at`;
 
 export async function getFavorite(db, url) {
@@ -51,13 +51,14 @@ export async function countFavorites(db) {
 export async function createFavoriteRow(db, row) {
   const result = await db
     .prepare(
-      `INSERT INTO favorites (url, note, tags, source_app, favorite_at, updated_at, media, media_state,
+      `INSERT INTO favorites (url, shard, note, tags, source_app, favorite_at, updated_at, media, media_state,
          failed_reason, resolved_at, slice_rule, upload_state)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', '', 0, ?, 'pending')
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'pending', '', 0, ?, 'pending')
        ON CONFLICT(url) DO NOTHING`,
     )
     .bind(
       row.url,
+      row.shard ?? 0,
       row.note ?? '',
       stringifyJson(row.tags ?? []),
       row.sourceApp ?? '',

@@ -1,8 +1,10 @@
 import { HttpError, jsonResponse, nextWaitMs, readJsonBody, rejectUnauthorized, authorized } from '../http.js';
 import { optionalNumber, optionalString, plainObject, stringArray, validUrl } from '../validate.js';
 import { parseSliceRule } from '../config.js';
+import { shardForUrl } from '../keys.js';
 import { getFavorite, createFavoriteRow, updateFavoriteUserFields } from '../store/favorites.js';
 import { getAssetsByFavoriteIds, getVariantsByFavoriteIds } from '../store/assets.js';
+import { dataDb, metaDb } from '../store/shards.js';
 import { enqueueStatement } from '../store/jobs.js';
 import { publicRow } from '../render.js';
 import { deleteFavoriteWithMedia } from '../scheduled/runner.js';
@@ -56,8 +58,8 @@ export async function handleSync(request, env, cfg, ctx) {
     const favoriteAt = clampFavoriteAt(optionalNumber(favorite.favorite_at, 'favorite.favorite_at', Date.now()));
 
     const outcome = await upsertFavorite(env, cfg, { url, note, tags, sourceApp, favoriteAt, sliceRule });
-    const row = await getFavorite(env.DB, url);
-    const variants = row ? await getVariantsByFavoriteIds(env.DB, [row.id]) : [];
+    const row = await getFavorite(metaDb(env), url);
+    const variants = row ? await getVariantsByFavoriteIds(dataDb(env, row.shard), [row.id]) : [];
     const favorites = row ? [publicRow(row, outcome.assets, variants)] : [];
     ctx?.waitUntil(notifyHub(env, { favorites }));
     const wait = nextWaitMs(cfg);
@@ -85,22 +87,25 @@ export async function handleSync(request, env, cfg, ctx) {
  * 返回回执要用的 assets，避免再查一遍。
  */
 async function upsertFavorite(env, cfg, fields) {
-  const existing = await getFavorite(env.DB, fields.url);
+  const meta = metaDb(env);
+  const shard = shardForUrl(fields.url, cfg.shardCount);
+  const existing = await getFavorite(meta, fields.url);
   if (existing) {
     const next = { note: fields.note, tags: fields.tags, sourceApp: fields.sourceApp, favoriteAt: fields.favoriteAt };
     const changed = ['note', 'tags', 'sourceApp', 'favoriteAt'].some(
       (field) => JSON.stringify(existing[field]) !== JSON.stringify(next[field]),
     );
     if (!changed) {
-      const assets = await getAssetsByFavoriteIds(env.DB, [existing.id]);
+      const assets = await getAssetsByFavoriteIds(dataDb(env, existing.shard), [existing.id]);
       return { outcome: 'unchanged', assets };
     }
-    await updateFavoriteUserFields(env.DB, fields.url, next, Date.now());
-    const assets = await getAssetsByFavoriteIds(env.DB, [existing.id]);
+    await updateFavoriteUserFields(meta, fields.url, next, Date.now());
+    const assets = await getAssetsByFavoriteIds(dataDb(env, existing.shard), [existing.id]);
     return { outcome: 'updated', assets };
   }
-  const outcome = await createFavoriteRow(env.DB, {
+  const outcome = await createFavoriteRow(meta, {
     url: fields.url,
+    shard,
     note: fields.note,
     tags: fields.tags,
     sourceApp: fields.sourceApp,
@@ -109,7 +114,7 @@ async function upsertFavorite(env, cfg, fields) {
     sliceRule: fields.sliceRule ?? cfg.defaultSliceRule,
   });
   if (outcome === 'created') {
-    await enqueueStatement(env.DB, fields.url, 'parse').run();
+    await enqueueStatement(meta, fields.url, 'parse').run();
   }
   return { outcome, assets: [] };
 }

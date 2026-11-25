@@ -27,6 +27,8 @@ crons = ["*/3 * * * *", "41 4 * * *"]
 BASE_PATH = "/api/v1"
 INGEST_PATH = "/ingest/callback"
 INGEST_SOURCE_APP = "第三方"
+# 控制库存 favorites/jobs；内容分片 DB_1..DB_N 存 assets/variants/sources/inits
+SHARD_COUNT = "9"
 SLICE_SERVICE_URL = ""
 UPLOAD_MAX_ATTEMPTS = "3"
 UPLOAD_WAIT_MS = "5000"
@@ -53,6 +55,52 @@ STORAGE_TIMEOUT_MS = "300000"
 binding = "DB"
 database_name = "favorites"
 database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# 内容分片：每个库执行同一份 schema；DB 只存 favorites/jobs，DB_1.. 只存内容表。
+[[d1_databases]]
+binding = "DB_1"
+database_name = "favorites-1"
+database_id = "REPLACE_WITH_YOUR_D1_ID_1"
+
+[[d1_databases]]
+binding = "DB_2"
+database_name = "favorites-2"
+database_id = "REPLACE_WITH_YOUR_D1_ID_2"
+
+[[d1_databases]]
+binding = "DB_3"
+database_name = "favorites-3"
+database_id = "REPLACE_WITH_YOUR_D1_ID_3"
+
+[[d1_databases]]
+binding = "DB_4"
+database_name = "favorites-4"
+database_id = "REPLACE_WITH_YOUR_D1_ID_4"
+
+[[d1_databases]]
+binding = "DB_5"
+database_name = "favorites-5"
+database_id = "REPLACE_WITH_YOUR_D1_ID_5"
+
+[[d1_databases]]
+binding = "DB_6"
+database_name = "favorites-6"
+database_id = "REPLACE_WITH_YOUR_D1_ID_6"
+
+[[d1_databases]]
+binding = "DB_7"
+database_name = "favorites-7"
+database_id = "REPLACE_WITH_YOUR_D1_ID_7"
+
+[[d1_databases]]
+binding = "DB_8"
+database_name = "favorites-8"
+database_id = "REPLACE_WITH_YOUR_D1_ID_8"
+
+[[d1_databases]]
+binding = "DB_9"
+database_name = "favorites-9"
+database_id = "REPLACE_WITH_YOUR_D1_ID_9"
 
 # 个人库的 WebSocket 中枢：一个实例持有全部在线连接并广播变更。
 # 必须是 SQLite 后端（免费版只支持 SQLite 版 DO）。

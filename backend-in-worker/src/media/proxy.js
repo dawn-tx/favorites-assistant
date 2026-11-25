@@ -13,6 +13,7 @@ import {
   updateVariantSourceStatement,
 } from '../store/assets.js';
 import { getFavoriteById, touchFavoriteStatement } from '../store/favorites.js';
+import { dataDb, metaDb } from '../store/shards.js';
 import { createBudget } from '../budget.js';
 import { downloadStoredMedia, resolveMedia } from '../policy/index.js';
 import { publicRow } from '../render.js';
@@ -164,31 +165,40 @@ function sameContent(variant, probe) {
 }
 
 async function pushRow(env, favoriteId) {
-  const favorite = await getFavoriteById(env.DB, favoriteId);
+  const favorite = await getFavoriteById(metaDb(env), favoriteId);
   if (!favorite) return;
+  const data = dataDb(env, favorite.shard);
   const [assets, variants] = await Promise.all([
-    getAssetsByFavoriteIds(env.DB, [favoriteId]),
-    getVariantsByFavoriteIds(env.DB, [favoriteId]),
+    getAssetsByFavoriteIds(data, [favoriteId]),
+    getVariantsByFavoriteIds(data, [favoriteId]),
   ]);
   await notifyHub(env, { favorites: [publicRow(favorite, assets, variants)] });
 }
 
+/** key 前缀带 shard；旧 key 没有前缀时回落到单库 */
+function mediaDb(env, key) {
+  const match = /^s(\d+)_/.exec(key);
+  return dataDb(env, match ? Number(match[1]) : 0);
+}
+
 /** 另一档只是换了签名、字节没变：保持原 URL，只把源地址改到这一档 */
 async function rebindVariantSource(env, favorite, requested, candidate) {
-  await env.DB.batch([
-    updateVariantSourceStatement(env.DB, requested.key, candidate.sourceId),
-    updatePrimaryVideoSourceStatement(env.DB, favorite.id, requested.videoIndex, candidate.sourceId),
+  const data = dataDb(env, favorite.shard);
+  await data.batch([
+    updateVariantSourceStatement(data, requested.key, candidate.sourceId),
+    updatePrimaryVideoSourceStatement(data, favorite.id, requested.videoIndex, candidate.sourceId),
   ]);
   return { ...requested, sourceId: candidate.sourceId, sourceUrl: candidate.sourceUrl, etag: candidate.etag, fileSize: candidate.fileSize };
 }
 
 /** 切到另一档：active 换人，primary URL 随之变化；推完整行让 App 重新装载 */
 async function promoteVariant(env, favorite, candidate) {
-  await env.DB.batch([
-    ...activateVariantStatements(env.DB, favorite.id, candidate.videoIndex, candidate.key),
-    updatePrimaryVideoSourceStatement(env.DB, favorite.id, candidate.videoIndex, candidate.sourceId),
-    touchFavoriteStatement(env.DB, favorite.url),
+  const data = dataDb(env, favorite.shard);
+  await data.batch([
+    ...activateVariantStatements(data, favorite.id, candidate.videoIndex, candidate.key),
+    updatePrimaryVideoSourceStatement(data, favorite.id, candidate.videoIndex, candidate.sourceId),
   ]);
+  await touchFavoriteStatement(metaDb(env), favorite.url).run();
   await pushRow(env, favorite.id);
 }
 
@@ -212,14 +222,15 @@ async function refreshVariant(env, cfg, favorite, variant, budget) {
     seen.add(candidate.url);
     const probe = await probeSource(cfg, candidate.url, budget);
     if (!sameContent(variant, probe)) continue;
-    const sourceIds = await ensureSourceIds(env.DB, [
+    const sourceIds = await ensureSourceIds(dataDb(env, favorite.shard), [
       { url: candidate.url, etag: probe.etag, fileSize: probe.size, quality: candidate.quality ?? '' },
     ]);
     const sourceId = sourceIds.get(sourceKey({ url: candidate.url, etag: probe.etag, fileSize: probe.size }));
     if (!sourceId) return null;
-    await env.DB.batch([
-      updateVariantSourceStatement(env.DB, variant.key, sourceId),
-      updatePrimaryVideoSourceStatement(env.DB, favorite.id, variant.videoIndex, sourceId),
+    const data = dataDb(env, favorite.shard);
+    await data.batch([
+      updateVariantSourceStatement(data, variant.key, sourceId),
+      updatePrimaryVideoSourceStatement(data, favorite.id, variant.videoIndex, sourceId),
     ]);
     return { ...variant, sourceId, sourceUrl: candidate.url, etag: probe.etag, fileSize: probe.size };
   }
@@ -227,9 +238,9 @@ async function refreshVariant(env, cfg, favorite, variant, budget) {
 }
 
 async function serveVariant(request, env, cfg, variant, full, budget) {
-  const favorite = await getFavoriteById(env.DB, variant.favoriteId);
+  const favorite = await getFavoriteById(metaDb(env), variant.favoriteId);
   if (!favorite) return sendMediaError(request, 404, '收藏不存在');
-  const all = await getVariantsForVideo(env.DB, variant.favoriteId, variant.videoIndex);
+  const all = await getVariantsForVideo(dataDb(env, favorite.shard), variant.favoriteId, variant.videoIndex);
   const ordered = [
     ...all.filter((item) => item.active),
     variant,
@@ -273,7 +284,8 @@ export async function handleMedia(request, env, cfg, relativePath) {
   if (!match) return sendMediaError(request, 404, '未知的素材地址');
   const full = Boolean(fullMatch);
   const budget = createBudget(10);
-  const asset = await getAsset(env.DB, match[1]);
+  const db = mediaDb(env, match[1]);
+  const asset = await getAsset(db, match[1]);
 
   if (asset) {
     if (asset.role === 'backup') {
@@ -290,7 +302,7 @@ export async function handleMedia(request, env, cfg, relativePath) {
       if (served) return served;
     }
     if (asset.kind === 'cover' && asset.videoIndex != null) {
-      const backup = await getBackupCover(env.DB, asset.favoriteId, asset.videoIndex);
+      const backup = await getBackupCover(db, asset.favoriteId, asset.videoIndex);
       if (backup?.storeId) {
         const served = await serveFromStorage(request, env, cfg, backup, full);
         if (served) return served;
@@ -299,7 +311,7 @@ export async function handleMedia(request, env, cfg, relativePath) {
     return sendMediaError(request, 502, '主源不可用，请切换备用源');
   }
 
-  const variant = await getVariantByKey(env.DB, match[1]);
+  const variant = await getVariantByKey(db, match[1]);
   if (!variant) return sendMediaError(request, 404, '素材地址不存在或已过期');
   return serveVariant(request, env, cfg, variant, full, budget);
 }

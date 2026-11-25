@@ -81,7 +81,7 @@ D1 只存元数据。业务库共 6 张表：
 
 | 表 | 主键 / 唯一约束 | 关键字段 | 用途与生命周期 |
 |---|---|---|---|
-| `favorites` | `id`；`url` 唯一 | `note/tags/source_app/favorite_at/updated_at/media/media_state/failed_reason/resolved_at/slice_rule/upload_*` | 一条收藏 url 一行；用户字段、内容状态与 backup 上传状态 |
+| `favorites` | `id`；`url` 唯一 | `shard/note/tags/source_app/favorite_at/updated_at/media/media_state/failed_reason/resolved_at/slice_rule/upload_*` | 一条收藏 url 一行；用户字段、内容状态与 backup 上传状态 |
 | `sources` | `id`；`(url, etag, file_size)` 唯一 | `quality/created_at` | 源文件信息去重；被 `assets.source_id` 与 `variants.source_id` 引用；无引用后由 GC 回收 |
 | `variants` | `key` 主键；每个 `(favorite_id, video_index)` 只有一条 `active` | `video_index/variant_index/source_id/quality/height/active` | 保存每个视频的全部清晰度；`key` 是该档独立虚拟 URL；换档只改 active |
 | `assets` | `key` 主键 | `favorite_id/source_id/init_id/role/kind/video_index/slice_index/image_index/ord/title/duration_ms/cover_key/start_offset/media_size/store_id/backup_state` | primary 是视频整片、图片、封面；backup 是长视频切片、短视频整文件、备用图，`BACKUP_COVERS=true` 时还包括封面备份；backup 不进入顶层 `segments` |
@@ -104,16 +104,39 @@ backup 切片上传后只保留 asset 行（约 0.2KB）。同一测试夹具（
 
 注意：真实切片每片的 `init` 通常不同（`moov` 会按片重写），`inits` 去重主要作用于重复解析与跨收藏复用。
 
+### 分片部署（1 个控制库 + 9 个数据分片）
+
+- `DB`：控制库，只存 `favorites` / `jobs`
+- `DB_1..DB_9`：数据分片，只存 `assets` / `variants` / `sources` / `inits`
+- 分片键：归一化收藏 URL 的稳定哈希 `% SHARD_COUNT`，写入 `favorites.shard`
+- 媒体 key 带前缀 `s<shard>_<hash>`，代理按前缀直接选数据分片
+- `list` / `lookup` 只查控制库取收藏行；再按 `favorites.shard` 批量补内容
+- `jobs` 只在控制库，cron 仍然只有一个队列
+- 没有 `DB_1` 时自动退回单库（测试/本地 dev 默认如此）
+
+10 个库都执行同一份 `schema.sql`；数据分片里的 `favorites/jobs` 和控制库里的内容表保持空表。
+
 ## 部署（不在本地安装 Wrangler）
 
 以下命令都在有 Wrangler 的环境执行（CI、Cloud Shell 或你自己的机器）：
 
 ```bash
-# 1) 建 D1，把 id 填进 wrangler.toml
+# 1) 建 1 个控制库 + 9 个数据分片，把 id 填进 wrangler.toml
 wrangler d1 create favorites
+wrangler d1 create favorites-1
+wrangler d1 create favorites-2
+wrangler d1 create favorites-3
+wrangler d1 create favorites-4
+wrangler d1 create favorites-5
+wrangler d1 create favorites-6
+wrangler d1 create favorites-7
+wrangler d1 create favorites-8
+wrangler d1 create favorites-9
 
-# 2) 建表（新 primary/backup 模型不迁移旧数据；已有旧库请新建库或清空后执行）
-wrangler d1 execute favorites --remote --file=src/store/schema.sql
+# 2) 每个库执行同一份 schema（新模型不迁移旧数据；旧库请新建或清空后执行）
+for db in favorites favorites-1 favorites-2 favorites-3 favorites-4 favorites-5 favorites-6 favorites-7 favorites-8 favorites-9; do
+  wrangler d1 execute "$db" --remote --file=src/store/schema.sql
+done
 
 # 3) secrets
 wrangler secret put SYNC_TOKEN
@@ -149,12 +172,14 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 | 项 | 当前值 | 说明 |
 |---|---|---|
-| D1 绑定 `DB` | `database_name = "favorites"` | **必需**；先执行 `src/store/schema.sql`。没有 KV / R2 绑定 |
+| D1 绑定 `DB` | `database_name = "favorites"` | **控制库（必需）**：favorites / jobs；先执行 `schema.sql` |
+| D1 绑定 `DB_1..DB_9` | `favorites-1..favorites-9` | 数据分片：assets / variants / sources / inits；每个库执行同一份 `schema.sql` |
+| `SHARD_COUNT` | `9` | 逻辑数据分片数；没有 `DB_1` 时自动退回单库 |
 | `main` | `src/index.js` | Worker 入口 |
 | `compatibility_date` | `2025-09-01` | 运行时兼容日期 |
 | `observability.enabled` | `true` | 打开 Workers Logs，便于看 `exceededCpu` |
 | cron 1 | `*/3 * * * *` | 每 3 分钟跑任务队列（解析 / 备份准备 / 上传） |
-| cron 2 | `41 4 * * *` | 每天回收无引用的 `inits` / `sources` |
+| cron 2 | `41 4 * * *` | 每天回收无引用的 `inits` / `sources`（逐个数据分片） |
 
 免费版每个账号最多 5 个 cron，这里用了 2 个；其余三个留给别的 Worker。
 
@@ -374,7 +399,8 @@ npm run dev:local
 启动后：
 
 - Worker 接口监听 `0.0.0.0:8787`，平板填 `http://<电脑局域网 IP>:8787/api/v1`
-- D1 由本地 SQLite 文件 `dev/local.sqlite` 代替；删掉该文件重启即可重置
+- D1 由本地 SQLite 文件 `dev/local.sqlite` 代替；默认单库，`SHARDS=2` 会额外建 `dev/local-1.sqlite` 等数据分片
+- 删掉 `dev/local*.sqlite*` 重启即可重置
 - 解析/切片/源站、外部存储 upload/get 都用本地桩；每 3 秒跑一次任务队列
 - WS 中枢不可用，App 会自动退回 HTTP；真机 WS 要在真实 Worker 上测
 - 夹具视频只有 200KB；用默认片大小通常不会切片。测试 backup 切片可先跑启动日志里那条 64KB `curl` 建一条，再在 App 里打开
@@ -391,10 +417,10 @@ netsh advfirewall firewall add rule name="favkit-local-worker" dir=in action=all
 
 ```bash
 cd backend-in-worker
-node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs
+node --test --test-concurrency=1 test/*.test.mjs
 ```
 
-覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket 等；当前共 63 例（61 pass / 2 个大文件用例视环境跳过）。
+覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket、双分片路由等；当前共 67 例（65 pass / 2 个大文件用例视环境跳过）。
 
 大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
 以及切片服务 `:3000`；不可达时自动跳过）：

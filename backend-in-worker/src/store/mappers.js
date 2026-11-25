@@ -21,6 +21,7 @@ export function favoriteFromRow(row) {
   return {
     id: Number(row.id),
     url: row.url,
+    shard: Number(row.shard) || 0,
     note: row.note ?? '',
     tags: parseJson(row.tags, []),
     sourceApp: row.source_app ?? '',

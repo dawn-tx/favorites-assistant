@@ -188,11 +188,11 @@ export async function parseFavorite(cfg, row, budget) {
   const keyPairs = await Promise.all([
     ...drafts.map(async (draft) => [
       assetIdentity(draft),
-      await mediaKey(cfg.mediaKeySecret, url, assetIdentity(draft), version),
+      await mediaKey(cfg.mediaKeySecret, url, assetIdentity(draft), version, cfg.shardCount),
     ]),
     ...variants.map(async (variant) => [
       variantIdentity(variant),
-      await mediaKey(cfg.mediaKeySecret, url, variantIdentity(variant), version),
+      await mediaKey(cfg.mediaKeySecret, url, variantIdentity(variant), version, cfg.shardCount),
     ]),
   ]);
   const keys = new Map(keyPairs);

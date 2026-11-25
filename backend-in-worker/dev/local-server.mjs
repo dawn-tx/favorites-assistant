@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import worker from '../src/index.js';
 import { parserConfig } from '../src/policy/parser.js';
-import { createTestEnv } from '../test/support/harness.mjs';
+import { createTestDb, createTestEnv } from '../test/support/harness.mjs';
 import { closeServer as closeBridge, startBridge } from '../test/support/bridge.mjs';
 import { listen, startOrigin } from '../test/support/origin.mjs';
 import { closeServer as closeStorage, startStorage } from '../test/support/storage.mjs';
@@ -23,6 +23,7 @@ import { closeServer as closeStorage, startStorage } from '../test/support/stora
 const here = dirname(fileURLToPath(import.meta.url));
 const dbPath = process.env.DEV_DB || join(here, 'local.sqlite');
 const port = Number(process.env.PORT) || 8787;
+const shards = Number(process.env.SHARDS) || 1;
 
 mkdirSync(dirname(dbPath), { recursive: true });
 
@@ -43,6 +44,14 @@ const env = createTestEnv(
   },
   { dbPath },
 );
+
+env.SHARD_COUNT = String(shards);
+if (shards > 1) {
+  const base = dbPath.replace(/\.sqlite$/i, '');
+  for (let index = 1; index <= shards; index += 1) {
+    env[`DB_${index}`] = createTestDb({ dbPath: `${base}-${index}.sqlite` });
+  }
+}
 
 let bridge;
 try {
@@ -80,6 +89,7 @@ console.log('本地后台已启动');
 console.log(`  数据文件：${dbPath}（删除后重启可重置）`);
 console.log(`  本机接口：http://127.0.0.1:${port}/api/v1`);
 for (const ip of lan) console.log(`  平板接口：http://${ip}:${port}/api/v1`);
+console.log(`  数据分片：${shards} 个（SHARDS 环境变量可改）`);
 console.log(`  存储 upload/get：${storage.base}/upload  ${storage.base}/get`);
 console.log('  日志：解析/切片/源站和存储桩都在本进程内；WS 不可用，App 会退回 HTTP');
 console.log('');

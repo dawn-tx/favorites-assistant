@@ -10,6 +10,7 @@
 CREATE TABLE IF NOT EXISTS favorites (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   url                TEXT NOT NULL UNIQUE,
+  shard              INTEGER NOT NULL DEFAULT 0,
   note               TEXT NOT NULL DEFAULT '',
   tags               TEXT NOT NULL DEFAULT '[]',
   source_app         TEXT NOT NULL DEFAULT '',

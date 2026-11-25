@@ -2,6 +2,7 @@ import { HttpError, clampLimit, parseCursor } from './http.js';
 import { parseSliceRule } from './config.js';
 import { countFavorites, getFavoritesByUrls, markFavoritePendingStatement, pageFavorites } from './store/favorites.js';
 import { getAssetsByFavoriteIds, getVariantsByFavoriteIds } from './store/assets.js';
+import { dataDb, metaDb } from './store/shards.js';
 import { removeJobStatement, resetEnqueueStatement } from './store/jobs.js';
 import { minRow, publicRow } from './render.js';
 
@@ -27,10 +28,24 @@ function groupVariants(variants) {
   return map;
 }
 
-async function rowsWithMedia(db, rows) {
+async function rowsWithMedia(env, rows) {
   if (rows.length === 0) return [];
-  const assets = await getAssetsByFavoriteIds(db, rows.map((row) => row.id));
-  const variants = await getVariantsByFavoriteIds(db, rows.map((row) => row.id));
+  const byShard = new Map();
+  for (const row of rows) {
+    if (!byShard.has(row.shard)) byShard.set(row.shard, []);
+    byShard.get(row.shard).push(row.id);
+  }
+  const assets = [];
+  const variants = [];
+  for (const [shard, ids] of byShard) {
+    const db = dataDb(env, shard);
+    const [foundAssets, foundVariants] = await Promise.all([
+      getAssetsByFavoriteIds(db, ids),
+      getVariantsByFavoriteIds(db, ids),
+    ]);
+    assets.push(...foundAssets);
+    variants.push(...foundVariants);
+  }
   const byFavorite = groupByFavorite(assets);
   const variantsByFavorite = groupVariants(variants);
   return rows.map((row) => publicRow(row, byFavorite.get(row.id) ?? [], variantsByFavorite.get(row.id) ?? []));
@@ -46,16 +61,17 @@ export async function listFavoritesPage(env, cfg, { fields, cursorRaw, limitRaw 
   }
   const min = fields === 'min';
   const limit = clampLimit(limitRaw);
-  const rows = await pageFavorites(env.DB, { cursor, limit: limit + 1 });
+  const meta = metaDb(env);
+  const rows = await pageFavorites(meta, { cursor, limit: limit + 1 });
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
-  const total = await countFavorites(env.DB);
+  const total = await countFavorites(meta);
 
   let favorites;
   if (min) {
     favorites = page.map(minRow);
   } else {
-    favorites = await rowsWithMedia(env.DB, page);
+    favorites = await rowsWithMedia(env, page);
   }
   const last = page[page.length - 1];
   return {
@@ -78,8 +94,8 @@ export async function lookupFavorites(env, cfg, urls) {
   if (unique.length > cfg.lookupMaxUrls) {
     throw new HttpError(400, `一次最多查询 ${cfg.lookupMaxUrls} 个 url`);
   }
-  const rows = await getFavoritesByUrls(env.DB, unique);
-  return rowsWithMedia(env.DB, rows);
+  const rows = await getFavoritesByUrls(metaDb(env), unique);
+  return rowsWithMedia(env, rows);
 }
 
 export async function resolveFavorites(env, cfg, urls, rawRule) {
@@ -88,24 +104,25 @@ export async function resolveFavorites(env, cfg, urls, rawRule) {
     throw new HttpError(400, 'slice_rule 只支持 {mode:"size",bytes}');
   }
   const unique = normalizeUrls(urls);
-  const rows = await getFavoritesByUrls(env.DB, unique);
+  const meta = metaDb(env);
+  const rows = await getFavoritesByUrls(meta, unique);
   const found = new Set(rows.map((row) => row.url));
   const unknownUrls = unique.filter((url) => !found.has(url));
 
   if (rows.length > 0) {
     const statements = [];
     for (const row of rows) {
-      statements.push(markFavoritePendingStatement(env.DB, row.url, rule));
-      statements.push(removeJobStatement(env.DB, row.url, 'upload'));
-      statements.push(removeJobStatement(env.DB, row.url, 'backup'));
-      statements.push(resetEnqueueStatement(env.DB, row.url, 'parse'));
+      statements.push(markFavoritePendingStatement(meta, row.url, rule));
+      statements.push(removeJobStatement(meta, row.url, 'upload'));
+      statements.push(removeJobStatement(meta, row.url, 'backup'));
+      statements.push(resetEnqueueStatement(meta, row.url, 'parse'));
     }
-    await env.DB.batch(statements);
+    await meta.batch(statements);
   }
 
-  const refreshed = rows.length > 0 ? await getFavoritesByUrls(env.DB, rows.map((row) => row.url)) : [];
+  const refreshed = rows.length > 0 ? await getFavoritesByUrls(meta, rows.map((row) => row.url)) : [];
   return {
-    favorites: await rowsWithMedia(env.DB, refreshed),
+    favorites: await rowsWithMedia(env, refreshed),
     unknown_urls: unknownUrls,
   };
 }

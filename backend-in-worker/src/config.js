@@ -59,6 +59,8 @@ export function loadConfig(env = {}) {
 
   const cfg = {
     basePath: trimSlash(env.BASE_PATH ?? '/api/v1') || '/api/v1',
+    // 没有 DB_1 时是单库测试/本地模式，所有分片都回落到 DB
+    shardCount: env.DB_1 ? int(env.SHARD_COUNT, 9, 1) : 1,
     syncToken: typeof env.SYNC_TOKEN === 'string' ? env.SYNC_TOKEN : '',
     ingestPath: trimSlash(env.INGEST_PATH ?? '/ingest/callback') || '/ingest/callback',
     ingestSourceApp: env.INGEST_SOURCE_APP || '第三方',

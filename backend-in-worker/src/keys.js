@@ -22,11 +22,24 @@ export function normalizeCacheKey(url) {
 /**
  * 虚拟 key = HMAC(归一化收藏 url | 资产身份 | 内容版本)。
  * 内容版本进 key，所以同一解析结果重放时地址稳定，内容变了地址就变。
+ * 前缀带 shard：代理只看 key 就能定位到哪个数据分片。
  */
-export async function mediaKey(secret, url, identity, version) {
+export async function mediaKey(secret, url, identity, version, shardCount = 1) {
   const input = `${normalizeCacheKey(url)}|${identity}|${version ?? ''}`;
   const hex = secret ? await hmacSha256Hex(secret, input) : await sha256Hex(input);
-  return `s${hex.slice(0, 32)}`;
+  return `s${shardForUrl(url, shardCount)}_${hex.slice(0, 32)}`;
+}
+
+/** 收藏 URL 的稳定分片：FNV-1a，纯同步，sync/ingest/media 共用同一结果 */
+export function shardForUrl(url, count = 1) {
+  const shards = Math.max(1, Math.floor(Number(count) || 1));
+  const text = normalizeCacheKey(url);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % shards;
 }
 
 /** 相对地址：相对的是 App 设置里的接口地址（含 BASE_PATH），不拼主机名 */

@@ -85,6 +85,10 @@ class FakeD1 {
   }
 }
 
+export function createTestDb(options = {}) {
+  return new FakeD1(options.dbPath);
+}
+
 export function createTestEnv(extraVars = {}, options = {}) {
   return { DB: new FakeD1(options.dbPath), ...extraVars };
 }

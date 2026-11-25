@@ -93,6 +93,7 @@ https://demo.local/images   纯图集 4 张
 - 服务默认监听 `0.0.0.0`，同一局域网内任何设备都能访问，只适合内网调试，不要暴露到公网。
 - **Cloudflare Worker 版**在 [backend-in-worker/](backend-in-worker/README.md)：同一套 HTTP 协议，元数据落 D1，
   媒体备份交给外部存储服务，解析/备份由 cron 驱动；另外提供 `/api/v1/ws` 控制面与变更推送（Durable Object 中枢）。
+  D1 分 1 个控制库（favorites/jobs）+ 9 个数据分片（assets/variants/sources/inits），收藏按 URL 哈希路由。
   部署、限额与参数以该目录的 README 为准；**哪些配置吃额度、怎么调，见其中的「免费版额度与配置调节」一节**。
 - **真机连不上先看这三条**：
   1. Windows 防火墙默认拦 8787 入站，管理员 PowerShell 放行一次即可：
