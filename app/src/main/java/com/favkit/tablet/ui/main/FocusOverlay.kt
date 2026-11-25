@@ -88,9 +88,12 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.favkit.tablet.R
 import com.favkit.tablet.core.TabletScale
+import com.favkit.tablet.data.BackupItem
+import com.favkit.tablet.data.BackupState
 import com.favkit.tablet.data.Favorite
 import com.favkit.tablet.data.MediaKind
 import com.favkit.tablet.data.MediaSegment
+import com.favkit.tablet.data.SourceMode
 import com.favkit.tablet.di.AppGraph
 import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
@@ -459,12 +462,19 @@ private fun FeedPage(
     val segments = favorite.segments
     val notice = noticeOf(state)
     val current = segments.getOrNull(focus.segmentIndex)
-    // 底部段条按「视频组 + 图片」折叠；当前段所在的视频组决定左侧竖向片条是否出现
+    val backupItems = current?.backup?.items.orEmpty()
+    val backupItem = if (focus.sourceMode == SourceMode.BACKUP) {
+        backupItems.getOrNull(focus.backupIndex)
+    } else {
+        null
+    }
+    val activeKind = backupItem?.kind ?: current?.kind
+    val activeQuality = backupItem?.quality ?: current?.displayQuality.orEmpty()
+    // 底部段条按 A 段折叠；BACKUP 的片间切换走左侧竖向片条
     val stripItems = remember(favorite.id, favorite.segments) { buildStripItems(favorite.segments) }
     val stripIndex = currentStripIndex(stripItems, focus.segmentIndex)
-    val videoGroup = currentVideoGroup(stripItems, focus.segmentIndex)
     // 图集段没有时间进度、也没有倍速可言：播放条与居中那颗键都只给视频段
-    val isVideo = current != null && current.kind != MediaKind.IMAGE
+    val isVideo = activeKind == MediaKind.VIDEO
     var controlsVisible by remember(favorite.id) { mutableStateOf(true) }
     // 倍速选项展开时不许点画面把它一起收走：那一下应该只收菜单（见下面的 onTap 分支）
     var speedMenuOpen by remember(favorite.id) { mutableStateOf(false) }
@@ -556,6 +566,16 @@ private fun FeedPage(
                         onSelect = viewModel::showSegment,
                     )
                 }
+                current?.takeIf { it.backup.state != BackupState.NONE }?.let { segment ->
+                    SourceModeRow(
+                        mode = focus.sourceMode,
+                        quality = activeQuality,
+                        backupReady = segment.backup.ready,
+                        onPrimary = { viewModel.setSourceMode(SourceMode.PRIMARY) },
+                        onBackup = { viewModel.setSourceMode(SourceMode.BACKUP) },
+                        scale = scale,
+                    )
+                }
                 FeedInfoBlock(
                     favorite = favorite,
                     focus = focus,
@@ -571,14 +591,14 @@ private fun FeedPage(
                     )
                 }
             }
-            // 切片视频：底部段条只留一个占位，片间切换收进左侧竖向片条
-            videoGroup?.takeIf { it.sliceCount > 1 }?.let { group ->
+            // BACKUP 的片间切换收进左侧竖向片条；不再依赖旧 sliceCount
+            if (focus.sourceMode == SourceMode.BACKUP && backupItems.size > 1) {
                 SliceStrip(
-                    segments = segments,
-                    group = group,
-                    current = focus.segmentIndex,
+                    items = backupItems,
+                    current = focus.backupIndex,
+                    coverUrl = current?.coverUrl.orEmpty(),
                     scale = scale,
-                    onSelect = viewModel::showSegment,
+                    onSelect = viewModel::setBackupIndex,
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .padding(start = CONTROLS_SIDE_PAD, top = scale.touchMin, bottom = scale.touchMin)
@@ -802,6 +822,15 @@ private fun FeedInfoBlock(
     var clipped by remember(favorite.id) { mutableStateOf(false) }
     val total = favorite.segments.size
     val caption = favorite.displaySummary
+    val current = favorite.segments.getOrNull(focus.segmentIndex)
+    val backupItem = if (focus.sourceMode == SourceMode.BACKUP) {
+        current?.backup?.items?.getOrNull(focus.backupIndex)
+    } else {
+        null
+    }
+    val currentTitle = backupItem?.title?.takeIf { it.isNotBlank() }
+        ?: current?.title?.takeIf { it.isNotBlank() }
+        ?: favorite.displayTitle
 
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         if (total > 0) {
@@ -819,7 +848,7 @@ private fun FeedInfoBlock(
             }
         }
         Text(
-            text = favorite.displayTitle,
+            text = currentTitle,
             style = MaterialTheme.typography.titleMedium,
             color = Color.White,
             maxLines = 2,
@@ -950,7 +979,39 @@ private fun FocusStage(
         userScrollEnabled = segments.size > 1 && gesturesEnabled,
     ) { page ->
         val segment = segments[page]
+        val backup = if (focus.sourceMode == SourceMode.BACKUP && page == focus.segmentIndex) {
+            segment.backup.items.getOrNull(focus.backupIndex)
+        } else {
+            null
+        }
+        val backupSegment = backup?.let {
+            MediaSegment(
+                index = segment.index,
+                kind = it.kind,
+                title = it.title,
+                coverUrl = segment.coverUrl,
+                url = it.url,
+                durationMs = it.durationMs,
+                quality = it.quality,
+                activeQuality = it.quality,
+                videoIndex = it.videoIndex,
+            )
+        }
         when {
+            backupSegment != null && backupSegment.kind == MediaKind.IMAGE && backupSegment.viewable -> ImageStage(
+                segment = backupSegment,
+                onTap = onTap,
+            )
+
+            backupSegment != null && backupSegment.playable -> PlayerStage(
+                player = state.player,
+                graph = graph,
+                onTap = onTap,
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            backupSegment != null -> EmptySegmentPage(backupSegment)
+
             segment.kind == MediaKind.IMAGE && segment.viewable -> ImageStage(
                 segment = segment,
                 onTap = onTap,
@@ -1086,7 +1147,7 @@ private fun SegmentCoverPage(segment: MediaSegment, onClick: () -> Unit) {
             )
         }
         val meta = listOf(
-            segment.quality,
+            segment.displayQuality,
             if (segment.durationMs > 0L) formatClock(segment.durationMs) else "",
         ).filter { it.isNotBlank() }.joinToString(" · ")
         Text(
@@ -1210,25 +1271,71 @@ private fun SegmentStrip(
 }
 
 /**
- * 左侧竖向片条：只在当前视频有多个切片时出现，点哪片跳哪片。
+ * 主源/备用切换。主源清晰度只读显示；备用未 ready 时按钮不可用。
+ */
+@Composable
+private fun SourceModeRow(
+    mode: SourceMode,
+    quality: String,
+    backupReady: Boolean,
+    onPrimary: () -> Unit,
+    onBackup: () -> Unit,
+    scale: TabletScale,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(scale.gapXs),
+    ) {
+        SourceChip("主源", mode == SourceMode.PRIMARY, true, onPrimary)
+        SourceChip("备用", mode == SourceMode.BACKUP, backupReady, onBackup)
+        Text(
+            text = quality.ifBlank { "清晰度 —" },
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xC7FFFFFF),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun SourceChip(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val tint = when {
+        selected -> FavColors.accent
+        enabled -> Color(0x33FFFFFF)
+        else -> Color(0x14FFFFFF)
+    }
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = if (enabled) Color.White else Color(0x66FFFFFF),
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(tint)
+            .clickable(enabled = enabled, onClickLabel = "切到$label") { onClick() }
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    )
+}
+
+/**
+ * 左侧竖向片条：BACKUP 视频的片间切换。
  *
- * 同一视频的切片共用封面，先用「封面 + 片序号」区分；当前片高亮并自动滚进视野。
+ * 同一视频的备用切片共用主源封面，先用「封面 + 片序号」区分；当前片高亮并自动滚进视野。
  */
 @Composable
 private fun SliceStrip(
-    segments: List<MediaSegment>,
-    group: StripItem.VideoGroup,
+    items: List<BackupItem>,
     current: Int,
+    coverUrl: String,
     scale: TabletScale,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val indexes = (group.startSegment..group.endSegment).filter { it in segments.indices }
-    if (indexes.isEmpty()) return
+    if (items.isEmpty()) return
     val state = rememberLazyListState()
-    LaunchedEffect(current, group.startSegment, indexes.size) {
-        val local = current - group.startSegment
-        if (local in indexes.indices) state.animateScrollToItem(local)
+    LaunchedEffect(current, items.size) {
+        if (current in items.indices) state.animateScrollToItem(current)
     }
     LazyColumn(
         state = state,
@@ -1239,10 +1346,8 @@ private fun SliceStrip(
             .padding(4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        itemsIndexed(indexes, key = { _, segmentIndex -> segmentIndex }) { _, segmentIndex ->
-            val segment = segments[segmentIndex]
-            val active = segmentIndex == current
-            val sliceNumber = segmentIndex - group.startSegment + 1
+        itemsIndexed(items, key = { index, _ -> index }) { index, _ ->
+            val active = index == current
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1251,17 +1356,17 @@ private fun SliceStrip(
                     .background(if (active) FavColors.accent else Color(0x26FFFFFF))
                     .padding(if (active) 2.dp else 0.dp)
                     .clip(RoundedCornerShape(5.dp))
-                    .clickable(onClickLabel = "看第 $sliceNumber 片") { onSelect(segmentIndex) },
+                    .clickable(onClickLabel = "看第 ${index + 1} 片") { onSelect(index) },
             ) {
                 VideoCover(
-                    coverUrl = segment.coverUrl,
+                    coverUrl = coverUrl,
                     contentDescription = null,
                     scrim = false,
                     decodeDp = scale.touchMin,
                     modifier = Modifier.fillMaxSize(),
                 )
                 Text(
-                    text = sliceNumber.toString(),
+                    text = (index + 1).toString(),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.White,
                     modifier = Modifier
@@ -1368,6 +1473,14 @@ private fun FocusInfo(
     var newTagName by remember { mutableStateOf("") }
 
     val segment = favorite.segments.getOrNull(focus.segmentIndex)
+    val backupItem = if (focus.sourceMode == SourceMode.BACKUP) {
+        segment?.backup?.items?.getOrNull(focus.backupIndex)
+    } else {
+        null
+    }
+    val currentTitle = backupItem?.title ?: segment?.title.orEmpty()
+    val currentQuality = backupItem?.quality ?: segment?.displayQuality.orEmpty()
+    val currentDuration = backupItem?.durationMs ?: segment?.durationMs ?: 0L
     val prefetchBytes = state.prefetch[favorite.id]
     val attached = favorite.tags.map { it.id }.toSet()
 
@@ -1395,16 +1508,17 @@ private fun FocusInfo(
             MetaRow(
                 "位置",
                 "第 ${segment.index + 1} / ${favorite.segments.size} 段 · " +
-                    if (segment.kind == MediaKind.IMAGE) "图片" else "视频",
+                    (if (focus.sourceMode == SourceMode.BACKUP) "备用" else "") +
+                    (if ((backupItem?.kind ?: segment.kind) == MediaKind.IMAGE) "图片" else "视频"),
             )
-            if (segment.title.isNotBlank()) MetaRow("小标题", segment.title)
+            if (currentTitle.isNotBlank()) MetaRow("小标题", currentTitle)
         }
 
         SectionDark("后台信息")
         MetaRow("作者", favorite.author.ifBlank { "—" })
         MetaRow("站点", favorite.site.ifBlank { favorite.hostLabel })
-        MetaRow("清晰度", segment?.quality?.takeIf { it.isNotBlank() } ?: "—")
-        MetaRow("总时长", if (favorite.durationMs > 0L) formatClock(favorite.durationMs) else "—")
+        MetaRow("清晰度", currentQuality.takeIf { it.isNotBlank() } ?: "—")
+        MetaRow("时长", if (currentDuration > 0L) formatClock(currentDuration) else "—")
         MetaRow("解析时间", formatDate(favorite.resolvedAt))
         MetaRow("收藏时间", formatDate(favorite.favoriteAt))
         if (favorite.failedReason.isNotBlank()) {

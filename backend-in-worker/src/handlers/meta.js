@@ -31,20 +31,17 @@ export function handleMeta(cfg) {
     storage: 'd1+external',
     slice_rule: cfg.defaultSliceRule ?? DEFAULT_SLICE_RULE,
     slice_service: cfg.sliceServiceUrl ? 'remote' : 'none',
-    slice_info_cache: {
-      ttl_ms: cfg.sliceInfoTtlMs,
-      cleanup_ms: 5 * 60 * 60 * 1000,
-      touch_ms: cfg.sliceInfoTouchMs,
-      note: '切片的 init 与区间是派生缓存：已有备份且空闲超过 ttl 的清掉，代理时按索引重新向切片服务补取；没有备份的片不清理。清理由每 5 小时的 :23 的 cron 执行',
+    slice_info: {
+      note: '切片信息只在备份上传前/重试期间临时保存；上传成功后立即清掉，不再按 TTL 长期保留',
     },
     upload: {
       max_attempts: cfg.uploadMaxAttempts,
       retry_ms: cfg.uploadRetryMs,
       storage: 'external',
-      covers: true,
+      covers: false,
       batch_size: cfg.storageBatchSize,
       max_slices_per_favorite: cfg.maxSlicesPerFavorite,
-      note: '每个视频只传最高的可达档；超过片大小才切片；图片与封面全传。切片传 Worker 的合成地址，整片/图片/封面直传源地址；单次最多 10 条，返回的 id 写回 store_id；单条收藏切片总数有上限，超出的视频退回整片',
+      note: '只上传 backup：长视频切片、短视频整文件、备用图；primary 视频/图片/封面都不进存储。切片传 Worker 的临时合成地址，短视频/备用图直传源地址；单次最多 10 条，全部成功才把 backup 标 ready',
     },
     scheduler: {
       kind: 'cron',

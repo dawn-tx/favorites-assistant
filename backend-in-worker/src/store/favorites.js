@@ -117,6 +117,10 @@ export function setUploadStateStatement(db, url, state, attempts, nextAt) {
     .bind(state, Date.now(), attempts, nextAt, url);
 }
 
+export function touchFavoriteStatement(db, url, at = Date.now()) {
+  return db.prepare('UPDATE favorites SET updated_at = ? WHERE url = ?').bind(at, url);
+}
+
 export function deleteFavoriteStatement(db, url) {
   return db.prepare('DELETE FROM favorites WHERE url = ?').bind(url);
 }

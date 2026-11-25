@@ -1,7 +1,7 @@
 import { HttpError, clampLimit, parseCursor } from './http.js';
 import { parseSliceRule } from './config.js';
 import { countFavorites, getFavoritesByUrls, markFavoritePendingStatement, pageFavorites } from './store/favorites.js';
-import { getAssetsByFavoriteIds } from './store/assets.js';
+import { getAssetsByFavoriteIds, getVariantsByFavoriteIds } from './store/assets.js';
 import { removeJobStatement, resetEnqueueStatement } from './store/jobs.js';
 import { minRow, publicRow } from './render.js';
 
@@ -16,6 +16,24 @@ function groupByFavorite(assets) {
     map.get(asset.favoriteId).push(asset);
   }
   return map;
+}
+
+function groupVariants(variants) {
+  const map = new Map();
+  for (const variant of variants) {
+    if (!map.has(variant.favoriteId)) map.set(variant.favoriteId, []);
+    map.get(variant.favoriteId).push(variant);
+  }
+  return map;
+}
+
+async function rowsWithMedia(db, rows) {
+  if (rows.length === 0) return [];
+  const assets = await getAssetsByFavoriteIds(db, rows.map((row) => row.id));
+  const variants = await getVariantsByFavoriteIds(db, rows.map((row) => row.id));
+  const byFavorite = groupByFavorite(assets);
+  const variantsByFavorite = groupVariants(variants);
+  return rows.map((row) => publicRow(row, byFavorite.get(row.id) ?? [], variantsByFavorite.get(row.id) ?? []));
 }
 
 export async function listFavoritesPage(env, cfg, { fields, cursorRaw, limitRaw }) {
@@ -37,9 +55,7 @@ export async function listFavoritesPage(env, cfg, { fields, cursorRaw, limitRaw 
   if (min) {
     favorites = page.map(minRow);
   } else {
-    const assets = await getAssetsByFavoriteIds(env.DB, page.map((row) => row.id));
-    const byFavorite = groupByFavorite(assets);
-    favorites = page.map((row) => publicRow(row, byFavorite.get(row.id) ?? []));
+    favorites = await rowsWithMedia(env.DB, page);
   }
   const last = page[page.length - 1];
   return {
@@ -63,9 +79,7 @@ export async function lookupFavorites(env, cfg, urls) {
     throw new HttpError(400, `一次最多查询 ${cfg.lookupMaxUrls} 个 url`);
   }
   const rows = await getFavoritesByUrls(env.DB, unique);
-  const assets = await getAssetsByFavoriteIds(env.DB, rows.map((row) => row.id));
-  const byFavorite = groupByFavorite(assets);
-  return rows.map((row) => publicRow(row, byFavorite.get(row.id) ?? []));
+  return rowsWithMedia(env.DB, rows);
 }
 
 export async function resolveFavorites(env, cfg, urls, rawRule) {
@@ -83,16 +97,15 @@ export async function resolveFavorites(env, cfg, urls, rawRule) {
     for (const row of rows) {
       statements.push(markFavoritePendingStatement(env.DB, row.url, rule));
       statements.push(removeJobStatement(env.DB, row.url, 'upload'));
+      statements.push(removeJobStatement(env.DB, row.url, 'backup'));
       statements.push(resetEnqueueStatement(env.DB, row.url, 'parse'));
     }
     await env.DB.batch(statements);
   }
 
   const refreshed = rows.length > 0 ? await getFavoritesByUrls(env.DB, rows.map((row) => row.url)) : [];
-  const assets = refreshed.length > 0 ? await getAssetsByFavoriteIds(env.DB, refreshed.map((row) => row.id)) : [];
-  const byFavorite = groupByFavorite(assets);
   return {
-    favorites: refreshed.map((row) => publicRow(row, byFavorite.get(row.id) ?? [])),
+    favorites: await rowsWithMedia(env.DB, refreshed),
     unknown_urls: unknownUrls,
   };
 }

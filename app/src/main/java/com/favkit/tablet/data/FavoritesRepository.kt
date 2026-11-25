@@ -318,6 +318,11 @@ class FavoritesRepository(
             segment.copy(
                 url = MediaUrls.resolve(endpoint, segment.url),
                 coverUrl = MediaUrls.resolve(endpoint, segment.coverUrl),
+                backup = segment.backup.copy(
+                    items = segment.backup.items.map { item ->
+                        item.copy(url = MediaUrls.resolve(endpoint, item.url))
+                    },
+                ),
             )
         },
         failedReason = failedReason,

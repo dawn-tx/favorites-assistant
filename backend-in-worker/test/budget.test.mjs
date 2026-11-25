@@ -25,6 +25,7 @@ after(async () => {
 
 const envVars = () => ({
   SLICE_SERVICE_URL: `${originBase}/slice`,
+  SOURCE_CHECK_TTL_MS: '0',
   UPLOAD_WAIT_MS: '0',
   // 每轮只允许 3 个子请求：解析服务 1 + 探活 1 就不够切片了，必须跨轮
   JOBS_PER_TICK: '4',
@@ -74,7 +75,7 @@ test('子请求预算用尽抛出的是 BudgetExhausted，不落 failed', async 
   assert.equal(budget.left, 0);
 });
 
-test('解析中途预算耗尽抛 BudgetExhausted，而不是悄悄降级成整片落库', async () => {
+test('解析预算耗尽抛 BudgetExhausted，不会悄悄落库', async () => {
   const { createBudget, BudgetExhausted } = await import('../src/budget.js');
   const { parseFavorite } = await import('../src/parse.js');
   const { loadConfig } = await import('../src/config.js');

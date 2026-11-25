@@ -53,3 +53,19 @@ export async function contentVersion(assets) {
   const parts = assets.map((asset) => `${assetIdentity(asset)}|${assetFingerprint(asset)}`).sort();
   return (await sha256Hex(parts.join('\n'))).slice(0, 12);
 }
+
+/** primary 视频的每一档也进内容版本：换源/换清晰度时地址必须变 */
+export async function contentVersionWithVariants(assets, variants) {
+  const parts = [
+    ...assets.map((asset) => `${assetIdentity(asset)}|${assetFingerprint(asset)}`),
+    ...variants.map(
+      (variant) =>
+        `variant:${variant.videoIndex}:${variant.variantIndex}|${variant.quality}|${variant.height}|${variant.etag}|${variant.fileSize}`,
+    ),
+  ].sort();
+  return (await sha256Hex(parts.join('\n'))).slice(0, 12);
+}
+
+export function variantIdentity(variant) {
+  return `video:${variant.videoIndex}:v${variant.variantIndex}:-`;
+}

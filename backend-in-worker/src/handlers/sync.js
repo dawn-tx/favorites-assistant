@@ -2,7 +2,7 @@ import { HttpError, jsonResponse, nextWaitMs, readJsonBody, rejectUnauthorized, 
 import { optionalNumber, optionalString, plainObject, stringArray, validUrl } from '../validate.js';
 import { parseSliceRule } from '../config.js';
 import { getFavorite, createFavoriteRow, updateFavoriteUserFields } from '../store/favorites.js';
-import { getAssetsByFavoriteIds } from '../store/assets.js';
+import { getAssetsByFavoriteIds, getVariantsByFavoriteIds } from '../store/assets.js';
 import { enqueueStatement } from '../store/jobs.js';
 import { publicRow } from '../render.js';
 import { deleteFavoriteWithMedia } from '../scheduled/runner.js';
@@ -57,7 +57,8 @@ export async function handleSync(request, env, cfg, ctx) {
 
     const outcome = await upsertFavorite(env, cfg, { url, note, tags, sourceApp, favoriteAt, sliceRule });
     const row = await getFavorite(env.DB, url);
-    const favorites = row ? [publicRow(row, outcome.assets)] : [];
+    const variants = row ? await getVariantsByFavoriteIds(env.DB, [row.id]) : [];
+    const favorites = row ? [publicRow(row, outcome.assets, variants)] : [];
     ctx?.waitUntil(notifyHub(env, { favorites }));
     const wait = nextWaitMs(cfg);
     return jsonResponse(

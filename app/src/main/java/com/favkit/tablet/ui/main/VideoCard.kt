@@ -216,7 +216,7 @@ private fun BoxScope.CoverFooter(
 private fun HeroDuration(hero: MediaSegment?): String? {
     if (hero == null || hero.durationMs <= 0L) return null
     val clock = formatDuration(hero.durationMs)
-    return if (hero.quality.isNotBlank()) "${hero.quality} · $clock" else clock
+    return if (hero.displayQuality.isNotBlank()) "${hero.displayQuality} · $clock" else clock
 }
 
 /**

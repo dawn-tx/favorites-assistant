@@ -1,5 +1,6 @@
-import { fetchSlices, pickReachableVariant, resolveMedia } from './policy/index.js';
-import { assetIdentity, contentVersion, mediaKey } from './keys.js';
+import { resolveMedia } from './policy/index.js';
+import { probeSource } from './probe.js';
+import { assetIdentity, contentVersionWithVariants, mediaKey, variantIdentity } from './keys.js';
 import { DEFAULT_SLICE_RULE, parseSliceRule } from './config.js';
 
 function distinctHost(url) {
@@ -28,11 +29,31 @@ function fallbackSummary(display) {
   return parts.length > 0 ? parts.join(' · ') : '暂无可用素材';
 }
 
-/** 产出 draft（尚未生成 key 的 asset 雏形），封面用 coverId 引用同视频的封面 */
-async function buildDrafts(cfg, resolved, rule, budget, sliceBudget) {
-  const sliceBytes = Number.isFinite(rule?.bytes) && rule.bytes > 0 ? rule.bytes : DEFAULT_SLICE_RULE.bytes;
-  const sliceRule = { ...DEFAULT_SLICE_RULE, mode: 'size', bytes: sliceBytes, align: 'keyframe' };
+/** 每一档都探一次体积，探不到也保留；排序后 0 是默认最高档 */
+async function probeVariants(cfg, video, budget) {
+  const entries = [];
+  for (const variant of video.variants) {
+    const probe = await probeSource(cfg, variant.url, budget);
+    entries.push({
+      sourceUrl: variant.url,
+      quality: variant.quality ?? '',
+      height: variant.height ?? 0,
+      etag: probe.etag,
+      fileSize: probe.size,
+      ok: probe.ok,
+    });
+  }
+  entries.sort((a, b) => b.height - a.height);
+  return entries.map((entry, index) => ({ ...entry, variantIndex: index }));
+}
+
+/**
+ * 产出 primary drafts 与每个视频的全部 variants。
+ * 这里不切片：切片是 backup 准备任务的事，primary 永远是一条完整视频。
+ */
+async function buildDrafts(cfg, resolved, budget) {
   const drafts = [];
+  const variants = [];
   const videos = Array.isArray(resolved.videos) ? resolved.videos : [];
 
   for (let i = 0; i < videos.length; i += 1) {
@@ -42,6 +63,7 @@ async function buildDrafts(cfg, resolved, rule, budget, sliceBudget) {
     if (video.coverUrl) {
       drafts.push({
         kind: 'cover',
+        role: 'primary',
         videoIndex: i,
         sliceIndex: null,
         imageIndex: null,
@@ -53,92 +75,49 @@ async function buildDrafts(cfg, resolved, rule, budget, sliceBudget) {
         etag: '',
         fileSize: 0,
         slice: null,
+        backupState: 'none',
       });
     }
 
-    const { variant, probe } = await pickReachableVariant(cfg, video.variants, budget);
-    let sourceUrl = variant.url;
-    let etag = probe.etag;
-    let fileSize = probe.size;
-    let slices = null;
-    const needsSlicing = probe.ok && probe.size > sliceBytes;
-    if (needsSlicing) {
-      // 大视频必须在切片这一次成功：不再退回「整片一个 asset」——
-      // 回落整片会让单条收藏变成巨大的单文件，既违背切片规则，也会把备份/播放放大成一次超大请求。
-      if (!cfg.sliceServiceUrl) {
-        throw new Error(`视频 ${probe.size} 字节超过切片阈值，但未配置 SLICE_SERVICE_URL`);
-      }
-      if (!probe.rangeSupported) {
-        throw new Error('视频超过切片阈值，但源站不支持 Range，无法切片');
-      }
-      let sliced;
-      try {
-        sliced = await fetchSlices(cfg, variant.url, sliceRule, budget);
-      } catch (error) {
-        if (error?.budgetExhausted) throw error;
-        throw new Error(`切片失败：${error.message}`);
-      }
-      if (!sliced) throw new Error('切片失败：切片服务没有返回结果');
-      // 片数上限是配额保护：超出预算时仍退回整片，和「切片失败」区分开
-      if (sliced.slices.length > sliceBudget.left) {
-        console.warn(
-          `切片数 ${sliced.slices.length} 超过本条收藏剩余预算 ${sliceBudget.left}，退回整片`,
-        );
-      } else {
-        sliceBudget.left -= sliced.slices.length;
-        sourceUrl = sliced.sourceUrl;
-        etag = sliced.etag || etag;
-        fileSize = sliced.fileSize || fileSize;
-        slices = sliced.slices;
-      }
-    }
-
-    if (slices) {
-      slices.forEach((part, j) => {
-        drafts.push({
-          kind: 'video',
-          videoIndex: i,
-          sliceIndex: j,
-          imageIndex: null,
-          title: slices.length > 1 ? `${baseTitle} · ${j + 1}` : baseTitle,
-          quality: variant.quality ?? '',
-          durationMs: part.durationMs || video.durationMs || 0,
-          coverId,
-          sourceUrl,
-          etag,
-          fileSize,
-          slice: {
-            start: part.start,
-            end: part.end,
-            mediaSize: part.mediaSize,
-            initBytes: part.initBytes,
-            initHash: part.initHash,
-            durationMs: part.durationMs,
-          },
-        });
-      });
-    } else {
-      drafts.push({
-        kind: 'video',
+    const probed = await probeVariants(cfg, video, budget);
+    if (probed.length === 0) throw new Error(`视频 ${i + 1} 没有可用地址`);
+    const activeIndex = Math.max(0, probed.findIndex((variant) => variant.ok));
+    for (const variant of probed) {
+      variants.push({
         videoIndex: i,
-        sliceIndex: null,
-        imageIndex: null,
-        title: baseTitle,
-        quality: variant.quality ?? '',
-        durationMs: video.durationMs || 0,
-        coverId,
-        sourceUrl,
-        etag,
-        fileSize,
-        slice: null,
+        variantIndex: variant.variantIndex,
+        sourceUrl: variant.sourceUrl,
+        quality: variant.quality,
+        height: variant.height,
+        etag: variant.etag,
+        fileSize: variant.fileSize,
+        active: variant.variantIndex === activeIndex,
       });
     }
+    const active = probed[activeIndex];
+    drafts.push({
+      kind: 'video',
+      role: 'primary',
+      videoIndex: i,
+      sliceIndex: null,
+      imageIndex: null,
+      title: baseTitle,
+      quality: active.quality ?? '',
+      durationMs: video.durationMs || 0,
+      coverId,
+      sourceUrl: active.sourceUrl,
+      etag: active.etag,
+      fileSize: active.fileSize,
+      slice: null,
+      backupState: 'preparing',
+    });
   }
 
   const images = Array.isArray(resolved.images) ? resolved.images : [];
   for (let i = 0; i < images.length; i += 1) {
     drafts.push({
       kind: 'image',
+      role: 'primary',
       videoIndex: null,
       sliceIndex: null,
       imageIndex: i,
@@ -150,17 +129,16 @@ async function buildDrafts(cfg, resolved, rule, budget, sliceBudget) {
       etag: '',
       fileSize: 0,
       slice: null,
+      backupState: 'preparing',
     });
   }
 
-  return { drafts, sliceRule };
+  return { drafts, variants };
 }
 
 /**
- * 解析一条链接，产出对外的 media 与后台私有的 assets。
- *
- * assets 是代理与备份的唯一索引：每段一条，视频切片带 init 段和源文件字节区间，
- * 图片/封面只记源地址。对外的 segments[].url / cover_url 一律是相对虚拟地址。
+ * 解析一条链接，产出对外的 media、primary assets 与每个视频的全部 variants。
+ * backup 由单独的备份任务生成，不在这一步切片或上传。
  */
 export async function parseFavorite(cfg, row, budget) {
   const url = row.url;
@@ -178,6 +156,7 @@ export async function parseFavorite(cfg, row, budget) {
         resolved_at: resolvedAt,
       },
       assets: [],
+      variants: [],
       assetKeys: [],
       sliceRule: null,
     };
@@ -185,9 +164,7 @@ export async function parseFavorite(cfg, row, budget) {
 
   const resolved = await resolveMedia(cfg, url, budget);
   const rule = parseSliceRule(row.sliceRule) ?? cfg.defaultSliceRule ?? DEFAULT_SLICE_RULE;
-  const { drafts, sliceRule } = await buildDrafts(cfg, resolved, rule, budget, {
-    left: cfg.maxSlicesPerFavorite,
-  });
+  const { drafts, variants } = await buildDrafts(cfg, resolved, budget);
 
   const site = resolved.site || host;
   if (drafts.length === 0) {
@@ -201,23 +178,28 @@ export async function parseFavorite(cfg, row, budget) {
         resolved_at: resolvedAt,
       },
       assets: [],
+      variants: [],
       assetKeys: [],
-      sliceRule,
+      sliceRule: rule,
     };
   }
 
-  // 内容版本 → 统一生成 key；封面排最后，渲染时过滤
-  const version = await contentVersion(drafts);
-  const keyPairs = await Promise.all(
-    drafts.map(async (draft) => [
+  const version = await contentVersionWithVariants(drafts, variants);
+  const keyPairs = await Promise.all([
+    ...drafts.map(async (draft) => [
       assetIdentity(draft),
       await mediaKey(cfg.mediaKeySecret, url, assetIdentity(draft), version),
     ]),
-  );
+    ...variants.map(async (variant) => [
+      variantIdentity(variant),
+      await mediaKey(cfg.mediaKeySecret, url, variantIdentity(variant), version),
+    ]),
+  ]);
   const keys = new Map(keyPairs);
   const assets = drafts.map((draft) => ({
     key: keys.get(assetIdentity(draft)),
     kind: draft.kind,
+    role: draft.role,
     videoIndex: draft.videoIndex,
     sliceIndex: draft.sliceIndex,
     imageIndex: draft.imageIndex,
@@ -231,6 +213,8 @@ export async function parseFavorite(cfg, row, budget) {
     slice: draft.slice,
     storeId: '',
     error: '',
+    backupState: draft.backupState,
+    backupError: '',
     lastUsedAt: resolvedAt,
     sliceCleaned: false,
   }));
@@ -250,7 +234,8 @@ export async function parseFavorite(cfg, row, budget) {
       resolved_at: resolvedAt,
     },
     assets: ordered,
+    variants: variants.map((variant) => ({ ...variant, key: keys.get(variantIdentity(variant)) })),
     assetKeys: ordered.map((asset) => asset.key),
-    sliceRule,
+    sliceRule: rule,
   };
 }

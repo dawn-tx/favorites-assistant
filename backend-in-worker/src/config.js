@@ -4,8 +4,6 @@
  * 默认值按当前部署形态设定：固定 18MiB 切片规则、上传间隔 5000ms、探活 5s；
  * 媒体备份交给外部存储服务，所以有 MEDIA_BASE_URL / STORAGE_* 这组配置。
  */
-export const CLEANUP_CRON = '23 */5 * * *';
-// 孤儿 init/source 回收会扫 assets 表，放每天一次，避免吃满 D1 每天的行读取配额
 export const GC_CRON = '41 4 * * *';
 /** 唯一的默认切片规则：请求没带 size 规则时用它；请求带了只覆盖 bytes，其余字段保持这套默认 */
 export const DEFAULT_SLICE_RULE = {
@@ -87,9 +85,6 @@ export function loadConfig(env = {}) {
     storageBatchSize: Math.min(int(env.STORAGE_BATCH_SIZE, 10, 1), 10),
     // 18MB/片、10 条一批 ≈ 180MB，复制完成才返回，给足 5 分钟
     storageTimeoutMs: int(env.STORAGE_TIMEOUT_MS, 5 * 60_000),
-
-    sliceInfoTtlMs: int(env.SLICE_INFO_TTL_MS, 7 * 24 * 60 * 60 * 1000),
-    sliceInfoTouchMs: int(env.SLICE_INFO_TOUCH_MS, 10 * 60 * 1000),
 
     // 免费版单次调用最多 50 个子请求、50 次 D1 查询，这几个上限就是把一次 tick 的账算在预算内；
     // 置 0 可单独关闭某一类任务（测试里用来把解析与备份拆到两轮）

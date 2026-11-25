@@ -1,4 +1,7 @@
 import { parseFavorite } from '../parse.js';
+import { fetchSlices, pickReachableVariant } from '../policy/index.js';
+import { assetIdentity, contentVersion, mediaKey } from '../keys.js';
+import { DEFAULT_SLICE_RULE, parseSliceRule } from '../config.js';
 import { deleteStoredMedia, MAX_BATCH, StorageThrottleError, uploadAssetsToStorage } from '../policy/index.js';
 import { createBudget } from '../budget.js';
 import {
@@ -12,6 +15,7 @@ import {
   deleteFavoriteStatement,
   markFavoriteFailedStatement,
   setUploadStateStatement,
+  touchFavoriteStatement,
   updateFavoriteContentStatement,
 } from '../store/favorites.js';
 import {
@@ -19,13 +23,16 @@ import {
   deleteAssetStatement,
   deleteInitStatement,
   deleteSourceStatement,
+  deleteVariantsStatement,
   ensureInitIds,
   ensureSourceIds,
   getAssetRefsForFavorite,
   getAssetsByFavoriteIds,
-  listExpiredSliceKeys,
-  listOrphanInitIds,
-  listOrphanSourceIds,
+  getVariantsByFavoriteIds,
+  insertVariantStatement,
+  markBackupFailedStatement,
+  markBackupReadyStatement,
+  setAssetBackupStateStatement,
   setAssetStoreStatement,
   sourceKey,
   upsertAssetStatement,
@@ -50,8 +57,20 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function runScheduled(env, cfg, now = Date.now(), budgetLeft = SUBREQUEST_BUDGET) {
   const budget = createBudget(budgetLeft);
   const parsed = await runParseJobs(env, cfg, now, budget);
+  const prepared = await runBackupJobs(env, cfg, now, budget);
   const uploaded = await runUploadJobs(env, cfg, now, budget);
-  return { parsed, uploaded };
+  return { parsed, prepared, uploaded };
+}
+
+/** 一条收藏的最新完整行：解析完成、备份状态变化、上传收尾都走它推 WS */
+async function pushFavorite(env, url) {
+  const row = (await getFavoritesByUrls(env.DB, [url]))[0];
+  if (!row) return;
+  const [assets, variants] = await Promise.all([
+    getAssetsByFavoriteIds(env.DB, [row.id]),
+    getVariantsByFavoriteIds(env.DB, [row.id]),
+  ]);
+  await notifyHub(env, { favorites: [publicRow(row, assets, variants)] });
 }
 
 async function runParseJobs(env, cfg, now, budget) {
@@ -95,9 +114,8 @@ async function runParseJobs(env, cfg, now, budget) {
       if (staleStoreIds.length > 0) {
         await deleteStoredMedia({ env, cfg, storeIds: staleStoreIds }).catch(() => {});
       }
-      // 内容就绪立刻推给在线设备：这是列表从「准备中」变成可看的关键一步
-      const fresh = (await getFavoritesByUrls(env.DB, [row.url]))[0];
-      if (fresh) await notifyHub(env, { favorites: [publicRow(fresh, result.assets)] });
+      // 内容就绪立刻推给在线设备
+      await pushFavorite(env, row.url);
       done += 1;
     } catch (error) {
       if (error?.budgetExhausted) {
@@ -125,19 +143,20 @@ async function buildParseCommit(env, row, result, job) {
 
   const sourceIds = await ensureSourceIds(
     db,
-    result.assets.map((asset) => ({
-      url: asset.sourceUrl,
-      etag: asset.etag ?? '',
-      fileSize: asset.fileSize ?? 0,
-      quality: asset.quality ?? '',
-    })),
-    now,
-  );
-  const initIds = await ensureInitIds(
-    db,
-    result.assets
-      .filter((asset) => asset.slice)
-      .map((asset) => ({ hash: asset.slice.initHash, bytes: asset.slice.initBytes })),
+    [
+      ...result.assets.map((asset) => ({
+        url: asset.sourceUrl,
+        etag: asset.etag ?? '',
+        fileSize: asset.fileSize ?? 0,
+        quality: asset.quality ?? '',
+      })),
+      ...result.variants.map((variant) => ({
+        url: variant.sourceUrl,
+        etag: variant.etag ?? '',
+        fileSize: variant.fileSize ?? 0,
+        quality: variant.quality ?? '',
+      })),
+    ],
     now,
   );
 
@@ -151,13 +170,19 @@ async function buildParseCommit(env, row, result, job) {
       sourceKey({ url: asset.sourceUrl, etag: asset.etag ?? '', fileSize: asset.fileSize ?? 0 }),
     );
     if (!sourceId) throw new Error('源信息写入失败');
-    const initId = asset.slice ? initIds.get(asset.slice.initHash) : null;
-    if (asset.slice && !initId) throw new Error('init 段写入失败');
-    statements.push(upsertAssetStatement(db, { ...asset, favoriteId: row.id, sourceId, initId }));
+    statements.push(upsertAssetStatement(db, { ...asset, favoriteId: row.id, sourceId }));
   }
   for (const ref of staleRefs) statements.push(deleteAssetStatement(db, ref.key));
+  statements.push(deleteVariantsStatement(db, row.id));
+  for (const variant of result.variants) {
+    const sourceId = sourceIds.get(
+      sourceKey({ url: variant.sourceUrl, etag: variant.etag ?? '', fileSize: variant.fileSize ?? 0 }),
+    );
+    if (!sourceId) throw new Error('variant 源信息写入失败');
+    statements.push(insertVariantStatement(db, { ...variant, favoriteId: row.id, sourceId }));
+  }
   statements.push(updateFavoriteContentStatement(db, row.url, result));
-  statements.push(enqueueStatement(db, row.url, 'upload'));
+  statements.push(enqueueStatement(db, row.url, 'backup'));
   statements.push(completeJobStatement(db, job.id));
 
   return { statements: batchOf(db, statements), staleRefs };
@@ -177,11 +202,7 @@ async function handleParseFailure(env, cfg, row, job, error) {
     await db.batch([markFavoriteFailedStatement(db, row.url, error.message), completeJobStatement(db, job.id)]);
     // 失败也要让列表知道（显示原因、停止「准备中」）
     try {
-      const failed = (await getFavoritesByUrls(db, [row.url]))[0];
-      if (failed) {
-        const assets = await getAssetsByFavoriteIds(db, [failed.id]);
-        await notifyHub(env, { favorites: [publicRow(failed, assets)] });
-      }
+      await pushFavorite(env, row.url);
     } catch {
       // 推送失败不影响失败落库
     }
@@ -189,6 +210,213 @@ async function handleParseFailure(env, cfg, row, job, error) {
   }
   const nextAt = Date.now() + cfg.transferRetryMs * attempts;
   await retryJobStatement(db, job, attempts, nextAt).run();
+}
+
+async function runBackupJobs(env, cfg, now, budget) {
+  const limit = Math.min(cfg.jobsPerTick, Math.max(0, Math.floor(budget.left / 8)));
+  if (limit <= 0) return 0;
+  const jobs = await claimJobs(env.DB, 'backup', now, cfg.jobLockMs, limit);
+  budget.left -= 1;
+  let prepared = 0;
+
+  for (const job of jobs) {
+    if (budget.left < 5) {
+      await releaseJobStatement(env.DB, job.id).run();
+      continue;
+    }
+    const row = (await getFavoritesByUrls(env.DB, [job.url]))[0];
+    budget.left -= 1;
+    if (!row) {
+      await completeJobStatement(env.DB, job.id).run();
+      continue;
+    }
+    try {
+      const [assets, variants] = await Promise.all([
+        getAssetsByFavoriteIds(env.DB, [row.id]),
+        getVariantsByFavoriteIds(env.DB, [row.id]),
+      ]);
+      budget.left -= 2;
+      const existing = assets.filter((asset) => asset.role === 'backup');
+      const drafts = [];
+      const failures = [];
+      const rule = parseSliceRule(row.sliceRule) ?? cfg.defaultSliceRule ?? DEFAULT_SLICE_RULE;
+      let sliceLeft = cfg.maxSlicesPerFavorite;
+
+      const coveredVideos = new Set(
+        existing.filter((asset) => asset.videoIndex != null).map((asset) => asset.videoIndex),
+      );
+      const coveredImages = new Set(
+        existing.filter((asset) => asset.kind === 'image' && asset.imageIndex != null).map((asset) => asset.imageIndex),
+      );
+      const primaries = assets.filter((asset) => (asset.role ?? 'primary') === 'primary' && asset.kind !== 'cover');
+
+      for (const primary of primaries.filter((asset) => asset.kind === 'video')) {
+        if (coveredVideos.has(primary.videoIndex)) continue;
+        const candidates = variants
+          .filter((variant) => variant.videoIndex === primary.videoIndex)
+          .map((variant) => ({ url: variant.sourceUrl, height: variant.height, quality: variant.quality }));
+        if (candidates.length === 0) {
+          failures.push([primary.key, '没有可用清晰度']);
+          continue;
+        }
+        const selected = await pickReachableVariant(cfg, candidates, budget);
+        if (!selected.probe.ok) {
+          failures.push([primary.key, '所有清晰度都不可达']);
+          continue;
+        }
+        let slices = null;
+        if (selected.probe.size > rule.bytes) {
+          if (!cfg.sliceServiceUrl) {
+            failures.push([primary.key, '超过切片阈值但未配置切片服务']);
+            continue;
+          }
+          if (!selected.probe.rangeSupported) {
+            failures.push([primary.key, '源站不支持 Range，无法切片']);
+            continue;
+          }
+          try {
+            const sliced = await fetchSlices(cfg, selected.variant.url, rule, budget);
+            if (sliced.slices.length > sliceLeft) {
+              console.warn(`备份切片数 ${sliced.slices.length} 超过预算 ${sliceLeft}，退回整文件`);
+            } else {
+              sliceLeft -= sliced.slices.length;
+              slices = sliced.slices;
+            }
+          } catch (error) {
+            if (error?.budgetExhausted) throw error;
+            failures.push([primary.key, `切片失败：${error.message}`]);
+            continue;
+          }
+        }
+        if (slices) {
+          slices.forEach((part, index) => {
+            drafts.push({
+              kind: 'video',
+              role: 'backup',
+              videoIndex: primary.videoIndex,
+              sliceIndex: index,
+              imageIndex: null,
+              title: slices.length > 1 ? `${primary.title} · ${index + 1}` : primary.title,
+              quality: selected.variant.quality ?? '',
+              durationMs: part.durationMs || primary.durationMs || 0,
+              sourceUrl: selected.variant.url,
+              etag: selected.probe.etag,
+              fileSize: selected.probe.size,
+              slice: {
+                start: part.start,
+                end: part.end,
+                mediaSize: part.mediaSize,
+                initBytes: part.initBytes,
+                initHash: part.initHash,
+                durationMs: part.durationMs,
+              },
+              backupState: 'none',
+            });
+          });
+        } else {
+          drafts.push({
+            kind: 'video',
+            role: 'backup',
+            videoIndex: primary.videoIndex,
+            sliceIndex: null,
+            imageIndex: null,
+            title: primary.title,
+            quality: selected.variant.quality ?? '',
+            durationMs: primary.durationMs || 0,
+            sourceUrl: selected.variant.url,
+            etag: selected.probe.etag,
+            fileSize: selected.probe.size,
+            slice: null,
+            backupState: 'none',
+          });
+        }
+      }
+
+      for (const primary of primaries.filter((asset) => asset.kind === 'image')) {
+        if (coveredImages.has(primary.imageIndex)) continue;
+        drafts.push({
+          kind: 'image',
+          role: 'backup',
+          videoIndex: null,
+          sliceIndex: null,
+          imageIndex: primary.imageIndex,
+          title: primary.title,
+          quality: '',
+          durationMs: 0,
+          sourceUrl: primary.sourceUrl,
+          etag: '',
+          fileSize: 0,
+          slice: null,
+          backupState: 'none',
+        });
+      }
+
+      const statements = [];
+      for (const [key, reason] of failures) {
+        statements.push(setAssetBackupStateStatement(env.DB, key, 'failed', reason));
+      }
+      if (drafts.length > 0) {
+        const version = await contentVersion(drafts);
+        const keyPairs = await Promise.all(
+          drafts.map(async (draft) => [
+            assetIdentity(draft),
+            await mediaKey(cfg.mediaKeySecret, row.url, `backup:${assetIdentity(draft)}`, version),
+          ]),
+        );
+        const keys = new Map(keyPairs);
+        const sourceIds = await ensureSourceIds(
+          env.DB,
+          drafts.map((draft) => ({
+            url: draft.sourceUrl,
+            etag: draft.etag ?? '',
+            fileSize: draft.fileSize ?? 0,
+            quality: draft.quality ?? '',
+          })),
+          now,
+        );
+        const initIds = await ensureInitIds(
+          env.DB,
+          drafts.filter((draft) => draft.slice).map((draft) => ({ hash: draft.slice.initHash, bytes: draft.slice.initBytes })),
+          now,
+        );
+        const baseOrd = Math.max(0, ...assets.map((asset) => asset.ord ?? 0)) + 1;
+        drafts.forEach((draft, index) => {
+          const sourceId = sourceIds.get(
+            sourceKey({ url: draft.sourceUrl, etag: draft.etag ?? '', fileSize: draft.fileSize ?? 0 }),
+          );
+          if (!sourceId) throw new Error('备份源信息写入失败');
+          const initId = draft.slice ? initIds.get(draft.slice.initHash) : null;
+          if (draft.slice && !initId) throw new Error('备份 init 段写入失败');
+          statements.push(
+            upsertAssetStatement(env.DB, {
+              ...draft,
+              key: keys.get(assetIdentity(draft)),
+              favoriteId: row.id,
+              sourceId,
+              initId,
+              ord: baseOrd + index,
+            }),
+          );
+        });
+        statements.push(enqueueStatement(env.DB, row.url, 'upload'));
+      } else if (existing.some((asset) => !asset.storeId)) {
+        statements.push(enqueueStatement(env.DB, row.url, 'upload'));
+      }
+      statements.push(completeJobStatement(env.DB, job.id));
+      await env.DB.batch(statements);
+      budget.left -= 2;
+      await pushFavorite(env, row.url);
+      prepared += 1;
+    } catch (error) {
+      if (error?.budgetExhausted) {
+        await releaseJobStatement(env.DB, job.id).run();
+        break;
+      }
+      console.warn(`备份准备失败 ${job.url}: ${error.message}`);
+      await retryJobStatement(env.DB, job, (job.attempts ?? 0) + 1, Date.now() + cfg.uploadRetryMs).run();
+    }
+  }
+  return prepared;
 }
 
 async function runUploadJobs(env, cfg, now, budget) {
@@ -217,7 +445,7 @@ async function runUploadJobs(env, cfg, now, budget) {
     const assets = await getAssetsByFavoriteIds(env.DB, [row.id]);
     budget.left -= 1;
 
-    const pending = assets.filter((asset) => !asset.storeId);
+    const pending = assets.filter((asset) => asset.role === 'backup' && !asset.storeId);
     const maxItems = Math.min(cfg.uploadItemsPerTick, pending.length);
     const batchSize = Math.min(cfg.storageBatchSize, MAX_BATCH);
     let index = 0;
@@ -300,9 +528,18 @@ async function runUploadJobs(env, cfg, now, budget) {
  */
 async function finishUploadJob(env, cfg, row, job, assets, failures, budgetExhausted) {
   const db = env.DB;
-  const remaining = assets.filter((asset) => !asset.storeId);
+  const backups = assets.filter((asset) => asset.role === 'backup');
+  const remaining = backups.filter((asset) => !asset.storeId);
   if (remaining.length === 0) {
-    await db.batch([setUploadStateStatement(db, row.url, 'ready', 0, 0), completeJobStatement(db, job.id)]);
+    const statements = [
+      ...backups.filter((asset) => asset.slice || asset.sliceCleaned).map((asset) => clearSliceStatement(db, asset.key)),
+      markBackupReadyStatement(db, row.id),
+      touchFavoriteStatement(db, row.url),
+      setUploadStateStatement(db, row.url, 'ready', 0, 0),
+      completeJobStatement(db, job.id),
+    ];
+    await db.batch(statements);
+    await pushFavorite(env, row.url);
     return;
   }
   if (budgetExhausted) {
@@ -316,11 +553,14 @@ async function finishUploadJob(env, cfg, row, job, assets, failures, budgetExhau
     return;
   }
   if (attempts >= cfg.uploadMaxAttempts) {
-    const state = assets.some((asset) => asset.storeId) ? 'partial' : 'failed';
+    const state = assets.some((asset) => asset.role === 'backup' && asset.storeId) ? 'partial' : 'failed';
     await db.batch([
+      markBackupFailedStatement(db, row.id, '备份上传失败'),
+      touchFavoriteStatement(db, row.url),
       setUploadStateStatement(db, row.url, state, attempts, 0),
       completeJobStatement(db, job.id),
     ]);
+    await pushFavorite(env, row.url);
     return;
   }
   const nextAt = Date.now() + cfg.uploadRetryMs * attempts;
@@ -331,20 +571,8 @@ async function finishUploadJob(env, cfg, row, job, assets, failures, budgetExhau
 }
 
 /**
- * 切片信息清理：已有备份且空闲超过 TTL 的片清掉 init/区间，保留 key/位置/时长/store_id。
- * 由每 5 小时的 cron 触发，避免和任务队列抢预算。
- */
-export async function runCleanup(env, cfg, now = Date.now()) {
-  const keys = await listExpiredSliceKeys(env.DB, now, cfg.sliceInfoTtlMs);
-  if (keys.length === 0) return 0;
-  await env.DB.batch(keys.map((key) => clearSliceStatement(env.DB, key)));
-  console.log(`清理空闲切片信息：${keys.length} 条`);
-  return keys.length;
-}
-
-/**
  * 孤儿 init / source 回收：没有 asset 再引用的行删掉（保留 1 小时，避开正在写库的任务）。
- * 这两个查询要扫 assets 表，所以单独放每天一次的 cron，不跟每 5 小时的清理混在一起。
+ * 这两个查询要扫 assets 表，所以单独放每天一次的 cron。
  */
 export async function runGc(env, now = Date.now()) {
   const cutoff = now - 60 * 60 * 1000;
@@ -368,6 +596,7 @@ export async function deleteFavoriteWithMedia(env, cfg, url) {
   const refs = await getAssetRefsForFavorite(env.DB, favorite.id);
   await env.DB.batch([
     env.DB.prepare('DELETE FROM assets WHERE favorite_id = ?').bind(favorite.id),
+    deleteVariantsStatement(env.DB, favorite.id),
     deleteFavoriteStatement(env.DB, url),
     env.DB.prepare('DELETE FROM jobs WHERE url = ?').bind(url),
   ]);

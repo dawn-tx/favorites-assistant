@@ -47,7 +47,7 @@ data class Tag(
 /** 一条链接解析回来的素材类型：图片用看的，视频用播的 */
 enum class MediaKind { IMAGE, VIDEO }
 
-/** 一个可独立浏览或播放的素材段 */
+/** 一个可独立浏览或播放的素材段（primary） */
 data class MediaSegment(
     /** 本地一律按 0..n-1 重新编号，后台给的顺序只当排序依据 */
     val index: Int,
@@ -58,11 +58,52 @@ data class MediaSegment(
     val url: String,
     val durationMs: Long,
     val quality: String = "",
-    /** 视频段属于哪一路视频（同一视频的切片相同）；图片段为空 */
+    /** 后台当前 active 档的文案；App 只显示，不参与选档 */
+    val activeQuality: String = "",
+    /** 视频段属于哪一路视频；图片段为空 */
     val videoIndex: Int? = null,
+    val backup: MediaBackup = MediaBackup(),
 ) {
     val playable: Boolean get() = kind == MediaKind.VIDEO && url.isNotBlank()
     val viewable: Boolean get() = kind == MediaKind.IMAGE && url.isNotBlank()
+    val displayQuality: String get() = activeQuality.ifBlank { quality }
+}
+
+enum class SourceMode { PRIMARY, BACKUP }
+
+enum class BackupState {
+    NONE, PREPARING, READY, FAILED;
+
+    companion object {
+        fun of(raw: String): BackupState = when (raw.lowercase()) {
+            "preparing" -> PREPARING
+            "ready" -> READY
+            "failed" -> FAILED
+            else -> NONE
+        }
+    }
+}
+
+data class BackupItem(
+    val kind: MediaKind,
+    val title: String,
+    val url: String,
+    val durationMs: Long,
+    val quality: String = "",
+    val videoIndex: Int? = null,
+    val sliceIndex: Int? = null,
+    val imageIndex: Int? = null,
+) {
+    val playable: Boolean get() = kind == MediaKind.VIDEO && url.isNotBlank()
+    val viewable: Boolean get() = kind == MediaKind.IMAGE && url.isNotBlank()
+}
+
+data class MediaBackup(
+    val state: BackupState = BackupState.NONE,
+    val items: List<BackupItem> = emptyList(),
+    val error: String = "",
+) {
+    val ready: Boolean get() = state == BackupState.READY && items.isNotEmpty()
 }
 
 /**

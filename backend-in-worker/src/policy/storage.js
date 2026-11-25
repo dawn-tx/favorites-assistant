@@ -112,11 +112,48 @@ export async function uploadAssetsToStorage(cfg, assets, favorite) {
 
 /**
  * 按 store_id 从存储服务取回文件。
- * 当前只搭框架：接上下载契约后，在这里返回带 Range 的 Response 即可启用回落；
- * 返回 null 表示尚未接入或文件不存在，媒体代理会回 502。
+ * `STORAGE_GET_URL` 支持 `{id}` 占位；没有占位时追加 `?id=<storeId>`。
+ * Range/HEAD 原样转发，用于备用源播放；返回 null 表示没有配置或文件不存在。
  */
-export async function downloadStoredMedia(/* { env, cfg, asset, request } */) {
-  return null;
+export async function downloadStoredMedia({ cfg, asset, request }) {
+  if (!cfg.storageGetUrl || !asset?.storeId) return null;
+  const encodedId = encodeURIComponent(asset.storeId);
+  const base = cfg.storageGetUrl.replace('{id}', encodedId);
+  const url = cfg.storageGetUrl.includes('{id}')
+    ? base
+    : `${base}${base.includes('?') ? '&' : '?'}id=${encodedId}`;
+  const headers = { 'accept-encoding': 'identity' };
+  const range = request?.headers.get('range');
+  if (range) headers.range = range;
+  if (cfg.storageToken) headers.authorization = `Bearer ${cfg.storageToken}`;
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: request?.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers,
+      signal: AbortSignal.timeout(Math.min(cfg.storageTimeoutMs, 60_000)),
+    });
+  } catch {
+    return null;
+  }
+  if (response.status !== 200 && response.status !== 206) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  const out = new Headers({
+    'content-type': response.headers.get('content-type') || (asset.kind === 'video' ? 'video/mp4' : 'image/jpeg'),
+    'accept-ranges': response.headers.get('accept-ranges') || 'bytes',
+    'cache-control': 'public, max-age=31536000, immutable',
+  });
+  for (const name of ['content-length', 'content-range', 'etag', 'last-modified']) {
+    const value = response.headers.get(name);
+    if (value) out.set(name, value);
+  }
+  return new Response(request?.method === 'HEAD' ? null : response.body, {
+    status: response.status,
+    headers: out,
+  });
 }
 
 /**

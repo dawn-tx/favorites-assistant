@@ -26,7 +26,23 @@ export function startStorage() {
   };
 
   const server = createServer(async (req, res) => {
-    const pathname = new URL(req.url, 'http://x').pathname;
+    const url = new URL(req.url, 'http://x');
+    const pathname = url.pathname;
+    if (pathname === '/get' && (req.method === 'GET' || req.method === 'HEAD')) {
+      if (state.down) {
+        res.writeHead(503);
+        res.end();
+        return;
+      }
+      const file = state.files.get(url.searchParams.get('id'));
+      if (!file?.bytes) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      serveStored(req, res, file.bytes, file.type === 'video' ? 'video/mp4' : 'image/jpeg');
+      return;
+    }
     if (pathname !== '/upload' || req.method !== 'POST') {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
@@ -136,6 +152,32 @@ async function readAndHash(response, keepBytes) {
     offset += chunk.length;
   }
   return { size, sha256, bytes };
+}
+
+function serveStored(req, res, bytes, contentType) {
+  const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '');
+  let start = 0;
+  let end = bytes.length - 1;
+  let status = 200;
+  const headers = { 'content-type': contentType, 'accept-ranges': 'bytes' };
+  if (range) {
+    start = Number(range[1]);
+    end = range[2] ? Math.min(Number(range[2]), bytes.length - 1) : bytes.length - 1;
+    if (start > end || start >= bytes.length) {
+      res.writeHead(416, { 'content-range': `bytes */${bytes.length}` });
+      res.end();
+      return;
+    }
+    status = 206;
+    headers['content-range'] = `bytes ${start}-${end}/${bytes.length}`;
+  }
+  headers['content-length'] = String(end - start + 1);
+  res.writeHead(status, headers);
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  res.end(Buffer.from(bytes.subarray(start, end + 1)));
 }
 
 export function closeServer(server) {

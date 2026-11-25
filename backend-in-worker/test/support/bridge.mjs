@@ -5,7 +5,9 @@
  */
 import { createServer } from 'node:http';
 
-export function startBridge(worker, env) {
+export function startBridge(worker, env, options = {}) {
+  const host = options.host || '127.0.0.1';
+  const port = Number(options.port) || 0;
   const server = createServer(async (req, res) => {
     try {
       const chunks = [];
@@ -34,9 +36,12 @@ export function startBridge(worker, env) {
       res.end(String(error?.message ?? error));
     }
   });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      resolve({ server, base: `http://127.0.0.1:${server.address().port}` });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, () => {
+      server.off('error', reject);
+      const shownHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+      resolve({ server, base: `http://${shownHost}:${server.address().port}` });
     });
   });
 }

@@ -1,4 +1,4 @@
-import { loadConfig, CLEANUP_CRON, GC_CRON } from './config.js';
+import { loadConfig, GC_CRON } from './config.js';
 import { HttpError, authorized, jsonResponse, rejectUnauthorized } from './http.js';
 import { handleMedia } from './media/proxy.js';
 import { handleSync } from './handlers/sync.js';
@@ -6,7 +6,7 @@ import { handleListFavorites, handleLookup } from './handlers/favorites.js';
 import { handleResolve } from './handlers/resolve.js';
 import { handleIngest, handleHealth } from './handlers/ingest.js';
 import { handleMeta } from './handlers/meta.js';
-import { runScheduled, runCleanup, runGc } from './scheduled/runner.js';
+import { runScheduled, runGc } from './scheduled/runner.js';
 import { LibraryHub } from './hub.js';
 
 export { LibraryHub };
@@ -68,15 +68,11 @@ export default {
   },
 
   /**
-   * 三个 cron：每 3 分钟任务队列、每 5 小时切片清理、每天孤儿 init/source 回收。
-   * 没有常驻进程，所有后台工作都由这里驱动。
+   * 两个 cron：每 3 分钟任务队列、每天孤儿 init/source 回收。
+   * 切片信息只在上传前临时保留，上传成功后直接清掉，不再做 TTL 扫描。
    */
   async scheduled(controller, env) {
     const cfg = loadConfig(env);
-    if (controller.cron === CLEANUP_CRON) {
-      await runCleanup(env, cfg);
-      return;
-    }
     if (controller.cron === GC_CRON) {
       await runGc(env);
       return;

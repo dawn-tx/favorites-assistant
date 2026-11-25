@@ -14,7 +14,7 @@ const HALF = VIDEO.length / 2;
 const SLICE_BYTES = 65_536;
 
 export function startOrigin({ quality = '720P', height = 720 } = {}) {
-  const state = { down: false, etag: '"v1"', hits: 0, parseUserAgents: [], sourceUserAgents: [] };
+  const state = { down: false, expired: false, split720: false, blockPaths: new Set(), etag: '"v1"', hits: 0, parseUserAgents: [], sourceUserAgents: [] };
 
   const server = createServer((req, res) => {
     state.hits += 1;
@@ -24,15 +24,27 @@ export function startOrigin({ quality = '720P', height = 720 } = {}) {
       return;
     }
     const pathname = new URL(req.url, 'http://x').pathname;
+    if (state.blockPaths.has(pathname)) {
+      res.writeHead(403);
+      res.end('blocked');
+      return;
+    }
 
     if (pathname === '/parse' && req.method === 'POST') {
       state.parseUserAgents.push(req.headers['user-agent'] || '');
-      return handleParse(req, res);
+      return handleParse(req, res, state);
     }
     if (pathname === '/slice' && req.method === 'POST') return handleSlice(req, res, state);
 
+    if (state.expired && !new URL(req.url, 'http://x').searchParams.has('fresh')) {
+      res.writeHead(403);
+      res.end('expired');
+      return;
+    }
     state.sourceUserAgents.push(req.headers['user-agent'] || '');
-    const body = pathname.endsWith('.mp4') ? VIDEO : IMAGE;
+    const body = pathname.endsWith('.mp4')
+      ? (state.split720 && pathname.includes('video-720') ? VIDEO.subarray(0, HALF) : VIDEO)
+      : IMAGE;
     const contentType = pathname.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
     serveRange(req, res, body, contentType, state.etag);
   });
@@ -44,7 +56,7 @@ export function startOrigin({ quality = '720P', height = 720 } = {}) {
   };
 }
 
-function handleParse(req, res) {
+function handleParse(req, res, state) {
   let text = '';
   req.on('data', (chunk) => (text += chunk));
   req.on('end', () => {
@@ -60,6 +72,7 @@ function handleParse(req, res) {
       return;
     }
     const origin = `http://${req.headers.host}`;
+    const fresh = state.expired ? '?fresh=1' : '';
     const payload = {
       title: `演示 · ${new URL(target).hostname}`,
       author: '测试作者',
@@ -69,14 +82,14 @@ function handleParse(req, res) {
         {
           title: '视频 1',
           duration_ms: 145_000,
-          cover_url: `${origin}/cover.jpg`,
+          cover_url: `${origin}/cover.jpg${fresh}`,
           variants: [
-            { url: `${origin}/video-1080.mp4`, quality: '1080P', height: 1080 },
-            { url: `${origin}/video-720.mp4`, quality: '720P', height: 720 },
+            { url: `${origin}/video-1080.mp4${fresh}`, quality: '1080P', height: 1080 },
+            { url: `${origin}/video-720.mp4${fresh}`, quality: '720P', height: 720 },
           ],
         },
       ],
-      images: [{ title: '图 1', url: `${origin}/image.jpg` }],
+      images: [{ title: '图 1', url: `${origin}/image.jpg${fresh}` }],
     };
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(payload));

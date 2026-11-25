@@ -1,14 +1,25 @@
-import { parseRangeHeader } from '../range.js';
 import { markSourceDead, probeSource } from '../probe.js';
-import { getAsset } from '../store/assets.js';
-import { ensureInitIds, restoreAssetSliceStatement, touchAssetStatement } from '../store/assets.js';
-import { getFavoriteById } from '../store/favorites.js';
-import { DEFAULT_SLICE_RULE, parseSliceRule } from '../config.js';
+import {
+  activateVariantStatements,
+  ensureSourceIds,
+  getAsset,
+  getAssetsByFavoriteIds,
+  getVariantByKey,
+  getVariantsByFavoriteIds,
+  getVariantsForVideo,
+  sourceKey,
+  updatePrimaryVideoSourceStatement,
+  updateVariantSourceStatement,
+} from '../store/assets.js';
+import { getFavoriteById, touchFavoriteStatement } from '../store/favorites.js';
 import { createBudget } from '../budget.js';
-import { downloadStoredMedia, fetchSlicesShared } from '../policy/index.js';
+import { downloadStoredMedia, resolveMedia } from '../policy/index.js';
+import { publicRow } from '../render.js';
+import { notifyHub } from '../hub.js';
 
 /**
  * 虚拟 key 里带内容版本：同一媒体地址的字节不会变，可长期缓存；错误响应仍 no-store。
+ * primary 视频的 URL 指向 active variant；backup 只读外部存储。
  */
 const MEDIA_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
@@ -28,16 +39,7 @@ function sendMediaError(request, status, message) {
   });
 }
 
-/** 源地址有效性：共用 probeSource 的缓存，并比对解析时的 etag/大小 */
-async function assetSourceAlive(cfg, asset, budget) {
-  const probe = await probeSource(cfg, asset.sourceUrl, budget);
-  if (!probe.ok) return false;
-  if (asset.fileSize > 0 && probe.size > 0 && probe.size !== asset.fileSize) return false;
-  if (asset.etag && probe.etag && probe.etag !== asset.etag) return false;
-  return true;
-}
-
-/** 整片/图片/封面：把客户端 Range 原样转给源站；full 模式忽略 Range，只回 200 */
+/** primary 整片/图片/封面：把客户端 Range 转给源站；full 模式忽略 Range，只回 200 */
 async function proxySource(request, asset, full) {
   const headers = { 'accept-encoding': 'identity' };
   const range = full ? null : request.headers.get('range');
@@ -74,78 +76,46 @@ async function proxySource(request, asset, full) {
   });
 }
 
-/**
- * 单片 = init 段（后台私有字节）+ 源文件媒体区间。客户端 Range 要在这两段之间换算，
- * 不能直接把 Range 转给源站。
- */
-async function serveSliceFromSource(request, asset, full) {
+/** backup 上传阶段（还没有 store_id）：Worker 现合成 init + 源区间，供存储回源复制 */
+async function serveBackupForUpload(asset) {
+  if (!asset.slice) return null;
   const init = asset.slice.initBytes;
-  const mediaSize = asset.slice.mediaSize;
-  const total = init.length + mediaSize;
-  // full 模式完全不看 Range：无效 Range 也按整段回 200
-  const range = full ? null : parseRangeHeader(request.headers.get('range'), total);
-  if (range === 'invalid') {
-    return new Response(null, { status: 416, headers: { 'content-range': `bytes */${total}`, 'cache-control': 'no-store' } });
+  const start = asset.slice.start;
+  const end = asset.slice.end;
+  let upstream;
+  try {
+    upstream = await fetch(asset.sourceUrl, {
+      headers: { range: `bytes=${start}-${end}`, 'accept-encoding': 'identity' },
+      redirect: 'follow',
+    });
+  } catch {
+    markSourceDead(asset.sourceUrl);
+    return null;
   }
-  const start = range ? range.start : 0;
-  const end = range ? range.end : total - 1;
-
-  const initStart = Math.min(start, init.length);
-  const initEnd = Math.min(end + 1, init.length);
-  const mediaStart = Math.max(0, start - init.length);
-  const mediaEnd = end - init.length;
-  const needInit = initEnd > initStart;
-  const needMedia = mediaEnd >= mediaStart && mediaSize > 0;
-
-  let upstream = null;
-  if (needMedia && request.method !== 'HEAD') {
-    try {
-      upstream = await fetch(asset.sourceUrl, {
-        headers: {
-          range: `bytes=${asset.slice.start + mediaStart}-${asset.slice.start + mediaEnd}`,
-          'accept-encoding': 'identity',
-        },
-        redirect: 'follow',
-      });
-    } catch {
-      markSourceDead(asset.sourceUrl);
-      return null;
-    }
-    if (upstream.status !== 206 && upstream.status !== 200) {
-      markSourceDead(asset.sourceUrl);
-      return null;
-    }
-    // 源站忽略 Range 返回 200 时，只有「正好要整段媒体」才能直接用
-    if (upstream.status === 200 && !(mediaStart === 0 && mediaEnd === mediaSize - 1)) {
-      markSourceDead(asset.sourceUrl);
-      return null;
-    }
+  if (upstream.status !== 206 && upstream.status !== 200) {
+    markSourceDead(asset.sourceUrl);
+    return null;
   }
-
-  const headers = new Headers({
-    'content-type': 'video/mp4',
-    'content-length': String(end - start + 1),
-    'accept-ranges': full ? 'none' : 'bytes',
-    'cache-control': MEDIA_CACHE_CONTROL,
+  const body = concatStream(init, upstream.body);
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'content-type': 'video/mp4',
+      'content-length': String(init.length + asset.slice.mediaSize),
+      'cache-control': MEDIA_CACHE_CONTROL,
+    },
   });
-  if (range) headers.set('content-range', `bytes ${start}-${end}/${total}`);
-  if (request.method === 'HEAD') return new Response(null, { status: full || !range ? 200 : 206, headers });
-
-  const prefix = needInit ? init.subarray(initStart, initEnd) : null;
-  const body = concatStream(prefix, upstream?.body ?? null);
-  return new Response(body, { status: full || !range ? 200 : 206, headers });
 }
 
-/** 把一段内存前缀与上游流拼成一个 ReadableStream；上游为空时只回前缀 */
 function concatStream(prefix, upstreamBody) {
   const reader = upstreamBody ? upstreamBody.getReader() : null;
-  let sentPrefix = !prefix || prefix.length === 0;
+  let sentPrefix = false;
   return new ReadableStream({
     async pull(controller) {
       try {
         if (!sentPrefix) {
-          controller.enqueue(prefix);
           sentPrefix = true;
+          controller.enqueue(prefix);
           return;
         }
         if (!reader) {
@@ -168,16 +138,7 @@ function concatStream(prefix, upstreamBody) {
   });
 }
 
-/**
- * 备份回落：存储里存的就是「init + 源区间」合成后的完整文件，
- * 下载实现接上后直接把客户端 Range 转给存储服务即可。
- * 当前下载只是框架（`downloadStoredMedia` 返回 null），所以回落会明确回 502。
- */
-/**
- * 备份回落：存储里存的就是「init + 源区间」合成后的完整文件，
- * 下载实现接上后直接把客户端 Range 转给存储服务即可。
- * 当前下载只是框架（`downloadStoredMedia` 返回 null），所以回落会明确回 502。
- */
+/** backup 只读外部存储，不再对源站重新解析 */
 async function serveFromStorage(request, env, cfg, asset, full) {
   if (!asset.storeId) return null;
   let target = request;
@@ -187,59 +148,118 @@ async function serveFromStorage(request, env, cfg, asset, full) {
     target = new Request(request, { headers });
   }
   const response = await downloadStoredMedia({ env, cfg, asset, request: target });
-  return response ?? null;
+  if (!response || !full) return response ?? null;
+  const headers = new Headers(response.headers);
+  headers.delete('content-range');
+  headers.set('accept-ranges', 'none');
+  return new Response(response.body, { status: 200, headers });
 }
 
-/**
- * 被清理过的片按 slice_index 补回 init/区间。
- * 源站已失效时不会走到这里（直接回落备份）；切片服务失败也返回 false，由调用方回落备份。
- */
-async function ensureSliceInfo(env, cfg, asset, budget) {
-  // 已有 slice（正常片）或从未有 slice（整片/图片/封面）都不用补；只有「被清理过的片」才补取
-  if (asset.slice || !asset.sliceCleaned) return true;
-  const index = Number(asset.sliceIndex);
-  if (!Number.isInteger(index) || index < 0) return false;
-  const favorite = await getFavoriteById(env.DB, asset.favoriteId);
-  const rule = parseSliceRule(favorite?.sliceRule) ?? DEFAULT_SLICE_RULE;
-  let sliced;
-  try {
-    sliced = await fetchSlicesShared(cfg, asset.sourceUrl, rule, budget);
-  } catch (error) {
-    console.warn(`补取切片信息失败 ${asset.key}：${error.message}`);
-    return false;
-  }
-  const part = sliced?.slices?.[index];
-  if (!part) {
-    console.warn(`补取切片信息失败 ${asset.key}：切片服务没有第 ${index} 片`);
-    return false;
-  }
-  const initIds = await ensureInitIds(env.DB, [{ hash: part.initHash, bytes: part.initBytes }]);
-  const initId = initIds.get(part.initHash);
-  if (!initId) {
-    console.warn(`补回切片信息失败 ${asset.key}：init 写入失败`);
-    return false;
-  }
-  asset.slice = {
-    start: part.start,
-    end: part.end,
-    mediaSize: part.mediaSize,
-    initBytes: part.initBytes,
-    initHash: part.initHash,
-    durationMs: part.durationMs,
-  };
-  asset.initId = initId;
-  asset.sliceCleaned = false;
-  await restoreAssetSliceStatement(env.DB, asset.key, initId, part.start, part.mediaSize, Date.now()).run();
-  console.log(`已补回切片信息：${asset.key}`);
+function sameContent(variant, probe) {
+  if (!probe.ok) return false;
+  if (variant.fileSize > 0 && probe.size > 0 && variant.fileSize !== probe.size) return false;
+  if (variant.etag && probe.etag && variant.etag !== probe.etag) return false;
   return true;
 }
 
-/** 媒体请求算一次使用；合并成 10 分钟一次写盘，播放器一次播放会发很多 Range 请求 */
-async function touchAsset(env, cfg, asset) {
-  const now = Date.now();
-  if (now - (asset.lastUsedAt ?? 0) < cfg.sliceInfoTouchMs) return;
-  asset.lastUsedAt = now;
-  await touchAssetStatement(env.DB, asset.key, now).run();
+async function pushRow(env, favoriteId) {
+  const favorite = await getFavoriteById(env.DB, favoriteId);
+  if (!favorite) return;
+  const [assets, variants] = await Promise.all([
+    getAssetsByFavoriteIds(env.DB, [favoriteId]),
+    getVariantsByFavoriteIds(env.DB, [favoriteId]),
+  ]);
+  await notifyHub(env, { favorites: [publicRow(favorite, assets, variants)] });
+}
+
+/** 另一档只是换了签名、字节没变：保持原 URL，只把源地址改到这一档 */
+async function rebindVariantSource(env, favorite, requested, candidate) {
+  await env.DB.batch([
+    updateVariantSourceStatement(env.DB, requested.key, candidate.sourceId),
+    updatePrimaryVideoSourceStatement(env.DB, favorite.id, requested.videoIndex, candidate.sourceId),
+  ]);
+  return { ...requested, sourceId: candidate.sourceId, sourceUrl: candidate.sourceUrl, etag: candidate.etag, fileSize: candidate.fileSize };
+}
+
+/** 切到另一档：active 换人，primary URL 随之变化；推完整行让 App 重新装载 */
+async function promoteVariant(env, favorite, candidate) {
+  await env.DB.batch([
+    ...activateVariantStatements(env.DB, favorite.id, candidate.videoIndex, candidate.key),
+    updatePrimaryVideoSourceStatement(env.DB, favorite.id, candidate.videoIndex, candidate.sourceId),
+    touchFavoriteStatement(env.DB, favorite.url),
+  ]);
+  await pushRow(env, favorite.id);
+}
+
+/** 同档重新解析：只接受 etag/大小相同的同内容，避免在 immutable URL 下换字节 */
+async function refreshVariant(env, cfg, favorite, variant, budget) {
+  let resolved;
+  try {
+    resolved = await resolveMedia(cfg, favorite.url, budget);
+  } catch {
+    return null;
+  }
+  const video = resolved.videos[variant.videoIndex];
+  if (!video) return null;
+  const ordered = [
+    ...video.variants.filter((item) => item.quality === variant.quality || item.height === variant.height),
+    ...video.variants,
+  ];
+  const seen = new Set();
+  for (const candidate of ordered) {
+    if (seen.has(candidate.url)) continue;
+    seen.add(candidate.url);
+    const probe = await probeSource(cfg, candidate.url, budget);
+    if (!sameContent(variant, probe)) continue;
+    const sourceIds = await ensureSourceIds(env.DB, [
+      { url: candidate.url, etag: probe.etag, fileSize: probe.size, quality: candidate.quality ?? '' },
+    ]);
+    const sourceId = sourceIds.get(sourceKey({ url: candidate.url, etag: probe.etag, fileSize: probe.size }));
+    if (!sourceId) return null;
+    await env.DB.batch([
+      updateVariantSourceStatement(env.DB, variant.key, sourceId),
+      updatePrimaryVideoSourceStatement(env.DB, favorite.id, variant.videoIndex, sourceId),
+    ]);
+    return { ...variant, sourceId, sourceUrl: candidate.url, etag: probe.etag, fileSize: probe.size };
+  }
+  return null;
+}
+
+async function serveVariant(request, env, cfg, variant, full, budget) {
+  const favorite = await getFavoriteById(env.DB, variant.favoriteId);
+  if (!favorite) return sendMediaError(request, 404, '收藏不存在');
+  const all = await getVariantsForVideo(env.DB, variant.favoriteId, variant.videoIndex);
+  const ordered = [
+    ...all.filter((item) => item.active),
+    variant,
+    ...all,
+  ].filter((item, index, list) => list.findIndex((other) => other.key === item.key) === index);
+
+  for (const candidate of ordered) {
+    const probe = await probeSource(cfg, candidate.sourceUrl, budget);
+    if (!probe.ok) continue;
+    if (candidate.key === variant.key) {
+      if (!sameContent(candidate, probe)) continue;
+      const served = await proxySource(request, { kind: 'video', sourceUrl: candidate.sourceUrl }, full);
+      if (served) return served;
+      continue;
+    }
+    if (sameContent(variant, probe)) {
+      const rebound = await rebindVariantSource(env, favorite, variant, candidate);
+      const served = await proxySource(request, { kind: 'video', sourceUrl: rebound.sourceUrl }, full);
+      if (served) return served;
+      continue;
+    }
+    await promoteVariant(env, favorite, candidate);
+    return sendMediaError(request, 502, '主源已切换，请按新地址重试');
+  }
+
+  const refreshed = await refreshVariant(env, cfg, favorite, variant, budget);
+  if (refreshed) {
+    const served = await proxySource(request, { kind: 'video', sourceUrl: refreshed.sourceUrl }, full);
+    if (served) return served;
+  }
+  return sendMediaError(request, 502, '主源不可用，请切换备用源');
 }
 
 /**
@@ -251,34 +271,27 @@ export async function handleMedia(request, env, cfg, relativePath) {
   const match = fullMatch ?? /^\/media\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
   if (!match) return sendMediaError(request, 404, '未知的素材地址');
   const full = Boolean(fullMatch);
-  const asset = await getAsset(env.DB, match[1]);
-  if (!asset) return sendMediaError(request, 404, '素材地址不存在或已过期');
-
-  await touchAsset(env, cfg, asset);
-
-  // 一次媒体请求自带一份小预算：探活 + 补切片 + 回源各算一个子请求，远低于 50
   const budget = createBudget(10);
-  let alive = false;
-  try {
-    alive = await assetSourceAlive(cfg, asset, budget);
-  } catch (error) {
-    // 媒体请求预算不够就当作源不可用，直接走备份，不把错误抛给播放器
-    if (!error?.budgetExhausted) throw error;
-  }
+  const asset = await getAsset(env.DB, match[1]);
 
-  if (alive) {
-    if (await ensureSliceInfo(env, cfg, asset, budget)) {
-      const served = asset.slice
-        ? await serveSliceFromSource(request, asset, full)
-        : await proxySource(request, asset, full);
-      if (served) return served;
-      console.log(`源地址失效，改用备份：${asset.key}`);
-    } else {
-      console.log(`切片信息补取失败，改用备份：${asset.key}`);
+  if (asset) {
+    if (asset.role === 'backup') {
+      if (asset.storeId) {
+        const backup = await serveFromStorage(request, env, cfg, asset, full);
+        return backup ?? sendMediaError(request, 502, '备用文件不可用');
+      }
+      const prepared = await serveBackupForUpload(asset);
+      return prepared ?? sendMediaError(request, 502, '备用文件尚未准备好');
     }
+    const probe = await probeSource(cfg, asset.sourceUrl, budget);
+    if (probe.ok) {
+      const served = await proxySource(request, asset, full);
+      if (served) return served;
+    }
+    return sendMediaError(request, 502, '主源不可用，请切换备用源');
   }
 
-  const backup = await serveFromStorage(request, env, cfg, asset, full);
-  if (backup) return backup;
-  return sendMediaError(request, 502, '源地址已失效，备份不可用');
+  const variant = await getVariantByKey(env.DB, match[1]);
+  if (!variant) return sendMediaError(request, 404, '素材地址不存在或已过期');
+  return serveVariant(request, env, cfg, variant, full, budget);
 }

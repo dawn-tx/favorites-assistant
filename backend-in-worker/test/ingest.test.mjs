@@ -137,7 +137,7 @@ test('SYNC_TOKEN 非空时数据接口要 Bearer，媒体与 health 仍免鉴权
   assert.equal(allowed.status, 200);
 });
 
-test('上传：每段都拿到 store_id，封面与图片也上传', async () => {
+test('备份上传：backup 资产拿到 store_id，主源不上传', async () => {
   const url = 'https://example.com/upload-all';
   await request('POST', '/sync', {
     device_id: 'tab-test',
@@ -148,14 +148,18 @@ test('上传：每段都拿到 store_id，封面与图片也上传', async () =>
     await tick(worker, env);
     const list = await rows();
     row = list.find((item) => item.url === url);
-    if (row?.media?.segments?.length && row.media.segments.every((segment) => segment.store_id)) break;
+    if (row?.media?.segments?.length && row.media.segments.every((segment) => segment.backup.state === 'ready')) break;
   }
   assert.ok(row.media.segments.length > 0);
-  assert.ok(row.media.segments.every((segment) => segment.store_id), '每段都应有 store_id');
+  assert.ok(row.media.segments.every((segment) => segment.backup.state === 'ready'));
+  const backups = await env.DB.prepare(
+    "SELECT store_id FROM assets a JOIN favorites f ON f.id = a.favorite_id WHERE f.url = ? AND a.role = 'backup'",
+  ).bind(url).all();
+  assert.ok(backups.results.length > 0);
+  assert.ok(backups.results.every((asset) => asset.store_id.startsWith('st-')));
 });
 
-test('上传失败不影响 ready：存储不可达时内容仍可用、store_id 留空', async () => {
-  // 第一轮只跑解析（关掉上传），把条目推到 ready；再让存储下线，用同一份 DB 跑备份
+test('上传失败不影响 ready：存储不可达时主源仍可用，backup 记 failed', async () => {
   const parseOnly = await makeEnv({
     SLICE_SERVICE_URL: '',
     UPLOAD_JOBS_PER_TICK: '0',
@@ -184,52 +188,9 @@ test('上传失败不影响 ready：存储不可达时内容仍可用、store_id
   const list = await call(worker, uploadOnly, 'GET', '/api/v1/favorites?limit=1000');
   const row = list.json.favorites.find((item) => item.url === url);
   assert.equal(row.media_state, 'ready', '备份失败不应把条目打成 failed');
-  assert.ok(row.media.segments.every((segment) => !segment.store_id), '存储不可达时不应有 store_id');
+  assert.ok(row.media.segments.every((segment) => segment.backup.state === 'failed'));
+  const backups = await uploadOnly.DB.prepare(
+    "SELECT store_id FROM assets a JOIN favorites f ON f.id = a.favorite_id WHERE f.url = ? AND a.role = 'backup'",
+  ).bind(url).all();
+  assert.ok(backups.results.every((asset) => !asset.store_id), '存储不可达时不应有 store_id');
 });
-
-test('切片信息清理：空闲片清掉 init 区间，代理时按索引补回', async () => {
-  const cleanupEnv = await makeEnv({
-    SOURCE_CHECK_TTL_MS: '0',
-    SLICE_INFO_TTL_MS: '1',
-    SLICE_INFO_TOUCH_MS: '0',
-  });
-  const url = 'https://example.com/cleanup';
-  await call(worker, cleanupEnv, 'POST', '/api/v1/sync', {
-    device_id: 'tab-test',
-    slice_rule: { mode: 'size', bytes: origin.constants.SLICE_BYTES },
-    ops: [{ type: 'UPSERT', favorite: { url, note: '', tags: [], source_app: 'manual', favorite_at: Date.now() } }],
-  });
-  for (let i = 0; i < 40; i += 1) {
-    await tick(worker, cleanupEnv);
-    const row = (await call(worker, cleanupEnv, 'GET', '/api/v1/favorites?limit=10')).json.favorites.find((item) => item.url === url);
-    if (row?.media_state === 'ready' && row.media.segments.every((segment) => segment.store_id)) break;
-  }
-
-  const segment = (await call(worker, cleanupEnv, 'GET', '/api/v1/favorites?limit=10')).json.favorites
-    .find((item) => item.url === url)
-    .media.segments.find((item) => item.kind === 'video');
-  // 从段地址直接取 key，别按 last_used_at 猜——两个切片的时间戳可能相同
-  const key = /^\/media\/([A-Za-z0-9_-]+)/.exec(segment.url)[1];
-
-  await tick(worker, cleanupEnv, '23 */5 * * *');
-  const afterCleanup = await assetRow(cleanupEnv, key);
-  assert.equal(afterCleanup.init_id, null, '空闲片应被清掉 init/区间');
-  assert.equal(afterCleanup.start_offset, null);
-  assert.equal(afterCleanup.slice_cleaned, 1);
-  assert.ok(afterCleanup.store_id, 'store_id 必须保留');
-
-  const res = await worker.fetch(
-    new Request(`https://backend.test${BASE}${segment.url}`),
-    cleanupEnv,
-    { waitUntil() {} },
-  );
-  assert.equal(res.status, 200);
-  const restored = await assetRow(cleanupEnv, key);
-  assert.ok(restored.init_id, '代理命中被清理的片时应补回 init');
-  assert.ok(restored.start_offset !== null, '应补回源文件区间');
-  assert.equal(restored.slice_cleaned, 0);
-});
-
-async function assetRow(targetEnv, key) {
-  return targetEnv.DB.prepare('SELECT * FROM assets WHERE key = ?').bind(key).first();
-}

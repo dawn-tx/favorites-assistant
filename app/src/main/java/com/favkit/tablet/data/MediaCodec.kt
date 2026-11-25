@@ -23,15 +23,35 @@ internal object MediaCodec {
         dtos.sortedBy { it.index }.mapIndexed { position, dto ->
             MediaSegment(
                 index = position,
-                kind = if (dto.kind.equals("image", ignoreCase = true)) MediaKind.IMAGE else MediaKind.VIDEO,
+                kind = kindOf(dto.kind),
                 title = dto.title,
                 coverUrl = dto.coverUrl,
                 url = dto.url,
                 durationMs = dto.durationMs,
                 quality = dto.quality,
+                activeQuality = dto.activeQuality,
                 videoIndex = dto.videoIndex,
+                backup = MediaBackup(
+                    state = BackupState.of(dto.backup?.state ?: "none"),
+                    error = dto.backup?.error ?: "",
+                    items = (dto.backup?.items ?: emptyList()).map { item ->
+                        BackupItem(
+                            kind = kindOf(item.kind),
+                            title = item.title,
+                            url = item.url,
+                            durationMs = item.durationMs,
+                            quality = item.quality,
+                            videoIndex = item.videoIndex,
+                            sliceIndex = item.sliceIndex,
+                            imageIndex = item.imageIndex,
+                        )
+                    },
+                ),
             )
         }
+
+    private fun kindOf(raw: String): MediaKind =
+        if (raw.equals("image", ignoreCase = true)) MediaKind.IMAGE else MediaKind.VIDEO
 
     /** 空清单写成 null 而不是 "[]"，省得一列永远占着字节 */
     fun encode(dtos: List<SegmentDto>): String? =

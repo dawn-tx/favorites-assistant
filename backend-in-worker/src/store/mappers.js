@@ -60,6 +60,7 @@ export function assetFromRow(row) {
     initId: hasInit ? Number(row.init_id) : null,
     ord: Number(row.ord) || 0,
     kind: row.kind,
+    role: row.role ?? 'primary',
     videoIndex: row.video_index == null ? null : Number(row.video_index),
     sliceIndex: row.slice_index == null ? null : Number(row.slice_index),
     imageIndex: row.image_index == null ? null : Number(row.image_index),
@@ -68,6 +69,8 @@ export function assetFromRow(row) {
     coverKey: row.cover_key ?? '',
     storeId: row.store_id ?? '',
     error: row.error ?? '',
+    backupState: row.backup_state ?? 'none',
+    backupError: row.backup_error ?? '',
     lastUsedAt: Number(row.last_used_at) || 0,
     sliceCleaned: Number(row.slice_cleaned) === 1,
     sourceUrl: row.source_url ?? '',
@@ -85,6 +88,23 @@ export function assetFromRow(row) {
           durationMs,
         }
       : null,
+  };
+}
+
+export function variantFromRow(row) {
+  if (!row) return null;
+  return {
+    key: row.key,
+    favoriteId: Number(row.favorite_id),
+    videoIndex: Number(row.video_index) || 0,
+    variantIndex: Number(row.variant_index) || 0,
+    sourceId: Number(row.source_id),
+    quality: row.quality ?? '',
+    height: Number(row.height) || 0,
+    active: Number(row.active) === 1,
+    sourceUrl: row.source_url ?? '',
+    etag: row.etag ?? '',
+    fileSize: Number(row.file_size) || 0,
   };
 }
 

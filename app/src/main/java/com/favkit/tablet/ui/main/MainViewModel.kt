@@ -9,6 +9,7 @@ import com.favkit.tablet.data.FavoriteFilter
 import com.favkit.tablet.data.MediaKind
 import com.favkit.tablet.data.MediaState
 import com.favkit.tablet.data.SettingsSnapshot
+import com.favkit.tablet.data.SourceMode
 import com.favkit.tablet.data.SyncBadge
 import com.favkit.tablet.data.Tag
 import com.favkit.tablet.di.AppGraph
@@ -40,9 +41,24 @@ import kotlinx.coroutines.launch
 data class FocusUiState(
     val itemId: String,
     val segmentIndex: Int = 0,
+    val sourceMode: SourceMode = SourceMode.PRIMARY,
+    val backupIndex: Int = 0,
+    /** primary URL/版本：后台换档会推新地址，进 key 才能触发重载 */
+    val primaryRevision: String = "",
+    /** 当前备用项的 URL：同一 backupIndex 下 URL 变了也要重载 */
+    val backupRevision: String = "",
 ) {
-    val playerKey: String get() = "$itemId#$segmentIndex"
+    val playerKey: String
+        get() = "$itemId#$segmentIndex#${sourceMode.name}#$backupIndex#$primaryRevision#$backupRevision"
 }
+
+private data class PlaybackItem(
+    val url: String,
+    val kind: MediaKind,
+    val title: String,
+    val durationMs: Long,
+    val quality: String,
+)
 
 data class MainUiState(
     val items: List<Favorite> = emptyList(),
@@ -132,7 +148,6 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
 
     private class AheadPrefetch(
         val favoriteId: String,
-        val untilIndex: Int,
         val handle: PrefetchHandle,
         val job: Job,
     )
@@ -140,6 +155,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private val prefetches = ConcurrentHashMap<String, Pair<PrefetchHandle, Job>>()
     private val prefetchingUrls = ConcurrentHashMap.newKeySet<String>()
     private var aheadPrefetch: AheadPrefetch? = null
+
+    /** 主源失败只自动切一次；同一个 playerKey 不来回跳 */
+    private val autoFallbackKeys = ConcurrentHashMap.newKeySet<String>()
+    private val failureLookups = ConcurrentHashMap.newKeySet<String>()
 
     /** 后台下一页的游标；进程死了就归零，重取第一页靠 id 去重，不会翻倍 */
     private var remoteCursor: String? = null
@@ -185,7 +204,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private fun bindFlows() {
         viewModelScope.launch {
             combine(graph.favorites.observeAll(), filterFlow) { all, filter -> all.filter(filter::matches) }
-                .collect { visible -> _state.update { it.copy(items = visible) } }
+                .collect { visible ->
+                    _state.update { it.copy(items = visible) }
+                    reconcileFocus(visible)
+                }
         }
         viewModelScope.launch { graph.tags.observeTags().collect { v -> _state.update { it.copy(tags = v) } } }
         // 筛选条件本身也要回写 state：items 由 combine 过滤，但 UI 的选中态、搜索框文字、
@@ -203,7 +225,12 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { storageFlow.collect { v -> _state.update { it.copy(storageReport = v) } } }
         viewModelScope.launch { graph.sync.running.collect { v -> _state.update { it.copy(syncing = v) } } }
         viewModelScope.launch { graph.sync.sweepError.collect { v -> _state.update { it.copy(sweepError = v) } } }
-        viewModelScope.launch { graph.player.state.collect { v -> _state.update { it.copy(player = v) } } }
+        viewModelScope.launch {
+            graph.player.state.collect { player ->
+                _state.update { it.copy(player = player) }
+                onPlayerState(player)
+            }
+        }
         viewModelScope.launch { graph.settings.snapshot.collect { v -> _state.update { it.copy(settings = v) } } }
         viewModelScope.launch { graph.sync.queuedCount.collect { v -> _state.update { it.copy(queued = v) } } }
         viewModelScope.launch { graph.sync.failedCount.collect { v -> _state.update { it.copy(failed = v) } } }
@@ -280,17 +307,17 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun openFocus(id: String) {
         val favorite = _state.value.items.firstOrNull { it.id == id } ?: return
         cancelAheadPrefetch()
-        focusFlow.value = FocusUiState(id, 0)
         filtersFlow.value = false
         // 内容还没就绪：用户点开的那一下就是最合理的询问时机，问一次就走，不做轮询
         if (favorite.contentPending) peekContent(id)
-        if (favorite.segments.isEmpty()) {
+        val first = favorite.segments.firstOrNull()
+        val focus = FocusUiState(id, 0, primaryRevision = first?.url.orEmpty())
+        focusFlow.value = focus
+        if (first == null) {
             graph.player.pausePlayback()
             return
         }
-        val start = 0
-        focusFlow.value = FocusUiState(id, start)
-        loadSegment(favorite, start, autoPlay = false)
+        loadFocus(favorite, focus, autoPlay = false)
     }
 
     /** 关掉遮罩层时把那次单条查询的失败提示一起收掉：它只属于刚才打开的那一条 */
@@ -327,23 +354,71 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun showSegment(index: Int) {
         val focus = focusFlow.value ?: return
         val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
-        if (index !in favorite.segments.indices || index == focus.segmentIndex) return
+        if (index !in favorite.segments.indices || index == focus.segmentIndex && focus.sourceMode == SourceMode.PRIMARY) return
         cancelAheadPrefetch()
-        focusFlow.value = FocusUiState(focus.itemId, index)
+        val segment = favorite.segments[index]
+        val next = FocusUiState(focus.itemId, index, primaryRevision = segment.url)
+        focusFlow.value = next
         // 在遮罩层里主动翻段 = 直接操作，视频段自动播起来；从墙上点开时才停在暂停态等用户按播放
-        loadSegment(favorite, index, autoPlay = true)
+        loadFocus(favorite, next, autoPlay = true)
     }
 
-    /** 一段自然播完：同一条里紧跟着的下一段还是视频，就直接接着播。 */
+    /** C 层主源/备用切换；备用未 ready 时不允许切 */
+    fun setSourceMode(mode: SourceMode) {
+        val focus = focusFlow.value ?: return
+        val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
+        val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
+        if (mode == SourceMode.BACKUP && !segment.backup.ready) return
+        if (focus.sourceMode == mode && (mode == SourceMode.PRIMARY || focus.backupIndex == 0)) return
+        val next = if (mode == SourceMode.PRIMARY) {
+            focus.copy(sourceMode = SourceMode.PRIMARY)
+        } else {
+            focus.copy(
+                sourceMode = SourceMode.BACKUP,
+                backupIndex = 0,
+                backupRevision = segment.backup.items.firstOrNull()?.url.orEmpty(),
+            )
+        }
+        cancelAheadPrefetch()
+        focusFlow.value = next
+        loadFocus(favorite, next, autoPlay = true)
+    }
+
+    fun setBackupIndex(index: Int) {
+        val focus = focusFlow.value ?: return
+        if (focus.sourceMode != SourceMode.BACKUP) return
+        val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
+        val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
+        if (index !in segment.backup.items.indices || index == focus.backupIndex) return
+        val next = focus.copy(backupIndex = index, backupRevision = segment.backup.items[index].url)
+        cancelAheadPrefetch()
+        focusFlow.value = next
+        loadFocus(favorite, next, autoPlay = true)
+    }
+
+    /** 一段自然播完：PRIMARY 进下一段；BACKUP 片内推进，最后一片停住。 */
     private fun advanceAfterEnd(playerKey: String) {
         val focus = focusFlow.value ?: return
-        if (playerKey != FocusUiState(focus.itemId, focus.segmentIndex).playerKey) return
+        if (playerKey != focus.playerKey) return
         val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
+        val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
+
+        if (focus.sourceMode == SourceMode.BACKUP) {
+            val nextIndex = focus.backupIndex + 1
+            val item = segment.backup.items.getOrNull(nextIndex) ?: return
+            if (!item.playable) return
+            val next = focus.copy(backupIndex = nextIndex, backupRevision = item.url)
+            focusFlow.value = next
+            loadFocus(favorite, next, autoPlay = true)
+            return
+        }
+
         val next = focus.segmentIndex + 1
-        val segment = favorite.segments.getOrNull(next) ?: return
-        if (!segment.playable) return
-        focusFlow.value = FocusUiState(focus.itemId, next)
-        loadSegment(favorite, next, autoPlay = true)
+        val nextSegment = favorite.segments.getOrNull(next) ?: return
+        if (!nextSegment.playable) return
+        val focusNext = FocusUiState(focus.itemId, next, primaryRevision = nextSegment.url)
+        focusFlow.value = focusNext
+        loadFocus(favorite, focusNext, autoPlay = true)
     }
 
     /**
@@ -374,53 +449,87 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     // endregion
 
     // region 播放
-    private fun loadSegment(favorite: Favorite, index: Int, autoPlay: Boolean) {
-        val segment = favorite.segments.getOrNull(index) ?: return
-        if (!segment.playable) {
-            // 翻到图集段：让视频安静下来，实例不释放，翻回去还是秒开
+    private fun loadFocus(
+        favorite: Favorite,
+        focus: FocusUiState,
+        autoPlay: Boolean,
+        resumeAtMs: Long = 0L,
+    ) {
+        val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
+        val item = when (focus.sourceMode) {
+            SourceMode.PRIMARY -> PlaybackItem(
+                url = segment.url,
+                kind = segment.kind,
+                title = segment.title,
+                durationMs = segment.durationMs,
+                quality = segment.displayQuality,
+            )
+
+            SourceMode.BACKUP -> {
+                val backup = segment.backup.items.getOrNull(focus.backupIndex)
+                if (backup == null) {
+                    graph.player.pausePlayback()
+                    return
+                }
+                PlaybackItem(backup.url, backup.kind, backup.title, backup.durationMs, backup.quality)
+            }
+        }
+        val next = when (focus.sourceMode) {
+            SourceMode.PRIMARY -> focus.copy(primaryRevision = item.url)
+            SourceMode.BACKUP -> focus.copy(backupRevision = item.url)
+        }
+        if (next != focus) focusFlow.value = next
+        if (item.kind == MediaKind.IMAGE || item.url.isBlank()) {
             graph.player.pausePlayback()
+            cancelAheadPrefetch()
             return
         }
         graph.player.open(
-            itemId = FocusUiState(favorite.id, index).playerKey,
-            url = segment.url,
-            resumeAtMs = 0L,
+            itemId = next.playerKey,
+            url = item.url,
+            resumeAtMs = resumeAtMs,
             speed = _state.value.settings?.defaultPlaybackSpeed ?: 1f,
             autoPlay = autoPlay,
         )
-        prefetchAhead(favorite, index)
+        prefetchAhead(favorite, next)
     }
 
-    /** 滚动预取：每次只把当前段之后的 3 片放进缓存，播到下一段再续看窗口 */
-    private fun prefetchAhead(favorite: Favorite, index: Int) {
-        val current = aheadPrefetch
-        if (current != null && current.favoriteId == favorite.id && index + 1 <= current.untilIndex) return
+    /** 滚动预取：PRIMARY 沿后续 A 段，BACKUP 沿后续备用项；每次换源/换段都重建窗口 */
+    private fun prefetchAhead(favorite: Favorite, focus: FocusUiState) {
         cancelAheadPrefetch()
         if (prefetches.containsKey(favorite.id)) return
-        val ahead = favorite.segments
-            .withIndex()
-            .drop(index + 1)
-            .filter { it.value.playable && it.value.url.isNotBlank() && !isPlaylist(it.value.url) }
-            .take(AUTO_PREFETCH_AHEAD)
-        if (ahead.isEmpty()) return
+        val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
+        val urls = when (focus.sourceMode) {
+            SourceMode.PRIMARY -> favorite.segments
+                .drop(focus.segmentIndex + 1)
+                .filter { it.playable && it.url.isNotBlank() && !isPlaylist(it.url) }
+                .take(AUTO_PREFETCH_AHEAD)
+                .map { it.url }
+
+            SourceMode.BACKUP -> segment.backup.items
+                .drop(focus.backupIndex + 1)
+                .filter { it.playable && it.url.isNotBlank() && !isPlaylist(it.url) }
+                .take(AUTO_PREFETCH_AHEAD)
+                .map { it.url }
+        }
+        if (urls.isEmpty()) return
         val handle = PrefetchHandle()
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
-                for ((_, segment) in ahead) {
+                for (url in urls) {
                     if (handle.cancelled) break
-                    // 自动与自动之间按 URL 单飞；手动预取开始前会先停掉窗口任务
-                    if (!prefetchingUrls.add(segment.url)) continue
+                    if (!prefetchingUrls.add(url)) continue
                     try {
-                        graph.media.prefetch(segment.url, onProgress = {}, isCancelled = { handle.cancelled })
+                        graph.media.prefetch(url, onProgress = {}, isCancelled = { handle.cancelled })
                     } finally {
-                        prefetchingUrls.remove(segment.url)
+                        prefetchingUrls.remove(url)
                     }
                 }
             } finally {
                 if (aheadPrefetch?.handle === handle) aheadPrefetch = null
             }
         }
-        aheadPrefetch = AheadPrefetch(favorite.id, ahead.last().index, handle, job)
+        aheadPrefetch = AheadPrefetch(favorite.id, handle, job)
         job.start()
     }
 
@@ -430,6 +539,71 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
             task.job.cancel()
         }
         aheadPrefetch = null
+    }
+
+    /**
+     * WS/对账把收藏行换了之后，只处理会和当前播放器冲突的变化：
+     * PRIMARY 换 URL 要重载；BACKUP 消失回主源，越界夹紧，当前项 URL 变了才重载。
+     */
+    private fun reconcileFocus(visible: List<Favorite>) {
+        val focus = focusFlow.value ?: return
+        val favorite = visible.firstOrNull { it.id == focus.itemId } ?: return
+        val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
+        val playing = _state.value.player.isPlaying
+        val position = _state.value.player.positionMs
+
+        if (focus.sourceMode == SourceMode.BACKUP) {
+            if (!segment.backup.ready) {
+                val next = focus.copy(sourceMode = SourceMode.PRIMARY)
+                focusFlow.value = next
+                loadFocus(favorite, next, autoPlay = playing, resumeAtMs = position)
+                return
+            }
+            val index = focus.backupIndex.coerceIn(0, segment.backup.items.lastIndex)
+            val item = segment.backup.items.getOrNull(index) ?: return
+            val next = focus.copy(backupIndex = index, backupRevision = item.url)
+            if (next != focus) {
+                focusFlow.value = next
+                loadFocus(favorite, next, autoPlay = playing, resumeAtMs = position)
+            }
+            return
+        }
+
+        if (segment.url != focus.primaryRevision) {
+            val next = focus.copy(primaryRevision = segment.url)
+            focusFlow.value = next
+            loadFocus(favorite, next, autoPlay = playing, resumeAtMs = position)
+        }
+    }
+
+    /** 主源播放失败：backup ready 就直接切；否则只做一次 lookup，等后台换档/修复 */
+    private fun onPlayerState(player: PlayerUiState) {
+        val focus = focusFlow.value ?: return
+        if (player.error == null || player.itemId != focus.playerKey || focus.sourceMode != SourceMode.PRIMARY) return
+        val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
+        val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
+
+        if (segment.backup.ready && autoFallbackKeys.add(focus.playerKey)) {
+            val item = segment.backup.items.first()
+            val next = focus.copy(
+                sourceMode = SourceMode.BACKUP,
+                backupIndex = 0,
+                backupRevision = item.url,
+            )
+            focusFlow.value = next
+            loadFocus(favorite, next, autoPlay = true)
+            return
+        }
+
+        val lookupKey = "${focus.itemId}#${focus.segmentIndex}"
+        if (failureLookups.add(lookupKey)) {
+            viewModelScope.launch {
+                when (val outcome = graph.control.peek(favorite.url)) {
+                    is LookupOutcome.Loaded -> graph.favorites.importRemote(outcome.favorites)
+                    is LookupOutcome.Failed -> Unit
+                }
+            }
+        }
     }
 
     private suspend fun stopAheadPrefetch() {

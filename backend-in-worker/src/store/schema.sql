@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS assets (
   init_id        INTEGER,
   ord            INTEGER NOT NULL DEFAULT 0,
   kind           TEXT NOT NULL,
+  role           TEXT NOT NULL DEFAULT 'primary',
   video_index    INTEGER,
   slice_index    INTEGER,
   image_index    INTEGER,
@@ -65,9 +66,28 @@ CREATE TABLE IF NOT EXISTS assets (
   media_size     INTEGER,
   store_id       TEXT NOT NULL DEFAULT '',
   error          TEXT NOT NULL DEFAULT '',
+  backup_state   TEXT NOT NULL DEFAULT 'none',
+  backup_error   TEXT NOT NULL DEFAULT '',
   last_used_at   INTEGER NOT NULL DEFAULT 0,
   slice_cleaned  INTEGER NOT NULL DEFAULT 0
 );
+
+-- primary 视频的每一档各一行；key 是这个档独立的虚拟媒体地址
+CREATE TABLE IF NOT EXISTS variants (
+  key            TEXT PRIMARY KEY,
+  favorite_id    INTEGER NOT NULL,
+  video_index    INTEGER NOT NULL,
+  variant_index  INTEGER NOT NULL,
+  source_id      INTEGER NOT NULL,
+  quality        TEXT NOT NULL DEFAULT '',
+  height         INTEGER NOT NULL DEFAULT 0,
+  active         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS variants_by_favorite ON variants (favorite_id, video_index, variant_index);
+CREATE INDEX IF NOT EXISTS variants_by_source ON variants (source_id);
+-- 每个视频只能有一条 active
+CREATE UNIQUE INDEX IF NOT EXISTS variants_one_active ON variants (favorite_id, video_index) WHERE active = 1;
 
 CREATE INDEX IF NOT EXISTS assets_by_favorite ON assets (favorite_id, ord);
 CREATE INDEX IF NOT EXISTS assets_by_source ON assets (source_id);

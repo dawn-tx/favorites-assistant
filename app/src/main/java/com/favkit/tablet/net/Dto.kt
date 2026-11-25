@@ -64,11 +64,32 @@ data class SegmentDto(
     val url: String = "",
     @SerialName("duration_ms") val durationMs: Long = 0L,
     val quality: String = "",
+    @SerialName("active_quality") val activeQuality: String = "",
     /**
-     * 视频段属于哪一路视频（同一视频的切片相同）；图片段为空。
+     * 视频段属于哪一路视频；图片段为空。
      * 旧后台没有这个字段，App 会退回平铺的段条。
      */
     @SerialName("video_index") val videoIndex: Int? = null,
+    val backup: BackupDto? = null,
+)
+
+@Serializable
+data class BackupDto(
+    val state: String = "none",
+    val error: String = "",
+    val items: List<BackupItemDto> = emptyList(),
+)
+
+@Serializable
+data class BackupItemDto(
+    val kind: String = "video",
+    val title: String = "",
+    val url: String = "",
+    @SerialName("duration_ms") val durationMs: Long = 0L,
+    val quality: String = "",
+    @SerialName("video_index") val videoIndex: Int? = null,
+    @SerialName("slice_index") val sliceIndex: Int? = null,
+    @SerialName("image_index") val imageIndex: Int? = null,
 )
 
 /**

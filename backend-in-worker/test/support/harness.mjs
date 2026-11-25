@@ -60,8 +60,8 @@ class SqliteStatement {
 }
 
 class FakeD1 {
-  constructor() {
-    this.db = new DatabaseSync(':memory:');
+  constructor(path = ':memory:') {
+    this.db = new DatabaseSync(path);
     this.db.exec(SCHEMA);
   }
 
@@ -85,8 +85,8 @@ class FakeD1 {
   }
 }
 
-export function createTestEnv(extraVars = {}) {
-  return { DB: new FakeD1(), ...extraVars };
+export function createTestEnv(extraVars = {}, options = {}) {
+  return { DB: new FakeD1(options.dbPath), ...extraVars };
 }
 
 /**

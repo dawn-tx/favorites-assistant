@@ -3,7 +3,6 @@
 //   node --test test/large-file.test.mjs
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import worker from '../src/index.js';
 import { parserConfig } from '../src/policy/parser.js';
 import { call, createTestEnv, tick } from './support/harness.mjs';
@@ -83,7 +82,12 @@ async function runFavorite(env, url) {
     )
       .bind(url)
       .first();
-    if (record?.media_state === 'ready' && ['ready', 'partial', 'failed'].includes(record.upload_state)) break;
+    const row = (await call(worker, env, 'GET', '/api/v1/favorites?limit=10')).json.favorites.find((item) => item.url === url);
+    if (
+      record?.media_state === 'ready' &&
+      row?.media?.segments?.length &&
+      row.media.segments.every((segment) => segment.backup.state === 'ready')
+    ) break;
     await tick(worker, env);
   }
   return { record, elapsedMs: Date.now() - started };
@@ -106,67 +110,6 @@ async function expectedSegments(sampleUrl) {
   return data;
 }
 
-async function firstAsset(env, favoriteId) {
-  return env.DB.prepare(
-    `SELECT key, init_id, start_offset, media_size, store_id
-     FROM assets WHERE favorite_id = ? AND kind = 'video' ORDER BY ord LIMIT 1`,
-  )
-    .bind(favoriteId)
-    .first();
-}
-
-function sha256(...parts) {
-  const hash = createHash('sha256');
-  for (const part of parts) hash.update(part);
-  return hash.digest('hex');
-}
-
-async function assertSliceBytes(env, sampleUrl, favoriteId) {
-  const asset = await firstAsset(env, favoriteId);
-  assert.ok(asset, '应有视频段');
-  assert.ok(asset.store_id, '应完成备份');
-
-  const initRow = await env.DB.prepare('SELECT bytes FROM inits WHERE id = ?').bind(asset.init_id).first();
-  const init = new Uint8Array(initRow.bytes);
-  const endInclusive = asset.start_offset + asset.media_size - 1;
-  const range = await fetch(sampleUrl, {
-    headers: { range: `bytes=${asset.start_offset}-${endInclusive}` },
-    signal: AbortSignal.timeout(120000),
-  });
-  assert.equal(range.status, 206);
-  const media = new Uint8Array(await range.arrayBuffer());
-  assert.equal(media.length, asset.media_size);
-
-  const stored = storage.state.files.get(asset.store_id);
-  assert.ok(stored, '存储里应有这条文件');
-  assert.equal(stored.size, init.length + media.length, '存储大小应等于 init + 区间');
-  assert.equal(stored.sha256, sha256(init, media), '存储内容哈希应一致');
-
-  // HEAD 与跨 init/媒体边界的 Range
-  const segmentPath = `/api/v1/media/${asset.key}.mp4`;
-  const head = await worker.fetch(
-    new Request(`https://backend.test${segmentPath}`, { method: 'HEAD' }),
-    env,
-    { waitUntil() {} },
-  );
-  assert.equal(head.status, 200);
-  assert.equal(Number(head.headers.get('content-length')), init.length + media.length);
-
-  const start = Math.max(0, init.length - 4);
-  const end = init.length + 4;
-  const sliced = await worker.fetch(
-    new Request(`https://backend.test${segmentPath}`, {
-      headers: { range: `bytes=${start}-${end}` },
-    }),
-    env,
-    { waitUntil() {} },
-  );
-  assert.equal(sliced.status, 206);
-  const body = new Uint8Array(await sliced.arrayBuffer());
-  const expected = new Uint8Array([...init.subarray(start, init.length), ...media.subarray(0, end - init.length + 1)]);
-  assert.deepEqual(body, expected);
-}
-
 async function exercise(t, sampleUrl, favoriteUrl) {
   const expected = await expectedSegments(sampleUrl);
   const env = await makeEnv();
@@ -177,31 +120,41 @@ async function exercise(t, sampleUrl, favoriteUrl) {
   assert.equal(record.media_state, 'ready', record.failed_reason || undefined);
   assert.equal(record.upload_state, 'ready', '备份应全部完成');
 
+  const primary = await env.DB.prepare(
+    "SELECT key, store_id FROM assets WHERE favorite_id = ? AND role = 'primary' AND kind = 'video'",
+  )
+    .bind(record.id)
+    .all();
+  assert.equal(primary.results.length, 1, 'primary 只有一个完整视频段');
+  assert.equal(primary.results[0].store_id, '', 'primary 完整视频不上传');
+
   const assets = await env.DB.prepare(
-    "SELECT key, init_id, store_id FROM assets WHERE favorite_id = ? AND kind = 'video' ORDER BY ord",
+    "SELECT key, init_id, start_offset, store_id FROM assets WHERE favorite_id = ? AND role = 'backup' AND kind = 'video' ORDER BY ord",
   )
     .bind(record.id)
     .all();
   const count = assets.results.length;
-  assert.equal(count, expected.segments.length, 'asset 数应等于切片数');
+  assert.equal(count, expected.segments.length, '备份切片数应等于切片服务结果');
   assert.ok(count <= MAX_SLICES, `切片数 ${count} 超过上限`);
-  assert.ok(assets.results.every((asset) => asset.init_id != null && asset.store_id), '每片都应有 init 与 store_id');
+  assert.ok(assets.results.every((asset) => asset.store_id), '每片都应有 store_id');
+  assert.ok(
+    assets.results.every((asset) => asset.init_id == null && asset.start_offset == null),
+    '上传成功后应清掉切片 init/区间',
+  );
 
   const calls = storage.state.calls - callsBefore;
   assert.equal(calls, Math.ceil(count / 10), `应分 ${Math.ceil(count / 10)} 批上传，实际 ${calls}`);
   assert.equal(storage.state.files.size - filesBefore, count);
 
-  await assertSliceBytes(env, sampleUrl, record.id);
-
-  t.diagnostic(`${favoriteUrl} ${count} 片，${(elapsedMs / 1000).toFixed(1)}s 完成`);
+  t.diagnostic(`${favoriteUrl} ${count} 个备份片，${(elapsedMs / 1000).toFixed(1)}s 完成`);
 }
 
-test('200MB：端到端解析、切片、上传与代理', { timeout: 240000 }, async (t) => {
+test('200MB：端到端解析、备份切片与上传', { timeout: 240000 }, async (t) => {
   if (skipReason) return t.skip(skipReason);
   await exercise(t, SAMPLE_200, 'https://example.com/large-200');
 });
 
-test('500MB：端到端解析、切片、上传与代理', { timeout: 360000 }, async (t) => {
+test('500MB：端到端解析、备份切片与上传', { timeout: 360000 }, async (t) => {
   if (skipReason) return t.skip(skipReason);
   await exercise(t, SAMPLE_500, 'https://example.com/large-500');
 });
