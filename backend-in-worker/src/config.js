@@ -33,6 +33,11 @@ function int(raw, fallback, min = 0) {
   return Math.floor(value);
 }
 
+function bool(raw, fallback = false) {
+  if (raw == null || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
+}
+
 /**
  * 只接受按大小的切片规则（App 设置页发的就是这个形状），切点固定关键帧。
  * 不再支持 duration，也不再从环境变量读默认规则；没带规则就用 DEFAULT_SLICE_RULE。
@@ -85,6 +90,7 @@ export function loadConfig(env = {}) {
     storageBatchSize: Math.min(int(env.STORAGE_BATCH_SIZE, 10, 1), 10),
     // 18MB/片、10 条一批 ≈ 180MB，复制完成才返回，给足 5 分钟
     storageTimeoutMs: int(env.STORAGE_TIMEOUT_MS, 5 * 60_000),
+    backupCovers: bool(env.BACKUP_COVERS, false),
 
     // 免费版单次调用最多 50 个子请求、50 次 D1 查询，这几个上限就是把一次 tick 的账算在预算内；
     // 置 0 可单独关闭某一类任务（测试里用来把解析与备份拆到两轮）

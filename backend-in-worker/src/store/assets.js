@@ -19,6 +19,14 @@ export async function getAsset(db, key) {
   return assetFromRow(row);
 }
 
+export async function getBackupCover(db, favoriteId, videoIndex) {
+  const row = await db
+    .prepare(`${ASSET_SELECT} WHERE a.favorite_id = ? AND a.role = 'backup' AND a.kind = 'cover' AND a.video_index = ? LIMIT 1`)
+    .bind(favoriteId, videoIndex)
+    .first();
+  return assetFromRow(row);
+}
+
 /** 按收藏批量取段：列表页、lookup、上传任务都走这条 */
 export async function getAssetsByFavoriteIds(db, ids) {
   const found = [];

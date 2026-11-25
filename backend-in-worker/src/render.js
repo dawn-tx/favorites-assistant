@@ -15,7 +15,8 @@ export function renderSegments(assets, variants = []) {
       : null;
     const items = backup
       .filter((item) =>
-        isVideo ? item.videoIndex === asset.videoIndex : item.imageIndex === asset.imageIndex,
+        item.kind !== 'cover' &&
+        (isVideo ? item.videoIndex === asset.videoIndex : item.imageIndex === asset.imageIndex),
       )
       .sort((a, b) => (a.sliceIndex ?? 0) - (b.sliceIndex ?? 0) || a.ord - b.ord)
       .map((item) => ({

@@ -47,7 +47,7 @@ backend-in-worker/
 
 - **backup 切片**：传本 Worker 的临时合成地址（`init + 源区间`），存储服务回源 Worker 拿到可直接播放的完整片；
 - **短视频 backup / 备用图**：直接传源站地址，不再经过 Worker；
-- **primary**（视频整片、图片、封面）永不上传。
+- **primary**（视频整片、图片、封面）永不上传；`BACKUP_COVERS=true` 时会额外生成一份封面 backup，仅供封面源失效时回落。
 
 ```
 POST {STORAGE_UPLOAD_URL}
@@ -84,7 +84,7 @@ D1 只存元数据。业务库共 6 张表：
 | `favorites` | `id`；`url` 唯一 | `note/tags/source_app/favorite_at/updated_at/media/media_state/failed_reason/resolved_at/slice_rule/upload_*` | 一条收藏 url 一行；用户字段、内容状态与 backup 上传状态 |
 | `sources` | `id`；`(url, etag, file_size)` 唯一 | `quality/created_at` | 源文件信息去重；被 `assets.source_id` 与 `variants.source_id` 引用；无引用后由 GC 回收 |
 | `variants` | `key` 主键；每个 `(favorite_id, video_index)` 只有一条 `active` | `video_index/variant_index/source_id/quality/height/active` | 保存每个视频的全部清晰度；`key` 是该档独立虚拟 URL；换档只改 active |
-| `assets` | `key` 主键 | `favorite_id/source_id/init_id/role/kind/video_index/slice_index/image_index/ord/title/duration_ms/cover_key/start_offset/media_size/store_id/backup_state` | primary 是视频整片、图片、封面；backup 是长视频切片、短视频整文件或备用图；backup 不进入顶层 `segments` |
+| `assets` | `key` 主键 | `favorite_id/source_id/init_id/role/kind/video_index/slice_index/image_index/ord/title/duration_ms/cover_key/start_offset/media_size/store_id/backup_state` | primary 是视频整片、图片、封面；backup 是长视频切片、短视频整文件、备用图，`BACKUP_COVERS=true` 时还包括封面备份；backup 不进入顶层 `segments` |
 | `inits` | `id`；`hash` 唯一 | `bytes BLOB/created_at` | backup 切片的 init 段按内容哈希共享，存原始字节；上传成功后 asset 清掉 `init_id/区间`，无引用后由 GC 删除 |
 | `jobs` | `id`；`(url, kind)` 唯一 | `kind/attempts/next_at/locked_until` | 任务队列，`kind=parse/backup/upload`；完成后删除 |
 
@@ -201,10 +201,11 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 | 变量 / secret | 默认 | 作用 |
 |---|---|---|
-| `MEDIA_BASE_URL` | 空 | 切片上传时交给存储服务的 Worker 地址前缀，**必须包含 `/api/v1` 且公网可达**；只用于切片，整片/图片/封面直传源地址 |
+| `MEDIA_BASE_URL` | 空 | 切片上传时交给存储服务的 Worker 地址前缀，**必须包含 `/api/v1` 且公网可达**；只用于 backup 切片，短视频 backup/备用图/可选封面备份直传源地址 |
 | `STORAGE_UPLOAD_URL` | 空 | 上传接口；空时上传失败（收藏仍 `ready`，只是没有备份） |
 | `STORAGE_TOKEN`（secret） | 空 | 非空时上传接口带 Bearer |
 | `STORAGE_GET_URL` | 空 | 下载接口：支持 `{id}` 占位，否则追加 `?id=<storeId>`；backup 播放只读这里 |
+| `BACKUP_COVERS` | `false` | 是否额外保存视频封面 backup；开启后封面源失效时由代理回落，默认不保存 |
 | `STORAGE_BATCH_SIZE` | `10` | 单次上传最多几条；代码硬顶 10 |
 | `STORAGE_TIMEOUT_MS` | `300000`（5 分钟） | **单次批量上传调用**等存储「复制完成并返回 id」的超时；超时按整批失败退避 |
 
@@ -285,7 +286,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 | D1 行写 | **100,000 / 天** | `INSERT/UPDATE/DELETE` 都算；**索引也会各写一行** |
 | D1 存储 | 单库 **500 MB** / 账号 **5 GB** | 只存元数据与 init，不存媒体正文 |
 | DO 请求 | **100,000 / 天** | WS 连接建立 + 入站消息（20:1 折算）+ alarm |
-| 外部存储 | 不占 Cloudflare 额度 | 切片回源 Worker 时算一次 Worker 请求；整片/图片/封面直传源站，不占 Worker |
+| 外部存储 | 不占 Cloudflare 额度 | backup 切片回源 Worker 时算一次 Worker 请求；短视频 backup/备用图直传源站；封面默认不备份，`BACKUP_COVERS=true` 时额外一份 |
 | 客户端缓存 | 不占任何服务端额度 | 只有第一次真正落到 Worker |
 
 两个容易误解的点：
@@ -393,7 +394,7 @@ cd backend-in-worker
 node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs
 ```
 
-覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket 等；当前共 62 例（60 pass / 2 个大文件用例视环境跳过）。
+覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket 等；当前共 63 例（61 pass / 2 个大文件用例视环境跳过）。
 
 大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
 以及切片服务 `:3000`；不可达时自动跳过）：

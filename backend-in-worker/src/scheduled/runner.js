@@ -248,6 +248,9 @@ async function runBackupJobs(env, cfg, now, budget) {
       const coveredImages = new Set(
         existing.filter((asset) => asset.kind === 'image' && asset.imageIndex != null).map((asset) => asset.imageIndex),
       );
+      const coveredCovers = new Set(
+        existing.filter((asset) => asset.kind === 'cover' && asset.videoIndex != null).map((asset) => asset.videoIndex),
+      );
       const primaries = assets.filter((asset) => (asset.role ?? 'primary') === 'primary' && asset.kind !== 'cover');
 
       for (const primary of primaries.filter((asset) => asset.kind === 'video')) {
@@ -349,6 +352,30 @@ async function runBackupJobs(env, cfg, now, budget) {
           slice: null,
           backupState: 'none',
         });
+      }
+
+      if (cfg.backupCovers) {
+        const covers = assets.filter(
+          (asset) => (asset.role ?? 'primary') === 'primary' && asset.kind === 'cover' && asset.videoIndex != null,
+        );
+        for (const cover of covers) {
+          if (coveredCovers.has(cover.videoIndex)) continue;
+          drafts.push({
+            kind: 'cover',
+            role: 'backup',
+            videoIndex: cover.videoIndex,
+            sliceIndex: null,
+            imageIndex: null,
+            title: '',
+            quality: '',
+            durationMs: 0,
+            sourceUrl: cover.sourceUrl,
+            etag: cover.etag,
+            fileSize: cover.fileSize,
+            slice: null,
+            backupState: 'none',
+          });
+        }
       }
 
       const statements = [];

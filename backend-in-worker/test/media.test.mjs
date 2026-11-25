@@ -27,6 +27,7 @@ before(async () => {
   origin.state.split720 = true;
   env = createTestEnv({
     SLICE_SERVICE_URL: `${originBase}/slice`,
+    BACKUP_COVERS: 'true',
     SOURCE_CHECK_TTL_MS: '0',
     UPLOAD_WAIT_MS: '0',
     JOBS_PER_TICK: '8',
@@ -161,7 +162,7 @@ test('上传只传 backup：切片走 Worker 合成地址，备用图直传源�
   const videos = all.filter((item) => item.type === 'video');
   const images = all.filter((item) => item.type === 'image');
   assert.equal(videos.length, 2, '只应上传两个 backup 切片；primary 整片不上传');
-  assert.equal(images.length, 1, '只应上传备用图；封面不上传');
+  assert.equal(images.length, 2, '应上传备用图 + 视频封面 backup；primary 封面不上传');
   assert.ok(videos.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/`)));
   assert.ok(images.every((item) => item.media.startsWith(originBase)));
   assert.ok(all.every((item) => item.favorite?.url === videoRow.url));
@@ -234,6 +235,23 @@ test('variants 全量保存，active 只有一条且对应 primary 清晰度', a
   assert.equal(rows.results.filter((row) => Number(row.active) === 1).length, 1);
   const active = rows.results.find((row) => Number(row.active) === 1);
   assert.equal(active.quality, '1080P');
+});
+
+test('开启 BACKUP_COVERS：封面有存储备份，源失效时回落', async () => {
+  const favorite = await env.DB.prepare('SELECT id FROM favorites WHERE url = ?').bind(videoRow.url).first();
+  const coverBackup = await env.DB.prepare(
+    "SELECT store_id FROM assets WHERE favorite_id = ? AND role = 'backup' AND kind = 'cover'",
+  ).bind(favorite.id).first();
+  assert.ok(coverBackup?.store_id?.startsWith('st-'), '封面应上传到存储');
+
+  origin.state.blockPaths.add('/cover.jpg');
+  try {
+    const res = await fetchMedia(videoSegment().cover_url);
+    assert.equal(res.status, 200);
+    assert.equal((await res.arrayBuffer()).byteLength, origin.constants.IMAGE.length);
+  } finally {
+    origin.state.blockPaths.delete('/cover.jpg');
+  }
 });
 
 test('backup ready 通过 WS 推完整行', async () => {

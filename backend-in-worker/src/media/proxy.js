@@ -4,6 +4,7 @@ import {
   ensureSourceIds,
   getAsset,
   getAssetsByFavoriteIds,
+  getBackupCover,
   getVariantByKey,
   getVariantsByFavoriteIds,
   getVariantsForVideo,
@@ -287,6 +288,13 @@ export async function handleMedia(request, env, cfg, relativePath) {
     if (probe.ok) {
       const served = await proxySource(request, asset, full);
       if (served) return served;
+    }
+    if (asset.kind === 'cover' && asset.videoIndex != null) {
+      const backup = await getBackupCover(env.DB, asset.favoriteId, asset.videoIndex);
+      if (backup?.storeId) {
+        const served = await serveFromStorage(request, env, cfg, backup, full);
+        if (served) return served;
+      }
     }
     return sendMediaError(request, 502, '主源不可用，请切换备用源');
   }

@@ -98,7 +98,8 @@ test('批量上传：只传 backup，按 STORAGE_BATCH_SIZE 切批', async () =>
   assert.equal(record.upload_state, 'ready');
   assert.equal(videoSegment(row).backup.state, 'ready');
   const assets = await backupAssets(env, url);
-  assert.equal(assets.length, 3, '两个 backup 切片 + 一张备用图');
+  assert.equal(assets.length, 3, '两个 backup 切片 + 一张备用图；默认不备份封面');
+  assert.equal(assets.filter((asset) => asset.kind === 'cover').length, 0);
   assert.ok(assets.every((asset) => asset.store_id.startsWith('st-')));
 
   const batches = storage.state.requests;

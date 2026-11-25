@@ -40,7 +40,9 @@ UPLOAD_ITEMS_PER_TICK = "20"
 # 一次上传要复制 10×18MB；锁必须长于一次存储调用，否则下一轮会重复领。
 UPLOAD_JOB_LOCK_MS = "600000"
 # 外部存储服务（上传接口单次最多 10 条）
-# 只有切片上传用这个 Worker 合成地址；整片/图片/封面直接传源站地址。
+# 默认不备份视频封面；设为 "true" 后每个视频额外上传一张封面备份。
+BACKUP_COVERS = "false"
+# 只有切片上传用这个 Worker 合成地址；短视频/备用图直接传源站地址。
 MEDIA_BASE_URL = "https://REPLACE_WITH_YOUR_WORKER.workers.dev/api/v1"
 STORAGE_UPLOAD_URL = ""
 STORAGE_GET_URL = ""

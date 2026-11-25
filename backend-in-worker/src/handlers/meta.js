@@ -38,10 +38,10 @@ export function handleMeta(cfg) {
       max_attempts: cfg.uploadMaxAttempts,
       retry_ms: cfg.uploadRetryMs,
       storage: 'external',
-      covers: false,
+      covers: cfg.backupCovers,
       batch_size: cfg.storageBatchSize,
       max_slices_per_favorite: cfg.maxSlicesPerFavorite,
-      note: '只上传 backup：长视频切片、短视频整文件、备用图；primary 视频/图片/封面都不进存储。切片传 Worker 的临时合成地址，短视频/备用图直传源地址；单次最多 10 条，全部成功才把 backup 标 ready',
+      note: '只上传 backup：长视频切片、短视频整文件、备用图；开启 BACKUP_COVERS 时额外上传视频封面备份。primary 视频/图片/封面默认都不进存储。切片传 Worker 的临时合成地址，短视频/备用图/封面直传源地址；单次最多 10 条，全部成功才把 backup 标 ready',
     },
     scheduler: {
       kind: 'cron',
