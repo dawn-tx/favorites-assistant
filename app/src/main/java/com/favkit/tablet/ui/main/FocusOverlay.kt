@@ -127,11 +127,6 @@ private const val CAPTION_MAX_LINES = 2
 /** 底部抽屉的全开档 = 屏高 × 0.96：material3 的全开档贴着内容顶部，所以这一档由内容高度决定 */
 private const val SHEET_FULL_FRACTION = 0.96f
 
-/** 滑到首/末条还继续抹时的提示停留时长 */
-private const val EDGE_HINT_MS = 1_200L
-/** 页码没变时，至少往边界方向拖出这么多页宽才提示，避免轻碰/回弹误触 */
-private const val EDGE_DRAG_THRESHOLD = 0.06f
-
 /** 控制层左右与底部的内边距：倍速竖列要贴着播放条右边对齐，两处必须用同一组值 */
 private val CONTROLS_SIDE_PAD = 16.dp
 private val CONTROLS_BOTTOM_PAD = 12.dp
@@ -247,7 +242,6 @@ fun FocusOverlay(
                     else -> w
                 }
             }
-            val itemHint = rememberBoundaryHint(itemPagerState, "已经是第一条", "已经是最后一条")
 
             // 一屏一条，画面铺满整屏：既没有 9:16 框，也没有常驻栏来吃掉任何一条宽度
             VerticalPager(
@@ -289,8 +283,6 @@ fun FocusOverlay(
             ) {
                 Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
             }
-
-            itemHint?.let { FeedHint(it, Modifier.align(Alignment.Center)) }
 
             if (sideDetails) {
                 // 返回键先收抽屉再关遮罩：这条比 MainScreen 那条注册得晚，压得住
@@ -384,68 +376,6 @@ private fun DeletedPage() {
             color = Color(0xFFB7BDC6),
         )
     }
-}
-
-/** 滑到边界还继续抹时居中说一句，1.2s 自己走 */
-@Composable
-private fun FeedHint(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelLarge,
-        color = Color.White,
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0x99000000))
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-    )
-}
-
-/**
- * 首/末条的边界提示：手势落定后发现页码没动、而且就停在边界上，说明那一下是「还想继续滑」。
- *
- * 回弹交给 pager 默认的 overscroll，不自己画 —— 这里只补一句文字，因为光回弹看不出「已经到头了」。
- */
-@Composable
-private fun rememberBoundaryHint(state: PagerState, firstLabel: String, lastLabel: String): String? {
-    var hint by remember(state) { mutableStateOf<String?>(null) }
-    LaunchedEffect(state) {
-        var scrolling = false
-        var page = state.currentPage
-        var negative = 0f
-        var positive = 0f
-        snapshotFlow {
-            Triple(state.currentPage, state.isScrollInProgress, state.currentPageOffsetFraction)
-        }.collect { (nextPage, isScrolling, offset) ->
-            if (isScrolling) {
-                if (offset < negative) negative = offset
-                if (offset > positive) positive = offset
-            } else if (scrolling) {
-                if (nextPage == page && state.pageCount > 1) {
-                    // 只有朝边界外拖过阈值才提示：第 0 页看负向偏移，最后一页看正向偏移
-                    when {
-                        nextPage == 0 && negative <= -EDGE_DRAG_THRESHOLD -> hint = firstLabel
-                        nextPage == state.pageCount - 1 && positive >= EDGE_DRAG_THRESHOLD -> hint = lastLabel
-                    }
-                }
-                negative = 0f
-                positive = 0f
-            }
-            if (nextPage != page) {
-                negative = 0f
-                positive = 0f
-                hint = null
-            }
-            scrolling = isScrolling
-            page = nextPage
-        }
-    }
-    LaunchedEffect(hint) {
-        if (hint != null) {
-            delay(EDGE_HINT_MS)
-            hint = null
-        }
-    }
-    return hint
 }
 
 /**
@@ -643,16 +573,6 @@ private fun FeedPage(
                         ),
                 )
             }
-        }
-
-        // 翻段到头的手势在画面上，提示就贴着画面顶；换条的提示在正中，两条各说各的手势
-        rememberBoundaryHint(pagerState, "已经是第一段", "已经是最后一段")?.let {
-            FeedHint(
-                it,
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = scale.touchMin + scale.gapSm),
-            )
         }
     }
 }
@@ -1507,7 +1427,6 @@ private fun FocusInfo(
         null
     }
     val currentTitle = backupItem?.title ?: segment?.title.orEmpty()
-    val currentQuality = backupItem?.quality ?: segment?.displayQuality.orEmpty()
     val currentDuration = backupItem?.durationMs ?: segment?.durationMs ?: 0L
     val prefetchBytes = state.prefetch[favorite.id]
     val attached = favorite.tags.map { it.id }.toSet()
@@ -1545,7 +1464,6 @@ private fun FocusInfo(
         SectionDark("后台信息")
         MetaRow("作者", favorite.author.ifBlank { "—" })
         MetaRow("站点", favorite.site.ifBlank { favorite.hostLabel })
-        MetaRow("清晰度", currentQuality.takeIf { it.isNotBlank() } ?: "—")
         MetaRow("时长", if (currentDuration > 0L) formatClock(currentDuration) else "—")
         MetaRow("解析时间", formatDate(favorite.resolvedAt))
         MetaRow("收藏时间", formatDate(favorite.favoriteAt))

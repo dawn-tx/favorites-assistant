@@ -212,15 +212,14 @@ private fun BoxScope.CoverFooter(
     }
 }
 
-/** 首段（也就是封面那张）的时长：单素材顺带标清晰度，图集没有时长就不占地方 */
+/** 首段（也就是封面那张）的时长；图集没有时长就不占地方 */
 private fun HeroDuration(hero: MediaSegment?): String? {
     if (hero == null || hero.durationMs <= 0L) return null
-    val clock = formatDuration(hero.durationMs)
-    return if (hero.displayQuality.isNotBlank()) "${hero.displayQuality} · $clock" else clock
+    return formatDuration(hero.durationMs)
 }
 
 /**
- * 封面底部那条上的标签：最多露两个，剩下的收进「+N」。
+ * 封面底部那条上的标签：最多露三个，剩下的收进「+N」。
  *
  * 只做识别不当按钮用 —— 点卡片是打开遮罩层，按标签筛选在顶栏抽屉里。
  * 压在封面上就得自己垫底：半透明黑块 + 白字，浅色封面和深色封面都读得清。
@@ -261,7 +260,7 @@ private fun CardTagRow(names: List<String>) {
     }
 }
 
-private const val MAX_CARD_TAGS = 2
+private const val MAX_CARD_TAGS = 3
 
 /** 拼图区：固定 16:9，内部按素材构成换排法 */
 @Composable
