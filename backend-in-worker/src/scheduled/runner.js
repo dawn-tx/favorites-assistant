@@ -445,7 +445,7 @@ async function runBackupJobs(env, cfg, now, budget) {
         metaStatements.push(enqueueStatement(meta, row.url, 'upload'));
       }
       metaStatements.push(completeJobStatement(meta, job.id));
-      await data.batch(dataStatements);
+      if (dataStatements.length > 0) await data.batch(dataStatements);
       await meta.batch(metaStatements);
       budget.left -= 2;
       await pushFavorite(env, row.url);

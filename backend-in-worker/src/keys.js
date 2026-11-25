@@ -25,15 +25,19 @@ export function normalizeCacheKey(url) {
  * 前缀带 shard：代理只看 key 就能定位到哪个数据分片。
  */
 export async function mediaKey(secret, url, identity, version, shardCount = 1) {
-  const input = `${normalizeCacheKey(url)}|${identity}|${version ?? ''}`;
+  const normalized = normalizeCacheKey(url);
+  const input = `${normalized}|${identity}|${version ?? ''}`;
   const hex = secret ? await hmacSha256Hex(secret, input) : await sha256Hex(input);
-  return `s${shardForUrl(url, shardCount)}_${hex.slice(0, 32)}`;
+  return `s${shardForNormalized(normalized, shardCount)}_${hex.slice(0, 32)}`;
 }
 
 /** 收藏 URL 的稳定分片：FNV-1a，纯同步，sync/ingest/media 共用同一结果 */
 export function shardForUrl(url, count = 1) {
+  return shardForNormalized(normalizeCacheKey(url), count);
+}
+
+function shardForNormalized(text, count = 1) {
   const shards = Math.max(1, Math.floor(Number(count) || 1));
-  const text = normalizeCacheKey(url);
   let hash = 2166136261;
   for (let i = 0; i < text.length; i += 1) {
     hash ^= text.charCodeAt(i);

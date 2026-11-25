@@ -35,17 +35,17 @@ async function rowsWithMedia(env, rows) {
     if (!byShard.has(row.shard)) byShard.set(row.shard, []);
     byShard.get(row.shard).push(row.id);
   }
-  const assets = [];
-  const variants = [];
-  for (const [shard, ids] of byShard) {
-    const db = dataDb(env, shard);
-    const [foundAssets, foundVariants] = await Promise.all([
-      getAssetsByFavoriteIds(db, ids),
-      getVariantsByFavoriteIds(db, ids),
-    ]);
-    assets.push(...foundAssets);
-    variants.push(...foundVariants);
-  }
+  const results = await Promise.all(
+    [...byShard].map(async ([shard, ids]) => {
+      const db = dataDb(env, shard);
+      return Promise.all([
+        getAssetsByFavoriteIds(db, ids),
+        getVariantsByFavoriteIds(db, ids),
+      ]);
+    }),
+  );
+  const assets = results.flatMap(([foundAssets]) => foundAssets);
+  const variants = results.flatMap(([, foundVariants]) => foundVariants);
   const byFavorite = groupByFavorite(assets);
   const variantsByFavorite = groupVariants(variants);
   return rows.map((row) => publicRow(row, byFavorite.get(row.id) ?? [], variantsByFavorite.get(row.id) ?? []));

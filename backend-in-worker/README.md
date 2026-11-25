@@ -19,14 +19,16 @@ backend-in-worker/
 │   ├── keys.js              虚拟 key、内容版本、内容指纹
 │   ├── render.js            publicRow / primary + backup 渲染
 │   ├── policy/
-│   │   ├── index.js         汇总导出四块可替换策略
-│   │   ├── parser.js        解析服务原始字段 → ResolvedMedia
+│   │   ├── README.md        稳定契约 vs 常改适配的边界说明
+│   │   ├── index.js         汇总导出策略
+│   │   ├── parser.js        解析器配置/请求形状 + HTTP 传输
+│   │   ├── parser-normalize.js 外部字段 → ResolvedMedia
 │   │   ├── selection.js     backup 取一条可达 variant
 │   │   ├── slicing.js       远程切片服务 + 单飞
-│   │   └── storage.js       外部存储上传与下载
+│   │   ├── storage-upload.js 外部存储上传
+│   │   └── storage-download.js 外部存储下载/删除
 │   ├── probe.js             源探活（HEAD → Range 回退，带缓存）
 │   ├── parse.js             解析编排：全部 variants → primary 段
-│   ├── range.js             Range 头解析
 │   ├── budget.js            子请求预算（免费版 50 次/调用）
 │   ├── media/
 │   │   └── proxy.js         媒体代理：primary variant / backup 存储 / 上传合成
@@ -68,7 +70,7 @@ POST {STORAGE_UPLOAD_URL}
 - 返回的 id 原样写进 `assets.store_id`；只有 backup 全部上传成功，primary 的 `backup_state` 才转 `ready`。
 - **暂不处理重复**：同一文件重复上传会拿到新 id，以后接下载/删除时再按需要加本地索引。
 
-`src/policy/storage.js` 的上传已接；下载按 `STORAGE_GET_URL` 取文件：
+`src/policy/storage-upload.js` / `storage-download.js` 的上传与下载已接；下载按 `STORAGE_GET_URL` 取文件：
 
 - `STORAGE_GET_URL` 支持 `{id}` 占位；没有占位时追加 `?id=<storeId>`，Range/HEAD 原样转发。
 - 只有 backup 段走这个下载接口；primary 变体失败时先由后台换档并推新 URL，换不了才让 App 切 backup。
@@ -163,7 +165,7 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 ## 配置说明
 
 运行时配置大部分来自 `wrangler.toml` 的 `[vars]` 与 `wrangler secret`；`src/config.js` 在首次请求时解析并缓存。
-解析器的地址、令牌与超时不再走 env，直接维护在 `src/policy/parser.js` 的 `parserConfig` 里；解析器可能不止一个，以后多解析器的选择逻辑也留在该模块。
+解析器的地址、令牌与超时不再走 env，直接维护在 `src/policy/parser.js` 的 `parserConfig` 里；解析请求的参数/类型也由该模块自己决定。
 数字类变量在 TOML 里写成字符串（如 `"300000"`），留空或非法时回落到默认值。
 表里没有出现在 `wrangler.toml` 的变量，需要时直接加到 `[vars]` 即可覆盖默认值。
 `/meta` 会回显大部分生效值（`next_wait_ms`、`slice_rule`、上传批大小、调度节奏等）。

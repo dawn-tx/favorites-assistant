@@ -58,7 +58,7 @@ export async function handleSync(request, env, cfg, ctx) {
     const favoriteAt = clampFavoriteAt(optionalNumber(favorite.favorite_at, 'favorite.favorite_at', Date.now()));
 
     const outcome = await upsertFavorite(env, cfg, { url, note, tags, sourceApp, favoriteAt, sliceRule });
-    const row = await getFavorite(metaDb(env), url);
+    const row = outcome.row;
     const variants = row ? await getVariantsByFavoriteIds(dataDb(env, row.shard), [row.id]) : [];
     const favorites = row ? [publicRow(row, outcome.assets, variants)] : [];
     ctx?.waitUntil(notifyHub(env, { favorites }));
@@ -97,11 +97,12 @@ async function upsertFavorite(env, cfg, fields) {
     );
     if (!changed) {
       const assets = await getAssetsByFavoriteIds(dataDb(env, existing.shard), [existing.id]);
-      return { outcome: 'unchanged', assets };
+      return { outcome: 'unchanged', assets, row: existing };
     }
-    await updateFavoriteUserFields(meta, fields.url, next, Date.now());
+    const updatedAt = Date.now();
+    await updateFavoriteUserFields(meta, fields.url, next, updatedAt);
     const assets = await getAssetsByFavoriteIds(dataDb(env, existing.shard), [existing.id]);
-    return { outcome: 'updated', assets };
+    return { outcome: 'updated', assets, row: { ...existing, ...next, updatedAt } };
   }
   const outcome = await createFavoriteRow(meta, {
     url: fields.url,
@@ -116,7 +117,7 @@ async function upsertFavorite(env, cfg, fields) {
   if (outcome === 'created') {
     await enqueueStatement(meta, fields.url, 'parse').run();
   }
-  return { outcome, assets: [] };
+  return { outcome, assets: [], row: await getFavorite(meta, fields.url) };
 }
 
 /** favorite_at 只用来排序，夹在 [now−10 年, now+5 分钟] 里；超出就夹，不拒绝请求 */
