@@ -77,22 +77,32 @@ POST {STORAGE_UPLOAD_URL}
 
 ## 数据压缩（D1）
 
-D1 只存元数据，表结构按「重复数据只留一份」组织：
+D1 只存元数据。业务库共 6 张表：
 
-- `favorites` 不存段 key 列表；primary 顺序由 `assets.ord` 决定。
-- `sources(id, url, etag, file_size, quality)`：同一内容版本的文件信息全局一行。
-- `variants(favorite_id, video_index, variant_index, key, source_id, quality, height, active)`：
-  每个视频保存全部清晰度，只有一条 `active`；primary URL 指向 active variant。
-- `inits(id, hash, bytes BLOB)`：backup 切片的 init 段按内容哈希共享；
-  init 存**原始字节**，不存 base64（省 33% 膨胀）。
-- `assets` 有 `role=primary|backup`：primary 是视频整片/图片/封面，backup 是长视频切片、
-  短视频整文件或备用图；backup 不进入顶层 `segments`。
-- backup 切片上传成功后立即清掉 `init_id/区间`，不再按 TTL 长期保存；每天一次的 cron
-  回收无引用的 `inits` 与 `sources`（这两个回收要扫 assets 表，放每天跑是为了不吃满 D1 行读取配额）。
+| 表 | 主键 / 唯一约束 | 关键字段 | 用途与生命周期 |
+|---|---|---|---|
+| `favorites` | `id`；`url` 唯一 | `note/tags/source_app/favorite_at/updated_at/media/media_state/failed_reason/resolved_at/slice_rule/upload_*` | 一条收藏 url 一行；用户字段、内容状态与 backup 上传状态 |
+| `sources` | `id`；`(url, etag, file_size)` 唯一 | `quality/created_at` | 源文件信息去重；被 `assets.source_id` 与 `variants.source_id` 引用；无引用后由 GC 回收 |
+| `variants` | `key` 主键；每个 `(favorite_id, video_index)` 只有一条 `active` | `video_index/variant_index/source_id/quality/height/active` | 保存每个视频的全部清晰度；`key` 是该档独立虚拟 URL；换档只改 active |
+| `assets` | `key` 主键 | `favorite_id/source_id/init_id/role/kind/video_index/slice_index/image_index/ord/title/duration_ms/cover_key/start_offset/media_size/store_id/backup_state` | primary 是视频整片、图片、封面；backup 是长视频切片、短视频整文件或备用图；backup 不进入顶层 `segments` |
+| `inits` | `id`；`hash` 唯一 | `bytes BLOB/created_at` | backup 切片的 init 段按内容哈希共享，存原始字节；上传成功后 asset 清掉 `init_id/区间`，无引用后由 GC 删除 |
+| `jobs` | `id`；`(url, kind)` 唯一 | `kind/attempts/next_at/locked_until` | 任务队列，`kind=parse/backup/upload`；完成后删除 |
 
-同一测试夹具（1 视频 2 片 + 1 图 + 1 封面）实测：旧结构约 1.29KB，新结构约 0.69KB。
-注意：真实切片每片的 `init` 通常不同（`moov` 会按片重写），`inits` 去重主要作用于重复解析与跨收藏复用；
-backup 切片上传后只保留 asset 行（约 0.2KB），D1 占用会明显下降。
+逻辑关联（没有声明数据库外键）：
+
+- `favorites.id` → `assets.favorite_id` / `variants.favorite_id`
+- `sources.id` → `assets.source_id` / `variants.source_id`
+- `inits.id` → `assets.init_id`（可空，backup 上传成功后清空）
+- `jobs.url` → `favorites.url`
+
+索引：`favorites_order`、`assets_by_favorite/source/init/cleanup`、`variants_by_favorite/source`、
+`variants_one_active`（每个视频最多一条 active）、`jobs_once/jobs_ready`。
+
+压缩口径：`favorites` 不存段 key 列表；primary 顺序由 `assets.ord` 决定；`sources` 与 `inits` 去重；
+backup 切片上传后只保留 asset 行（约 0.2KB）。同一测试夹具（1 视频 2 片 + 1 图 + 1 封面）实测：
+旧结构约 1.29KB，新结构约 0.69KB。
+
+注意：真实切片每片的 `init` 通常不同（`moov` 会按片重写），`inits` 去重主要作用于重复解析与跨收藏复用。
 
 ## 部署（不在本地安装 Wrangler）
 
