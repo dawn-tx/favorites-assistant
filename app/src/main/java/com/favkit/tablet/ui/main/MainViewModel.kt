@@ -892,10 +892,10 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     }
 
     /**
-     * 手动把某条视频缓存到本地，离线也能播。
+     * 手动把某条收藏的 primary 缓存到本地，离线也能播。
      *
-     * 长视频由后台切成一组独立 mp4，所以「整片缓存」就是逐片预取：
-     * 全部片段都读到才算缓存完成，中途取消或某片失败都不标「已缓存」。
+     * primary 每个视频/图片一条；长视频是一个完整文件，读完才标「已缓存」。
+     * backup 需要切过去时按需读存储，不参与这个标记。
      * 旧后台留下的 `.m3u8` 直接拒绝 —— 整片预取要一套播放列表解析，换来的只是省一次边播边存。
      */
     fun prefetch(id: String) {

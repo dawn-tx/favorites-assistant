@@ -200,10 +200,18 @@ curl -s https://<worker>.workers.dev/api/v1/meta
 
 ### 任务队列与备份
 
+`jobs.kind` 共三类：
+
+- `parse`：解析链接，写 primary 与全部 variants；
+- `backup`：为每个视频/图片准备备用源；长视频切片、短视频整文件、图片单图；
+- `upload`：把 backup 资产上传到外部存储，全部成功后才把 primary 的 `backup_state` 置 `ready`。
+
+每日 GC 是独立 cron，不写 `jobs` 行。
+
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `JOBS_PER_TICK` | `4` | 每 3 分钟最多领几条解析任务；0 = 关闭解析（联调用） |
-| `UPLOAD_JOBS_PER_TICK` | `2` | 每 3 分钟最多领几条上传任务；0 = 关闭上传 |
+| `JOBS_PER_TICK` | `4` | 每 3 分钟分别最多领几条 `parse` / `backup` 任务；0 = 关闭解析（联调用） |
+| `UPLOAD_JOBS_PER_TICK` | `2` | 每 3 分钟最多领几条 `upload` 任务；0 = 关闭上传 |
 | `UPLOAD_ITEMS_PER_TICK` | `20` | 每条上传任务每轮最多处理几个 asset；按 `STORAGE_BATCH_SIZE` 切批 |
 | `UPLOAD_JOB_LOCK_MS` | `600000`（10 分钟） | 上传任务锁；必须长于一次存储调用，否则下一轮会重复领 |
 | `UPLOAD_MAX_ATTEMPTS` | `3` | 整条上传任务的重试次数（真失败才计次，预算用尽不计） |
@@ -375,7 +383,7 @@ cd backend-in-worker
 node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs
 ```
 
-覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket 等；当前共 60 例（大文件 2 例视环境跳过）。
+覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket 等；当前共 62 例（60 pass / 2 个大文件用例视环境跳过）。
 
 大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
 以及切片服务 `:3000`；不可达时自动跳过）：
