@@ -2,9 +2,11 @@ package com.favkit.tablet.media
 
 import android.content.Context
 import android.net.Uri
+import androidx.media3.common.C
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -12,11 +14,20 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import com.favkit.tablet.data.AppSettings
 import java.io.File
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -44,6 +55,12 @@ class MediaCache(context: Context, private val settings: AppSettings) {
     private var cache: SimpleCache = newCache(limitBytes)
     private var cachedFactory: CacheDataSource.Factory = newFactory(cache)
 
+    /** 全局 429 冷却：期间新的视频播放/预取直接不发起请求，提示条显示剩余时间 */
+    private val _throttleRemainingMs = MutableStateFlow(0L)
+    val throttleRemainingMs: StateFlow<Long> = _throttleRemainingMs.asStateFlow()
+    @Volatile private var throttleUntilMs = 0L
+    private var throttleJob: Job? = null
+
     init {
         // 容量上限来自 DataStore，放到后台协程里补一次，避免在构造期做磁盘读
         scope.launch { applyLimitFromSettings() }
@@ -61,6 +78,24 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or CacheDataSource.FLAG_BLOCK_ON_CACHE)
 
     fun mediaSourceFactory(): MediaSource.Factory = DefaultMediaSourceFactory(cachedFactory)
+        .setLoadErrorHandlingPolicy(Http429RetryPolicy(::blockThrottle))
+
+    fun remainingThrottleMs(): Long = (throttleUntilMs - System.currentTimeMillis()).coerceAtLeast(0)
+
+    private fun blockThrottle(waitMs: Long) {
+        val until = System.currentTimeMillis() + waitMs.coerceAtLeast(1_000)
+        if (until <= throttleUntilMs) return
+        throttleUntilMs = until
+        throttleJob?.cancel()
+        throttleJob = scope.launch {
+            while (true) {
+                val left = remainingThrottleMs()
+                _throttleRemainingMs.value = left
+                if (left <= 0) break
+                delay(1_000)
+            }
+        }
+    }
 
     /** blob 落在 externalCacheDir 还是内部 cacheDir 由系统给不给外部目录决定，探针要量的是同一个路径 */
     fun cacheRootPath(): String = cacheDir.absolutePath
@@ -138,10 +173,14 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         onProgress: (cached: Long) -> Unit,
         isCancelled: () -> Boolean,
     ): Long {
+        if (remainingThrottleMs() > 0) {
+            onProgress(0)
+            return 0
+        }
         val spec = dataSpecFor(url)
-        val source = cachedFactory.createDataSource()
         var written = 0L
         withContext(Dispatchers.IO) {
+            val source = cachedFactory.createDataSource()
             try {
                 source.open(spec)
                 val buffer = ByteArray(READ_CHUNK_BYTES)
@@ -155,6 +194,8 @@ class MediaCache(context: Context, private val settings: AppSettings) {
                         onProgress(written)
                     }
                 }
+            } catch (error: HttpDataSource.InvalidResponseCodeException) {
+                if (error.responseCode == 429) blockThrottle(retryAfterMs(error.headerFields))
             } catch (end: Exception) {
                 // 读到结尾、被取消或上游报错都从这里出来，已落盘的字节仍在缓存里
             } finally {
@@ -178,3 +219,37 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         private const val USER_AGENT = "FavoritesAssistant/1.0 (Android Tablet)"
     }
 }
+
+/**
+ * 播放器的 429：不重试，记录全局冷却并让当前请求失败。
+ *
+ * Retry-After 可能是秒数或 HTTP 日期；冷却期间新的播放/预取直接拦下，
+ * UI 按剩余时间提示。没有 Retry-After 时按 1 秒冷却。
+ */
+private class Http429RetryPolicy(
+    private val onThrottled: (Long) -> Unit,
+) : DefaultLoadErrorHandlingPolicy() {
+    override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+        val error = loadErrorInfo.exception
+        if (error !is HttpDataSource.InvalidResponseCodeException || error.responseCode != 429) {
+            return super.getRetryDelayMsFor(loadErrorInfo)
+        }
+        // 429 不重试：记录全局冷却，让当前请求失败、新请求直接拦下并显示倒计时。
+        onThrottled(retryAfterMs(error.headerFields))
+        return C.TIME_UNSET
+    }
+}
+
+/** Retry-After 支持秒数与 HTTP 日期；返回原始毫秒，由冷却层决定展示时长 */
+private fun retryAfterMs(headers: Map<String, List<String>>): Long {
+    val raw = headers.entries.firstOrNull { it.key.equals("retry-after", ignoreCase = true) }
+        ?.value?.firstOrNull()?.trim()
+        ?: return RETRY_DEFAULT_DELAY_MS
+    raw.toLongOrNull()?.let { return it * 1000 }
+    return runCatching {
+        val at = ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
+        (at - System.currentTimeMillis()).coerceAtLeast(0)
+    }.getOrDefault(RETRY_DEFAULT_DELAY_MS)
+}
+
+private const val RETRY_DEFAULT_DELAY_MS = 1_000L

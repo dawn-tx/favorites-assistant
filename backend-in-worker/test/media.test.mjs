@@ -139,6 +139,23 @@ test('backup 只读存储：切片 Range/HEAD 直接来自 store，不再回源'
   assert.equal(origin.state.hits, hitsBefore, 'backup 播放不应访问源站');
 });
 
+test('backup 下载 429：转成带 Retry-After 的 429，下一次恢复', async () => {
+  const item = backupItems()[0];
+  storage.state.getThrottle = 1;
+  storage.state.getRetryAfterSeconds = 1;
+  storage.state.getThrottled = 0;
+  try {
+    const res = await fetchMedia(item.url);
+    assert.equal(res.status, 429);
+    assert.equal(res.headers.get('retry-after'), '1');
+    assert.ok(storage.state.getThrottled >= 1);
+  } finally {
+    storage.state.getThrottle = 0;
+    storage.state.getRetryAfterSeconds = 0;
+  }
+  assert.equal((await fetchMedia(item.url)).status, 200);
+});
+
 test('图片/封面仍走 primary 代理；备用图来自存储', async () => {
   const image = videoRow.media.segments.find((item) => item.kind === 'image');
   const imageRes = await fetchMedia(image.url);

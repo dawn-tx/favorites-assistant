@@ -22,6 +22,11 @@ internal fun noticeOf(state: MainUiState): Notice? {
         return Notice("同步失败：$it", NoticeTint.fail, actionLabel = "重试", action = NoticeAction.RETRY_SWEEP)
     }
     state.contentRefreshError?.let { return Notice(it, NoticeTint.warn) }
+    if (state.throttleRemainingMs > 0) {
+        val seconds = ((state.throttleRemainingMs + 999) / 1000).coerceAtLeast(1)
+        val wait = if (seconds >= 60) "${seconds / 60} 分 ${seconds % 60} 秒" else "$seconds 秒"
+        return Notice("存储限流，约 $wait 后恢复", NoticeTint.warn)
+    }
     when {
         !state.online -> return Notice("离线 · 改动会先存在本机", NoticeTint.neutral)
         state.failed > 0 -> return Notice(

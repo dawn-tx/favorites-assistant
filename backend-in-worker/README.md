@@ -26,7 +26,8 @@ backend-in-worker/
 │   │   ├── selection.js     backup 取一条可达 variant
 │   │   ├── slicing.js       远程切片服务 + 单飞
 │   │   ├── storage-upload.js 外部存储上传
-│   │   └── storage-download.js 外部存储下载/删除
+│   │   ├── storage-download.js 外部存储下载/删除
+│   │   └── storage-errors.js 存储限流错误
 │   ├── probe.js             源探活（HEAD → Range 回退，带缓存）
 │   ├── parse.js             解析编排：全部 variants → primary 段
 │   ├── budget.js            子请求预算（免费版 50 次/调用）
@@ -73,6 +74,7 @@ POST {STORAGE_UPLOAD_URL}
 `src/policy/storage-upload.js` / `storage-download.js` 的上传与下载已接；下载按 `STORAGE_GET_URL` 取文件：
 
 - `STORAGE_GET_URL` 支持 `{id}` 占位；没有占位时追加 `?id=<storeId>`，Range/HEAD 原样转发。
+- 下载遇到 429 时，媒体代理返回带 `Retry-After` 的 429（`no-store`），让播放器/客户端重试，不伪装成 502。
 - 只有 backup 段走这个下载接口；primary 变体失败时先由后台换档并推新 URL，换不了才让 App 切 backup。
 - `GET /media/full/<key>` 对 backup 同样忽略 `Range`，成功固定 `200`、`Accept-Ranges: none`。
 - 删除目前仍是 no-op；删收藏/重新解析会在行删除之后调用它清理远端文件。
@@ -422,7 +424,7 @@ cd backend-in-worker
 node --test --test-concurrency=1 test/*.test.mjs
 ```
 
-覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket、双分片路由等；当前共 67 例（65 pass / 2 个大文件用例视环境跳过）。
+覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket、双分片路由等；当前共 68 例（66 pass / 2 个大文件用例视环境跳过）。
 
 大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
 以及切片服务 `:3000`；不可达时自动跳过）：

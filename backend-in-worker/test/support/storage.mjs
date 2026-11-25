@@ -21,6 +21,10 @@ export function startStorage() {
     throttle: 0,
     retryAfterSeconds: 0,
     throttled: 0,
+    /** 剩余多少次下载请求回 429；retryAfterSeconds 控制响应头 */
+    getThrottle: 0,
+    getRetryAfterSeconds: 0,
+    getThrottled: 0,
     /** 每次被接受的上传调用的时间戳，用来断言节奏 */
     callTimes: [],
   };
@@ -32,6 +36,16 @@ export function startStorage() {
       if (state.down) {
         res.writeHead(503);
         res.end();
+        return;
+      }
+      if (state.getThrottle > 0) {
+        state.getThrottle -= 1;
+        state.getThrottled += 1;
+        res.writeHead(429, {
+          'content-type': 'application/json',
+          'retry-after': String(state.getRetryAfterSeconds),
+        });
+        res.end(JSON.stringify({ error: 'download busy' }));
         return;
       }
       const file = state.files.get(url.searchParams.get('id'));

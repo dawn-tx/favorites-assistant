@@ -11,8 +11,9 @@
 | `parser-normalize.js` | 解析服务原始字段映射、去重、清晰度推断 | 返回 `ResolvedMedia` 形状：`title/author/site/summary/videos[]/images[]`；视频项的 `title/durationMs/coverUrl/variants[]`；variant 的 `url/height/quality` |
 | `selection.js` | 选档顺序、探活策略 | 返回 `{ variant, probe }`；`probe` 至少有 `ok/size/etag/rangeSupported` |
 | `slicing.js` | 切片服务请求字段映射、响应字段映射 | 返回 `{ sourceUrl, etag, fileSize, slices[] }`；每片至少有 `start/end/mediaSize/initBytes/initHash/durationMs`；`end` 是闭区间 |
+| `storage-errors.js` | 无；限流错误形状固定 | `StorageThrottleError` 必须带 `retryAfterMs`；上传/下载都用它表示 429 |
 | `storage-upload.js` | 媒体地址规则、存储上传协议细节 | `uploadAssetsToStorage(cfg,assets,favorite)` 返回与入参顺序一致的 id 数组；429 必须抛 `StorageThrottleError`（带 `retryAfterMs`）；请求体形状 `{type,media,favorite:{url,summary}}` |
-| `storage-download.js` | 下载 URL 拼接、鉴权、响应头处理 | `downloadStoredMedia` 返回 `Response | null`；转发 Range/HEAD；成功保留 content-* 与 immutable 缓存头；`null` 由代理回 502 |
+| `storage-download.js` | 下载 URL 拼接、鉴权、响应头处理 | `downloadStoredMedia` 返回 `Response | null`；转发 Range/HEAD；429 抛 `StorageThrottleError`（带 `retryAfterMs`）；成功保留 content-* 与 immutable 缓存头；`null` 由代理回 502 |
 | `index.js` | 新增策略导出 | 不要重命名已有导出；core 只从这里取策略 |
 
 ## 快速判断

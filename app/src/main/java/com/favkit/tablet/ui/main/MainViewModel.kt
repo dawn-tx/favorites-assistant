@@ -78,6 +78,8 @@ data class MainUiState(
     /** 图片磁盘缓存（Coil）实际占用，与视频缓存分开记：两者落在不同目录、清法也不同 */
     val imageBytes: Long = 0L,
     val prefetch: Map<String, Long> = emptyMap(),
+    /** 存储 429 冷却剩余时间；>0 时新视频播放/预取直接不发起 */
+    val throttleRemainingMs: Long = 0L,
     /** 设置页「存储明细」最近一次测量的原文；null = 还没测过 */
     val storageReport: String? = null,
     /** 上传器在等后台响应：顶栏按钮用它区分「正在排队」和「点了没用」 */
@@ -169,6 +171,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         bindFlows()
         viewModelScope.launch { graph.player.ended.collect { key -> advanceAfterEnd(key) } }
         viewModelScope.launch { cacheBytesFlow.value = graph.media.totalCachedBytes() }
+        viewModelScope.launch { graph.media.throttleRemainingMs.collect { v -> _state.update { it.copy(throttleRemainingMs = v) } } }
         seedRemoteCache()
     }
 
@@ -476,6 +479,11 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
                 PlaybackItem(backup.url, backup.kind, backup.title, backup.durationMs, backup.quality)
             }
         }
+        if (item.kind == MediaKind.VIDEO && graph.media.remainingThrottleMs() > 0) {
+            graph.player.pausePlayback()
+            cancelAheadPrefetch()
+            return
+        }
         val next = when (focus.sourceMode) {
             SourceMode.PRIMARY -> focus.copy(primaryRevision = item.url)
             SourceMode.BACKUP -> focus.copy(backupRevision = item.url)
@@ -500,6 +508,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private fun prefetchAhead(favorite: Favorite, focus: FocusUiState) {
         cancelAheadPrefetch()
         if (prefetches.containsKey(favorite.id)) return
+        if (graph.media.remainingThrottleMs() > 0) return
         val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
         val urls = when (focus.sourceMode) {
             SourceMode.PRIMARY -> favorite.segments
@@ -582,6 +591,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     private fun onPlayerState(player: PlayerUiState) {
         val focus = focusFlow.value ?: return
         if (player.error == null || player.itemId != focus.playerKey || focus.sourceMode != SourceMode.PRIMARY) return
+        if (graph.media.remainingThrottleMs() > 0) return
         val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
         val segment = favorite.segments.getOrNull(focus.segmentIndex) ?: return
 

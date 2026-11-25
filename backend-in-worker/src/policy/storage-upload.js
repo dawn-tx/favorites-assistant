@@ -1,4 +1,5 @@
 import { mediaPath, segmentExt } from '../keys.js';
+import { parseRetryAfter, StorageThrottleError } from './storage-errors.js';
 
 /**
  * 外部存储上传适配（常改）：存储服务协议变化时优先改这里。
@@ -33,23 +34,6 @@ export function buildUploadItems(cfg, assets, favorite) {
     media: mediaUrl(cfg, asset),
     favorite: { ...favoriteInfo },
   }));
-}
-
-export class StorageThrottleError extends Error {
-  constructor(message, retryAfterMs) {
-    super(message);
-    this.name = 'StorageThrottleError';
-    this.retryAfterMs = retryAfterMs;
-  }
-}
-
-function parseRetryAfter(value, fallbackMs) {
-  if (!value) return fallbackMs;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
-  const date = Date.parse(value);
-  if (Number.isFinite(date)) return Math.max(0, date - Date.now());
-  return fallbackMs;
 }
 
 export async function uploadAssetsToStorage(cfg, assets, favorite) {

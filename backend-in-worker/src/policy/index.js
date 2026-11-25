@@ -17,8 +17,8 @@ export { pickReachableVariant } from './selection.js';
 export { fetchSlices, fetchSlicesShared } from './slicing.js';
 export {
   MAX_BATCH,
-  StorageThrottleError,
   buildUploadItems,
   uploadAssetsToStorage,
 } from './storage-upload.js';
+export { StorageThrottleError } from './storage-errors.js';
 export { downloadStoredMedia, deleteStoredMedia } from './storage-download.js';

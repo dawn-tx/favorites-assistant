@@ -1,8 +1,11 @@
+import { parseRetryAfter, StorageThrottleError } from './storage-errors.js';
+
 /**
  * 外部存储下载/删除适配。
  *
  * 固定契约（媒体代理依赖，不要改）：
  *   - downloadStoredMedia 返回 Response 或 null；Range/HEAD 原样转发；
+ *   - 429 抛 StorageThrottleError（带 retryAfterMs），由代理转成带 Retry-After 的 429；
  *   - null 表示未配置/文件不存在/网络失败，由代理回 502；
  *   - 成功响应必须保留 content-* 与 immutable 缓存头。
  *
@@ -29,6 +32,14 @@ export async function downloadStoredMedia({ cfg, asset, request }) {
     });
   } catch {
     return null;
+  }
+  if (response.status === 429) {
+    const detail = await response.text().catch(() => '');
+    const wait = parseRetryAfter(response.headers.get('retry-after'), cfg.uploadWaitMs);
+    throw new StorageThrottleError(
+      `存储下载限流：HTTP 429${detail ? `：${detail.slice(0, 120)}` : ''}`,
+      wait,
+    );
   }
   if (response.status !== 200 && response.status !== 206) {
     await response.body?.cancel().catch(() => {});

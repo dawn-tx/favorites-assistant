@@ -15,7 +15,7 @@ import {
 import { getFavoriteById, touchFavoriteStatement } from '../store/favorites.js';
 import { dataDb, metaDb } from '../store/shards.js';
 import { createBudget } from '../budget.js';
-import { downloadStoredMedia, resolveMedia } from '../policy/index.js';
+import { downloadStoredMedia, resolveMedia, StorageThrottleError } from '../policy/index.js';
 import { publicRow } from '../render.js';
 import { notifyHub } from '../hub.js';
 
@@ -29,16 +29,15 @@ function mediaType(asset) {
   return asset.kind === 'video' ? 'video/mp4' : 'image/jpeg';
 }
 
-function sendMediaError(request, status, message) {
+function sendMediaError(request, status, message, retryAfterMs) {
   const body = new TextEncoder().encode(message);
-  return new Response(request.method === 'HEAD' ? null : body, {
-    status,
-    headers: {
-      'content-type': 'text/plain; charset=utf-8',
-      'content-length': String(body.length),
-      'cache-control': 'no-store',
-    },
-  });
+  const headers = {
+    'content-type': 'text/plain; charset=utf-8',
+    'content-length': String(body.length),
+    'cache-control': 'no-store',
+  };
+  if (retryAfterMs > 0) headers['retry-after'] = String(Math.max(1, Math.ceil(retryAfterMs / 1000)));
+  return new Response(request.method === 'HEAD' ? null : body, { status, headers });
 }
 
 /** primary 整片/图片/封面：把客户端 Range 转给源站；full 模式忽略 Range，只回 200 */
@@ -149,7 +148,15 @@ async function serveFromStorage(request, env, cfg, asset, full) {
     headers.delete('range');
     target = new Request(request, { headers });
   }
-  const response = await downloadStoredMedia({ env, cfg, asset, request: target });
+  let response;
+  try {
+    response = await downloadStoredMedia({ env, cfg, asset, request: target });
+  } catch (error) {
+    if (error instanceof StorageThrottleError) {
+      return sendMediaError(request, 429, error.message, error.retryAfterMs);
+    }
+    throw error;
+  }
   if (!response || !full) return response ?? null;
   const headers = new Headers(response.headers);
   headers.delete('content-range');
