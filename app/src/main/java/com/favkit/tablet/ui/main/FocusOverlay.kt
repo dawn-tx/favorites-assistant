@@ -129,6 +129,8 @@ private const val SHEET_FULL_FRACTION = 0.96f
 
 /** 滑到首/末条还继续抹时的提示停留时长 */
 private const val EDGE_HINT_MS = 1_200L
+/** 页码没变时，至少往边界方向拖出这么多页宽才提示，避免轻碰/回弹误触 */
+private const val EDGE_DRAG_THRESHOLD = 0.06f
 
 /** 控制层左右与底部的内边距：倍速竖列要贴着播放条右边对齐，两处必须用同一组值 */
 private val CONTROLS_SIDE_PAD = 16.dp
@@ -409,13 +411,29 @@ private fun rememberBoundaryHint(state: PagerState, firstLabel: String, lastLabe
     LaunchedEffect(state) {
         var scrolling = false
         var page = state.currentPage
-        snapshotFlow { state.currentPage to state.isScrollInProgress }.collect { (nextPage, isScrolling) ->
-            if (scrolling && !isScrolling && nextPage == page && state.pageCount > 1) {
-                hint = when (nextPage) {
-                    0 -> firstLabel
-                    state.pageCount - 1 -> lastLabel
-                    else -> null
-                } ?: hint
+        var negative = 0f
+        var positive = 0f
+        snapshotFlow {
+            Triple(state.currentPage, state.isScrollInProgress, state.currentPageOffsetFraction)
+        }.collect { (nextPage, isScrolling, offset) ->
+            if (isScrolling) {
+                if (offset < negative) negative = offset
+                if (offset > positive) positive = offset
+            } else if (scrolling) {
+                if (nextPage == page && state.pageCount > 1) {
+                    // 只有朝边界外拖过阈值才提示：第 0 页看负向偏移，最后一页看正向偏移
+                    when {
+                        nextPage == 0 && negative <= -EDGE_DRAG_THRESHOLD -> hint = firstLabel
+                        nextPage == state.pageCount - 1 && positive >= EDGE_DRAG_THRESHOLD -> hint = lastLabel
+                    }
+                }
+                negative = 0f
+                positive = 0f
+            }
+            if (nextPage != page) {
+                negative = 0f
+                positive = 0f
+                hint = null
             }
             scrolling = isScrolling
             page = nextPage
@@ -470,7 +488,7 @@ private fun FeedPage(
     }
     val activeKind = backupItem?.kind ?: current?.kind
     val activeQuality = backupItem?.quality ?: current?.displayQuality.orEmpty()
-    // 底部段条按 A 段折叠；BACKUP 的片间切换走左侧竖向片条
+    // 底部段条按 A 段折叠；BACKUP 的片间切换走右侧竖向片条
     val stripItems = remember(favorite.id, favorite.segments) { buildStripItems(favorite.segments) }
     val stripIndex = currentStripIndex(stripItems, focus.segmentIndex)
     // 图集段没有时间进度、也没有倍速可言：播放条与居中那颗键都只给视频段
@@ -570,6 +588,7 @@ private fun FeedPage(
                     SourceModeRow(
                         mode = focus.sourceMode,
                         quality = activeQuality,
+                        showQuality = activeKind == MediaKind.VIDEO,
                         backupReady = segment.backup.ready,
                         onPrimary = { viewModel.setSourceMode(SourceMode.PRIMARY) },
                         onBackup = { viewModel.setSourceMode(SourceMode.BACKUP) },
@@ -591,7 +610,7 @@ private fun FeedPage(
                     )
                 }
             }
-            // BACKUP 的片间切换收进左侧竖向片条；不再依赖旧 sliceCount
+            // BACKUP 的片间切换收进右侧竖向片条；不再依赖旧 sliceCount
             if (focus.sourceMode == SourceMode.BACKUP && backupItems.size > 1) {
                 SliceStrip(
                     items = backupItems,
@@ -600,8 +619,8 @@ private fun FeedPage(
                     scale = scale,
                     onSelect = viewModel::setBackupIndex,
                     modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .padding(start = CONTROLS_SIDE_PAD, top = scale.touchMin, bottom = scale.touchMin)
+                        .align(Alignment.CenterEnd)
+                        .padding(end = CONTROLS_SIDE_PAD, top = scale.touchMin, bottom = scale.touchMin)
                         .fillMaxHeight(0.5f),
                 )
             }
@@ -1217,9 +1236,13 @@ private fun SegmentStrip(
                 is StripItem.VideoGroup -> item.coverUrl
                 is StripItem.ImageItem -> item.segment.url
             }
-            val badge = when (item) {
-                is StripItem.VideoGroup -> if (item.sliceCount > 1) "${item.sliceCount} 段" else ""
-                is StripItem.ImageItem -> (index + 1).toString()
+            val kindLabel = when (item) {
+                is StripItem.VideoGroup -> "视频"
+                is StripItem.ImageItem -> "图片"
+            }
+            val kindIcon = when (item) {
+                is StripItem.VideoGroup -> R.drawable.ic_media_video
+                is StripItem.ImageItem -> R.drawable.ic_media_image
             }
             val clickLabel = when (item) {
                 is StripItem.VideoGroup -> "看第 ${index + 1} 个内容"
@@ -1252,17 +1275,19 @@ private fun SegmentStrip(
                     decodeDp = tileHeight,
                     modifier = Modifier.fillMaxSize(),
                 )
-                if (badge.isNotEmpty()) {
-                    Text(
-                        text = badge,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(3.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0x99000000))
-                            .padding(horizontal = 4.dp),
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(3.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xB3000000))
+                        .padding(3.dp),
+                ) {
+                    Icon(
+                        painter = painterResource(kindIcon),
+                        contentDescription = kindLabel,
+                        tint = Color.White,
+                        modifier = Modifier.size(11.dp),
                     )
                 }
             }
@@ -1277,6 +1302,7 @@ private fun SegmentStrip(
 private fun SourceModeRow(
     mode: SourceMode,
     quality: String,
+    showQuality: Boolean,
     backupReady: Boolean,
     onPrimary: () -> Unit,
     onBackup: () -> Unit,
@@ -1289,13 +1315,15 @@ private fun SourceModeRow(
     ) {
         SourceChip("主源", mode == SourceMode.PRIMARY, true, onPrimary)
         SourceChip("备用", mode == SourceMode.BACKUP, backupReady, onBackup)
-        Text(
-            text = quality.ifBlank { "清晰度 —" },
-            style = MaterialTheme.typography.labelSmall,
-            color = Color(0xC7FFFFFF),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        if (showQuality) {
+            Text(
+                text = quality.ifBlank { "清晰度 —" },
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xC7FFFFFF),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -1319,7 +1347,7 @@ private fun SourceChip(label: String, selected: Boolean, enabled: Boolean, onCli
 }
 
 /**
- * 左侧竖向片条：BACKUP 视频的片间切换。
+ * 右侧竖向片条：BACKUP 视频的片间切换。
  *
  * 同一视频的备用切片共用主源封面，先用「封面 + 片序号」区分；当前片高亮并自动滚进视野。
  */

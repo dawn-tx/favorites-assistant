@@ -354,7 +354,9 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     fun showSegment(index: Int) {
         val focus = focusFlow.value ?: return
         val favorite = _state.value.items.firstOrNull { it.id == focus.itemId } ?: return
-        if (index !in favorite.segments.indices || index == focus.segmentIndex && focus.sourceMode == SourceMode.PRIMARY) return
+        // 同段不处理：pager 在 BACKUP 模式下回弹/轻拖也会回调这里，
+        // 不能因为「页码没变」就把它重置回 PRIMARY。
+        if (index !in favorite.segments.indices || index == focus.segmentIndex) return
         cancelAheadPrefetch()
         val segment = favorite.segments[index]
         val next = FocusUiState(focus.itemId, index, primaryRevision = segment.url)

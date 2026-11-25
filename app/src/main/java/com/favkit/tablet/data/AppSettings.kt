@@ -101,8 +101,8 @@ class AppSettings(context: Context) {
         const val DEFAULT_UPLOAD_INTERVAL_MS = 3_000L
         const val MAX_UPLOAD_INTERVAL_MS = 600_000L
 
-        /** 与切片服务的默认规则一致：每片 2MB、关键帧对齐 */
-        const val DEFAULT_SLICE_BYTES = 2_000_000L
+        /** 与切片服务的默认规则一致：每片 18MiB、关键帧对齐 */
+        const val DEFAULT_SLICE_BYTES = 18_874_368L
         const val MIN_SLICE_BYTES = 1_000_000L
         const val MAX_SLICE_BYTES = 1_024_000_000L
     }
