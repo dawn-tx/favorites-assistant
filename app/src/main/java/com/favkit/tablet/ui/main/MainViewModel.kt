@@ -17,6 +17,7 @@ import com.favkit.tablet.floating.FloatingDraftStore
 import com.favkit.tablet.floating.FloatingSaveUseCase
 import com.favkit.tablet.floating.PanelStatus
 import com.favkit.tablet.floating.SaveOutcome
+import com.favkit.tablet.media.MediaOrigin
 import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.net.LookupOutcome
 import com.favkit.tablet.net.PullOutcome
@@ -70,6 +71,8 @@ data class MainUiState(
     val showFilters: Boolean = false,
     val checked: Set<String> = emptySet(),
     val player: PlayerUiState = PlayerUiState(),
+    /** 最近一次真实加载来源，键是绝对媒体 URL；用于播放器/图片角标 */
+    val mediaOrigins: Map<String, MediaOrigin> = emptyMap(),
     val online: Boolean = true,
     val queued: Int = 0,
     /** 队列里重试耗尽/被后台拒绝、需要用户动手的那部分 */
@@ -172,6 +175,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         viewModelScope.launch { graph.player.ended.collect { key -> advanceAfterEnd(key) } }
         viewModelScope.launch { cacheBytesFlow.value = graph.media.totalCachedBytes() }
         viewModelScope.launch { graph.media.throttleRemainingMs.collect { v -> _state.update { it.copy(throttleRemainingMs = v) } } }
+        viewModelScope.launch { graph.media.origins.collect { v -> _state.update { it.copy(mediaOrigins = v) } } }
         seedRemoteCache()
     }
 
@@ -904,7 +908,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
     /**
      * 手动把某条收藏的 primary 缓存到本地，离线也能播。
      *
-     * primary 每个视频/图片一条；长视频是一个完整文件，读完才标「已缓存」。
+     * primary 每个视频/图片一条；primary 视频是一个完整文件，读完才标「已缓存」。
      * backup 需要切过去时按需读存储，不参与这个标记。
      * 旧后台留下的 `.m3u8` 直接拒绝 —— 整片预取要一套播放列表解析，换来的只是省一次边播边存。
      */
@@ -1079,7 +1083,7 @@ class MainViewModel private constructor(private val graph: AppGraph) : ViewModel
         /** 一页收藏的条数：够铺两三屏，又不至于一次把几年的收藏全拽下来 */
         private const val PAGE_SIZE = 50
 
-        /** 自动预取的滚动窗口：只提前 3 片，避免长视频把缓存挤空 */
+        /** 自动预取的滚动窗口：只提前 3 片，避免大文件把缓存挤空 */
         private const val AUTO_PREFETCH_AHEAD = 3
 
         fun factory(graph: AppGraph) = viewModelFactory {

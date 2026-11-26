@@ -258,7 +258,7 @@ fun SettingsSheet(
                             label = { Text("每片大小（MB）") },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            supportingText = { Text("范围 1–1024MB；同时作为“长视频”的判定阈值。") },
+                            supportingText = { Text("范围 1–1024MB；作为 backup 切片阈值。") },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = scale.touchMin),

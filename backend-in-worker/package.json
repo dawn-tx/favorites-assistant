@@ -5,7 +5,13 @@
   "description": "收藏助手个人版后台：Cloudflare Worker + D1（元数据）+ 外部存储（媒体转存）",
   "scripts": {
     "dev:local": "node dev/local-server.mjs",
-    "test": "node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs test/ws.test.mjs test/shard.test.mjs",
+    "dev:admin": "npm --prefix pages run dev",
+    "build:admin": "npm --prefix pages install --registry=https://registry.npmjs.org && npm --prefix pages run build",
+    "deploy": "wrangler deploy",
+    "test": "node --test --test-concurrency=1 test/server.test.mjs test/media.test.mjs test/ingest.test.mjs test/upload.test.mjs test/budget.test.mjs test/ws.test.mjs test/shard.test.mjs test/admin.test.mjs",
     "test:large": "node --test test/large-file.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.107.0"
   }
 }

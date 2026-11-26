@@ -1,4 +1,4 @@
-import { mediaPath, segmentExt } from '../keys.js';
+import { publicMediaPath, segmentExt } from '../keys.js';
 import { parseRetryAfter, StorageThrottleError } from './storage-errors.js';
 
 /**
@@ -10,18 +10,19 @@ import { parseRetryAfter, StorageThrottleError } from './storage-errors.js';
  *   - 返回与入参顺序一致的 id 字符串数组；
  *   - 429 抛 StorageThrottleError（带 retryAfterMs），其它失败抛普通 Error。
  *
- * media 地址规则是可调策略：切片走 Worker 合成地址；短视频/图片/备用封面直传源地址。
+ * media 地址规则是可调策略：默认所有 backup 都走 Worker 代理；
+ * 关闭 STORAGE_MEDIA_VIA_WORKER 后，整段/图片/封面直传源地址，切片仍必须走 Worker 合成地址。
  */
 const MAX_BATCH = 10;
 
 function mediaUrl(cfg, asset) {
-  if (asset.sliceIndex == null) {
+  if (asset.sliceIndex == null && !cfg.storageMediaViaWorker) {
     if (!asset.sourceUrl) throw new Error('素材缺少源地址，无法直传存储');
     return asset.sourceUrl;
   }
   const base = String(cfg.mediaBaseUrl ?? '').replace(/\/+$/, '');
-  if (!base) throw new Error('未配置 MEDIA_BASE_URL（切片上传需要 Worker 的合成地址）');
-  return `${base}${mediaPath(asset.key, segmentExt(asset.kind))}`;
+  if (!base) throw new Error('未配置 MEDIA_BASE_URL（上传代理需要 Worker 的公网地址）');
+  return `${base}${publicMediaPath(asset.key, segmentExt(asset.kind), true)}`;
 }
 
 export function buildUploadItems(cfg, assets, favorite) {

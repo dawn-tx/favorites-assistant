@@ -51,6 +51,11 @@ export function mediaPath(key, ext) {
   return `/media/${key}${ext}`;
 }
 
+/** 对外只有一个媒体路径；c_ / n_ 是 Worker 内部缓存路由标记，App 不需要关心 */
+export function publicMediaPath(key, ext, cacheable) {
+  return `/media/${cacheable ? 'c_' : 'n_'}${key}${ext}`;
+}
+
 export function segmentExt(kind) {
   return kind === 'video' ? '.mp4' : '.jpg';
 }

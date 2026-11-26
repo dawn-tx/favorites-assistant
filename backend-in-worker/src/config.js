@@ -14,6 +14,9 @@ export const DEFAULT_SLICE_RULE = {
   limit: 20_000_000,
 };
 
+/** primary 视频是否进入 Workers Cache 的独立阈值；0 = 不缓存 primary 视频 */
+export const DEFAULT_PRIMARY_CACHE_MAX_BYTES = 18_874_368;
+
 /** 探源与调解析服务时使用的 UA：取 Chrome 157 桌面版（2026-11 稳定版）的常规写法 */
 export const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
@@ -59,6 +62,8 @@ export function loadConfig(env = {}) {
 
   const cfg = {
     basePath: trimSlash(env.BASE_PATH ?? '/api/v1') || '/api/v1',
+    // 管理台独立子域；为空时只在本地/测试放开，生产建议填 admin.example.com
+    adminHost: String(env.ADMIN_HOST ?? '').trim().toLowerCase(),
     // 没有 DB_1 时是单库测试/本地模式，所有分片都回落到 DB
     shardCount: env.DB_1 ? int(env.SHARD_COUNT, 9, 1) : 1,
     syncToken: typeof env.SYNC_TOKEN === 'string' ? env.SYNC_TOKEN : '',
@@ -84,8 +89,12 @@ export function loadConfig(env = {}) {
     sourceProbeMs: int(env.SOURCE_PROBE_MS, 5_000),
     sourceCheckTtlMs: int(env.SOURCE_CHECK_TTL_MS, 60_000),
 
-    // 外部存储服务：只有切片视频要回源 Worker 的合成地址，所以这个前缀只服务切片上传
+    // 外部存储服务：默认所有 backup 都回源 Worker 的代理/合成地址；
+    // 关闭后只有切片仍必须走 Worker，整段/图片/封面恢复直传源站。
     mediaBaseUrl: String(env.MEDIA_BASE_URL ?? '').replace(/\/+$/, ''),
+    storageMediaViaWorker: bool(env.STORAGE_MEDIA_VIA_WORKER, true),
+    // primary 视频可缓存阈值；backup 全部走缓存，不受这个值影响
+    primaryCacheMaxBytes: int(env.PRIMARY_CACHE_MAX_BYTES, DEFAULT_PRIMARY_CACHE_MAX_BYTES, 0),
     storageUploadUrl: env.STORAGE_UPLOAD_URL || '',
     storageGetUrl: env.STORAGE_GET_URL || '',
     storageToken: env.STORAGE_TOKEN || '',

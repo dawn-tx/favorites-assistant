@@ -29,6 +29,22 @@ function mediaType(asset) {
   return asset.kind === 'video' ? 'video/mp4' : 'image/jpeg';
 }
 
+/** backup 全部是存储回源，全部允许进缓存；primary 视频只看阈值。 */
+function cacheableAsset(asset, cfg) {
+  if (asset.role === 'backup') return true;
+  if (asset.kind === 'image' || asset.kind === 'cover') return true;
+  if (asset.kind === 'video') {
+    const size = Number(asset.fileSize ?? 0);
+    return cfg.primaryCacheMaxBytes > 0 && size > 0 && size <= cfg.primaryCacheMaxBytes;
+  }
+  return false;
+}
+
+function cacheableVariant(variant, cfg) {
+  const size = Number(variant.fileSize ?? 0);
+  return cfg.primaryCacheMaxBytes > 0 && size > 0 && size <= cfg.primaryCacheMaxBytes;
+}
+
 function sendMediaError(request, status, message, retryAfterMs) {
   const body = new TextEncoder().encode(message);
   const headers = {
@@ -79,7 +95,7 @@ async function proxySource(request, asset, full) {
 
 /** backup 上传阶段（还没有 store_id）：Worker 现合成 init + 源区间，供存储回源复制 */
 async function serveBackupForUpload(asset) {
-  if (!asset.slice) return null;
+  if (!asset.slice) return serveSourceForUpload(asset);
   const init = asset.slice.initBytes;
   const start = asset.slice.start;
   const end = asset.slice.end;
@@ -106,6 +122,34 @@ async function serveBackupForUpload(asset) {
       'cache-control': MEDIA_CACHE_CONTROL,
     },
   });
+}
+
+/** 整段/图片/封面 backup 上传：把源站完整文件流式转给存储，不在这里做 Range */
+async function serveSourceForUpload(asset) {
+  if (!asset.sourceUrl) return null;
+  let upstream;
+  try {
+    upstream = await fetch(asset.sourceUrl, {
+      headers: { 'accept-encoding': 'identity' },
+      redirect: 'follow',
+    });
+  } catch {
+    markSourceDead(asset.sourceUrl);
+    return null;
+  }
+  if (upstream.status !== 200) {
+    markSourceDead(asset.sourceUrl);
+    return null;
+  }
+  const headers = new Headers({
+    'content-type': upstream.headers.get('content-type') || mediaType(asset),
+    'cache-control': MEDIA_CACHE_CONTROL,
+  });
+  for (const name of ['content-length', 'etag', 'last-modified']) {
+    const value = upstream.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  return new Response(upstream.body, { status: 200, headers });
 }
 
 function concatStream(prefix, upstreamBody) {
@@ -171,7 +215,7 @@ function sameContent(variant, probe) {
   return true;
 }
 
-async function pushRow(env, favoriteId) {
+async function pushRow(env, favoriteId, cfg) {
   const favorite = await getFavoriteById(metaDb(env), favoriteId);
   if (!favorite) return;
   const data = dataDb(env, favorite.shard);
@@ -179,7 +223,7 @@ async function pushRow(env, favoriteId) {
     getAssetsByFavoriteIds(data, [favoriteId]),
     getVariantsByFavoriteIds(data, [favoriteId]),
   ]);
-  await notifyHub(env, { favorites: [publicRow(favorite, assets, variants)] });
+  await notifyHub(env, { favorites: [publicRow(favorite, assets, variants, cfg.primaryCacheMaxBytes)] });
 }
 
 /** key 前缀带 shard；旧 key 没有前缀时回落到单库 */
@@ -199,14 +243,14 @@ async function rebindVariantSource(env, favorite, requested, candidate) {
 }
 
 /** 切到另一档：active 换人，primary URL 随之变化；推完整行让 App 重新装载 */
-async function promoteVariant(env, favorite, candidate) {
+async function promoteVariant(env, favorite, candidate, cfg) {
   const data = dataDb(env, favorite.shard);
   await data.batch([
     ...activateVariantStatements(data, favorite.id, candidate.videoIndex, candidate.key),
     updatePrimaryVideoSourceStatement(data, favorite.id, candidate.videoIndex, candidate.sourceId),
   ]);
   await touchFavoriteStatement(metaDb(env), favorite.url).run();
-  await pushRow(env, favorite.id);
+  await pushRow(env, favorite.id, cfg);
 }
 
 /** 同档重新解析：只接受 etag/大小相同的同内容，避免在 immutable URL 下换字节 */
@@ -269,7 +313,7 @@ async function serveVariant(request, env, cfg, variant, full, budget) {
       if (served) return served;
       continue;
     }
-    await promoteVariant(env, favorite, candidate);
+    await promoteVariant(env, favorite, candidate, cfg);
     return sendMediaError(request, 502, '主源已切换，请按新地址重试');
   }
 
@@ -285,7 +329,24 @@ async function serveVariant(request, env, cfg, variant, full, budget) {
  * 媒体流不带 Bearer：ExoPlayer 与 Coil 都不会加 header，所以虚拟地址本身就是凭据。
  * key 由不可逆哈希派生且只存在于后台；这里只服务已登记的 key，不构成任意 URL 转发。
  */
-export async function handleMedia(request, env, cfg, relativePath) {
+export async function handleMedia(request, env, cfg, relativePath, cacheOnly = false) {
+  const response = await handleMediaUncached(request, env, cfg, relativePath, cacheOnly);
+  return mediaCors(response);
+}
+
+/** 管理台的检查/预热按钮从另一个子域读取 cf-cache-status，需要暴露这几个响应头。 */
+function mediaCors(response) {
+  const headers = new Headers(response.headers);
+  headers.set('access-control-allow-origin', '*');
+  headers.set('access-control-expose-headers', 'cf-cache-status, age, content-length, accept-ranges, content-range');
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+async function handleMediaUncached(request, env, cfg, relativePath, cacheOnly = false) {
   const fullMatch = /^\/media\/full\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
   const match = fullMatch ?? /^\/media\/([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?$/.exec(relativePath);
   if (!match) return sendMediaError(request, 404, '未知的素材地址');
@@ -295,6 +356,7 @@ export async function handleMedia(request, env, cfg, relativePath) {
   const asset = await getAsset(db, match[1]);
 
   if (asset) {
+    if (cacheOnly && !cacheableAsset(asset, cfg)) return sendMediaError(request, 404, '该素材不走缓存入口');
     if (asset.role === 'backup') {
       if (asset.storeId) {
         const backup = await serveFromStorage(request, env, cfg, asset, full);
@@ -320,5 +382,6 @@ export async function handleMedia(request, env, cfg, relativePath) {
 
   const variant = await getVariantByKey(db, match[1]);
   if (!variant) return sendMediaError(request, 404, '素材地址不存在或已过期');
+  if (cacheOnly && !cacheableVariant(variant, cfg)) return sendMediaError(request, 404, '该素材不走缓存入口');
   return serveVariant(request, env, cfg, variant, full, budget);
 }

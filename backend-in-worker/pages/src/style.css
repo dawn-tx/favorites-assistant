@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #f6f7f9;
+  color: #0f172a;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: #c7d2fe;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.card {
+  border: 1px solid rgb(226 232 240 / 0.9);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+}
+
+.card-muted {
+  border: 1px solid rgb(226 232 240 / 0.8);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.page-enter-from,
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.drawer-enter-active,
+.drawer-leave-active {
+  transition: opacity 180ms ease;
+}
+
+.drawer-enter-active .drawer-panel,
+.drawer-leave-active .drawer-panel {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.drawer-enter-from,
+.drawer-leave-to {
+  opacity: 0;
+}
+
+.drawer-enter-from .drawer-panel,
+.drawer-leave-to .drawer-panel {
+  transform: translateX(24px);
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(203 213 225) transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgb(203 213 225);
+  background-clip: padding-box;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #eef2f7 25%, #f8fafc 37%, #eef2f7 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.3s ease infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

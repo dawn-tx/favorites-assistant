@@ -64,7 +64,7 @@ export async function runScheduled(env, cfg, now = Date.now(), budgetLeft = SUBR
 }
 
 /** 一条收藏的最新完整行：解析完成、备份状态变化、上传收尾都走它推 WS */
-async function pushFavorite(env, url) {
+async function pushFavorite(env, url, cfg) {
   const row = (await getFavoritesByUrls(metaDb(env), [url]))[0];
   if (!row) return;
   const data = dataDb(env, row.shard);
@@ -72,7 +72,7 @@ async function pushFavorite(env, url) {
     getAssetsByFavoriteIds(data, [row.id]),
     getVariantsByFavoriteIds(data, [row.id]),
   ]);
-  await notifyHub(env, { favorites: [publicRow(row, assets, variants)] });
+  await notifyHub(env, { favorites: [publicRow(row, assets, variants, cfg.primaryCacheMaxBytes)] });
 }
 
 async function runParseJobs(env, cfg, now, budget) {
@@ -119,7 +119,7 @@ async function runParseJobs(env, cfg, now, budget) {
         await deleteStoredMedia({ env, cfg, storeIds: staleStoreIds }).catch(() => {});
       }
       // 内容就绪立刻推给在线设备
-      await pushFavorite(env, row.url);
+      await pushFavorite(env, row.url, cfg);
       done += 1;
     } catch (error) {
       if (error?.budgetExhausted) {
@@ -214,7 +214,7 @@ async function handleParseFailure(env, cfg, row, job, error) {
     await meta.batch([markFavoriteFailedStatement(meta, row.url, error.message), completeJobStatement(meta, job.id)]);
     // 失败也要让列表知道（显示原因、停止「准备中」）
     try {
-      await pushFavorite(env, row.url);
+      await pushFavorite(env, row.url, cfg);
     } catch {
       // 推送失败不影响失败落库
     }
@@ -448,7 +448,7 @@ async function runBackupJobs(env, cfg, now, budget) {
       if (dataStatements.length > 0) await data.batch(dataStatements);
       await meta.batch(metaStatements);
       budget.left -= 2;
-      await pushFavorite(env, row.url);
+      await pushFavorite(env, row.url, cfg);
       prepared += 1;
     } catch (error) {
       if (error?.budgetExhausted) {
@@ -586,7 +586,7 @@ async function finishUploadJob(env, cfg, row, job, assets, failures, budgetExhau
       setUploadStateStatement(meta, row.url, 'ready', 0, 0),
       completeJobStatement(meta, job.id),
     ]);
-    await pushFavorite(env, row.url);
+    await pushFavorite(env, row.url, cfg);
     return;
   }
   if (budgetExhausted) {
@@ -607,7 +607,7 @@ async function finishUploadJob(env, cfg, row, job, assets, failures, budgetExhau
       setUploadStateStatement(meta, row.url, state, attempts, 0),
       completeJobStatement(meta, job.id),
     ]);
-    await pushFavorite(env, row.url);
+    await pushFavorite(env, row.url, cfg);
     return;
   }
   const nextAt = Date.now() + cfg.uploadRetryMs * attempts;

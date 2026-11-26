@@ -51,7 +51,7 @@ data class MediaDto(
 )
 
 /**
- * 解析出来的单个素材。[url] 是后台的虚拟地址（`/media/<key>.mp4`），
+ * 解析出来的单个素材。[url] 是后台的虚拟地址（统一为 `/media/<key>.mp4`；c_/n_ 是后台内部缓存标记），
  * App 用设置里的接口地址拼成绝对地址；视频段与图片段共用这一个字段。
  */
 @Serializable
@@ -112,13 +112,13 @@ data class SyncRequest(
     @SerialName("device_id") val deviceId: String,
     @SerialName("sent_at") val sentAt: Long,
     val ops: List<OpDto>,
-    /** 长视频切片规则。后台按行保存，B 回调等没有规则的入口用后台默认值 */
+    /** backup 切片规则。后台按行保存，B 回调等没有规则的入口用后台默认值 */
     @SerialName("slice_rule") val sliceRule: SliceRuleDto? = null,
 )
 
 /**
  * 切片规则：只由 App 的设置页产生，只支持按大小，切点由后台固定为关键帧对齐。
- * [bytes] 同时是“长视频”的判定阈值与每片的大小上限。
+ * [bytes] 是 backup 是否切片的阈值，也是每片的大小上限。
  */
 @Serializable
 data class SliceRuleDto(

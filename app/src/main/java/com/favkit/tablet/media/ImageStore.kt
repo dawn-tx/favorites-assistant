@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 
 /**
  * 图片磁盘缓存（Coil 那份）的落点、容量上限与开关口。
@@ -72,6 +73,7 @@ class ImageStore(context: Context, private val settings: AppSettings) {
             val cache = disk
             if (cache != null) {
                 runCatching { urls.forEach { url -> cache.remove(url) } }
+                urls.forEach(MediaOriginTracker::forget)
             }
         }
     }
@@ -100,6 +102,7 @@ class ImageStore(context: Context, private val settings: AppSettings) {
         withContext(Dispatchers.IO) {
             val old = app.imageLoader
             val fresh = ImageLoader.Builder(app)
+                .okHttpClient(originClient)
                 .diskCache(
                     DiskCache.Builder()
                         .directory(File(app.cacheDir, DIR_NAME))
@@ -118,6 +121,20 @@ class ImageStore(context: Context, private val settings: AppSettings) {
         private const val DIR_NAME = "image_cache"
         private const val MB = 1024L * 1024L
 
+        /** 图片网络请求只做一件事：把 Cloudflare 的缓存结果记到来源表。 */
+        private val originClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    val response = chain.proceed(chain.request())
+                    recordImageOrigin(
+                        chain.request().url.toString(),
+                        response.header("cf-cache-status"),
+                    )
+                    response
+                }
+                .build()
+        }
+
         /** 默认 32MB：按实测每条收藏 ~250KB 图片，够放一百多条的封面与图集 */
         const val DEFAULT_LIMIT_MB = 32L
         const val DEFAULT_BYTES: Long = DEFAULT_LIMIT_MB * MB
@@ -134,6 +151,7 @@ class ImageStore(context: Context, private val settings: AppSettings) {
             val app = context.applicationContext
             Coil.setImageLoader(ImageLoaderFactory {
                 ImageLoader.Builder(app)
+                    .okHttpClient(originClient)
                     .diskCache(
                         DiskCache.Builder()
                             .directory(File(app.cacheDir, DIR_NAME))

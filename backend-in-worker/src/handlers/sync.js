@@ -60,7 +60,7 @@ export async function handleSync(request, env, cfg, ctx) {
     const outcome = await upsertFavorite(env, cfg, { url, note, tags, sourceApp, favoriteAt, sliceRule });
     const row = outcome.row;
     const variants = row ? await getVariantsByFavoriteIds(dataDb(env, row.shard), [row.id]) : [];
-    const favorites = row ? [publicRow(row, outcome.assets, variants)] : [];
+    const favorites = row ? [publicRow(row, outcome.assets, variants, cfg.primaryCacheMaxBytes)] : [];
     ctx?.waitUntil(notifyHub(env, { favorites }));
     const wait = nextWaitMs(cfg);
     return jsonResponse(

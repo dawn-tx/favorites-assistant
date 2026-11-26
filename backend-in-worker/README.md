@@ -1,131 +1,294 @@
 # 收藏助手后台 · Cloudflare Worker 版
 
-与 [mock-server](../mock-server/server.mjs) **同一套 HTTP 协议**（见 [同步后台接口说明](../docs/同步后台接口说明.md)），
-差别只在部署形态：没有常驻进程、没有本地磁盘，元数据落 D1，媒体备份交给**外部存储服务**转存，
-后台任务由 cron 驱动。App 不需要改字段或地址，只要把设置页的接口地址换成
-`https://<worker>.workers.dev/api/v1`。
+与 [mock-server](../mock-server/server.mjs) 共用一套 HTTP 协议（见 [同步后台接口说明](../docs/同步后台接口说明.md)）。
+Worker 版没有常驻进程和本地磁盘：元数据落 D1，媒体副本交给外部存储，后台任务由 cron 驱动。
 
-## 目录
+App 只需要把接口地址指向 Worker 的 `/api/v1`。生产建议使用自定义域名，例如：
 
-```
+- `api.example.com`：App / 媒体
+- `admin.example.com`：管理台，Cloudflare Access 保护
+
+## 1. 目录
+
+```text
 backend-in-worker/
-├── wrangler.toml            Worker 配置：D1、cron、vars
+├── wrangler.toml            D1、cron、vars、assets、per-entrypoint cache
+├── pages/                   Vue 3 + Vite 管理台（构建到 pages/dist）
 ├── src/
-│   ├── index.js             入口：路由分发 + cron 入口
+│   ├── entry.js             Worker 导出：default + LibraryHub + MediaCache
+│   ├── index.js             默认入口：路由分发 + cron
+│   ├── media-cache.js       只处理 c_ 标记的 Workers Cache entrypoint
 │   ├── config.js            运行参数与默认值
 │   ├── http.js              JSON 响应、请求体、鉴权、游标
 │   ├── validate.js          字段校验
-│   ├── hash.js              WebCrypto（SHA-256 / HMAC / base64）
-│   ├── keys.js              虚拟 key、内容版本、内容指纹
+│   ├── hash.js              WebCrypto
+│   ├── keys.js              key、普通/缓存媒体路径、内容版本
 │   ├── render.js            publicRow / primary + backup 渲染
-│   ├── policy/
-│   │   ├── README.md        稳定契约 vs 常改适配的边界说明
-│   │   ├── index.js         汇总导出策略
-│   │   ├── parser.js        解析器配置/请求形状 + HTTP 传输
-│   │   ├── parser-normalize.js 外部字段 → ResolvedMedia
-│   │   ├── selection.js     backup 取一条可达 variant
-│   │   ├── slicing.js       远程切片服务 + 单飞
-│   │   ├── storage-upload.js 外部存储上传
-│   │   ├── storage-download.js 外部存储下载/删除
-│   │   └── storage-errors.js 存储限流错误
-│   ├── probe.js             源探活（HEAD → Range 回退，带缓存）
-│   ├── parse.js             解析编排：全部 variants → primary 段
-│   ├── budget.js            子请求预算（免费版 50 次/调用）
-│   ├── media/
-│   │   └── proxy.js         媒体代理：primary variant / backup 存储 / 上传合成
-│   ├── store/
-│   │   ├── schema.sql       D1 建表
-│   │   ├── mappers.js       D1 行 <-> 领域对象
-│   │   ├── favorites.js     收藏读写与分页
-│   │   ├── assets.js        资产与 variants 读写
-│   │   └── jobs.js          任务队列（D1 + 锁）
-│   ├── handlers/            sync / favorites / resolve / ingest / meta
-│   └── scheduled/runner.js  解析、备份准备、上传、GC、删收藏
-└── test/                    node:sqlite 模拟 D1、桥接 + 桩存储跑完整链路
+│   ├── policy/              parser、selection、slicing、storage 适配
+│   ├── probe.js             源探活
+│   ├── parse.js             解析编排
+│   ├── budget.js            子请求预算
+│   ├── media/proxy.js       媒体代理、上传合成、缓存守卫、CORS
+│   ├── store/               D1 schema、mappers、favorites、assets、jobs
+│   ├── handlers/            sync / favorites / resolve / ingest / meta / admin
+│   └── scheduled/runner.js  解析、备份、上传、GC、删除
+├── test/                    node:sqlite + 本地桥接 + 桩存储
+└── pages/README.md          管理台开发说明
 ```
 
-## 外部存储怎么接
+## 2. 核心模型
 
-上传时按素材类型决定传给存储服务的地址，**只传 backup**：
+### 2.1 primary 和 backup
 
-- **backup 切片**：传本 Worker 的临时合成地址（`init + 源区间`），存储服务回源 Worker 拿到可直接播放的完整片；
-- **短视频 backup / 备用图**：直接传源站地址，不再经过 Worker；
-- **primary**（视频整片、图片、封面）永不上传；`BACKUP_COVERS=true` 时会额外生成一份封面 backup，仅供封面源失效时回落。
+- **primary**：源站返回的视频/图片。来源是解析服务保存的 variants，每个视频只有一条 active，primary 始终是完整文件。
+- **backup**：上传到外部存储的副本。视频是否切片由 `slice_rule.bytes` / `DEFAULT_SLICE_RULE` 阈值决定：
+  - 源文件超过切片阈值：拆成多个独立 mp4 切片；
+  - 未超过：一个整文件；
+  - 图片：单图；
+  - `BACKUP_COVERS=true`：额外保存视频封面备份。
+- **切片阈值只决定 backup 形态**，与缓存阈值 `PRIMARY_CACHE_MAX_BYTES` 是两件事。
 
+解析成功即可播放 primary；backup 由独立任务异步准备和上传。全部 backup 成功后才把 primary 的 `backup_state` 置 `ready`。
+
+### 2.2 App 只有一种媒体路径
+
+App 始终请求：
+
+```text
+/media/<key>.<ext>
 ```
-POST {STORAGE_UPLOAD_URL}
-[{ "type": "video", "media": "https://<worker>/api/v1/media/<key>.mp4",
-   "favorite": { "url": "https://www.bilibili.com/video/BV...", "summary": "解析服务返回的一句话说明" } },
- { "type": "image", "media": "https://source.example/backup.jpg",
-   "favorite": { "url": "https://www.bilibili.com/video/BV...", "summary": "解析服务返回的一句话说明" } }]
 
-→ ["id1", "id2"]        // 按上传顺序，单次最多 10 条
+后台在 key 前加内部标记，不新增第二个公开接口：
+
+- `c_`：进入 `MediaCache` entrypoint，使用 Workers Cache；
+- `n_`：进入默认入口，走普通 Range 代理，不缓存。
+
+同一个素材的 URL 在缓存命中前后不变。App 不需要识别标记，也不需要切换请求。
+
+`GET /media/full/<key>.<ext>` 是普通整段入口：忽略 Range，成功固定 `200` 且 `accept-ranges: none`；它不进入 `c_` 缓存入口。
+
+### 2.3 缓存规则
+
+| 媒体 | 缓存 |
+|---|---|
+| 所有 backup（切片、整文件、备用图、可选封面） | 全部缓存 |
+| primary 图片/封面 | 缓存 |
+| primary 视频，源文件大小 ≤ `PRIMARY_CACHE_MAX_BYTES` | 缓存 |
+| primary 视频，超过阈值或大小未知 | 不缓存，Range 代理 |
+
+`PRIMARY_CACHE_MAX_BYTES` 默认 `18,874,368` 字节；设为 `0` 表示不缓存 primary 视频。
+
+`MediaCache` 入口会再次检查 asset 类型，手动给超过阈值的 primary 视频拼 `c_` 也会返回 404。
+
+完整缓存说明、Range 行为和管理台探测见 [Cloudflare 媒体缓存](../docs/Cloudflare媒体缓存配置.md)。
+
+### 2.4 上传与下载
+
+默认所有 backup 的上传地址都走 Worker：
+
+```text
+MEDIA_BASE_URL + /media/c_<key>.<ext>
 ```
 
-- 一批只属于**同一个收藏**，所以每条都带同一个 `favorite: { url, summary }`；`summary` 为空串时也会带上字段。
-- backup 切片是独立文件：Worker 的虚拟地址就是 `init + 源区间` 合成后的完整片；
-  短视频/备用图由存储服务直接回源源站。
-- 直传源地址的条目不消耗 Worker 请求；只有 backup 切片回源 Worker 才计一次请求。
-- 整批失败（任一条回源失败、非 2xx、id 数量不符）就按整条任务退避重试；
-  收藏本身仍是 `ready`，失败只体现在 primary 的 `backup_state` / `backup_error`。
-- 返回的 id 原样写进 `assets.store_id`；只有 backup 全部上传成功，primary 的 `backup_state` 才转 `ready`。
-- **暂不处理重复**：同一文件重复上传会拿到新 id，以后接下载/删除时再按需要加本地索引。
+- 切片由 Worker 把 `init + 源区间` 合成完整片；
+- 整文件/图片/封面由 Worker 从源站流式代理完整文件；
+- 是否切片仍由切片阈值决定；
+- 上传前后媒体 URL 不变；
+- `STORAGE_MEDIA_VIA_WORKER=false` 时，只有切片走 Worker，整文件/图片/封面直传源站。
 
-`src/policy/storage-upload.js` / `storage-download.js` 的上传与下载已接；下载按 `STORAGE_GET_URL` 取文件：
+存储上传契约：
 
-- `STORAGE_GET_URL` 支持 `{id}` 占位；没有占位时追加 `?id=<storeId>`，Range/HEAD 原样转发。
-- 下载遇到 429 时，媒体代理返回带 `Retry-After` 的 429（`no-store`），让播放器/客户端重试，不伪装成 502。
-- 只有 backup 段走这个下载接口；primary 变体失败时先由后台换档并推新 URL，换不了才让 App 切 backup。
-- `GET /media/full/<key>` 对 backup 同样忽略 `Range`，成功固定 `200`、`Accept-Ranges: none`。
-- 删除目前仍是 no-op；删收藏/重新解析会在行删除之后调用它清理远端文件。
+```json
+[
+  {
+    "type": "video",
+    "media": "https://<worker>/api/v1/media/c_<key>.mp4",
+    "favorite": {
+      "url": "https://www.bilibili.com/video/BV...",
+      "summary": "解析服务返回的一句话说明"
+    }
+  }
+]
+```
 
-## 数据压缩（D1）
+- 一批只属于同一个收藏，最多 10 条；
+- 返回与入参顺序一致的 id 数组；
+- id 写入 `assets.store_id`；
+- 任一条失败则整批按任务退避重试，primary 仍是 `ready`，失败体现在 `backup_state` / `backup_error`。
 
-D1 只存元数据。业务库共 6 张表：
+`STORAGE_GET_URL` 用于下载 backup：
 
-| 表 | 主键 / 唯一约束 | 关键字段 | 用途与生命周期 |
+- 支持 `{id}` 占位；没有占位时追加 `?id=<storeId>`；
+- Range/HEAD 原样转发；
+- 429 原样返回给客户端，并带 `Retry-After`；
+- 删除目前仍是 no-op。
+
+## 3. D1 数据模型
+
+D1 只存元数据，不存媒体正文。业务表 6 张：
+
+| 表 | 主键 / 唯一约束 | 关键字段 | 用途 |
 |---|---|---|---|
-| `favorites` | `id`；`url` 唯一 | `shard/note/tags/source_app/favorite_at/updated_at/media/media_state/failed_reason/resolved_at/slice_rule/upload_*` | 一条收藏 url 一行；用户字段、内容状态与 backup 上传状态 |
-| `sources` | `id`；`(url, etag, file_size)` 唯一 | `quality/created_at` | 源文件信息去重；被 `assets.source_id` 与 `variants.source_id` 引用；无引用后由 GC 回收 |
-| `variants` | `key` 主键；每个 `(favorite_id, video_index)` 只有一条 `active` | `video_index/variant_index/source_id/quality/height/active` | 保存每个视频的全部清晰度；`key` 是该档独立虚拟 URL；换档只改 active |
-| `assets` | `key` 主键 | `favorite_id/source_id/init_id/role/kind/video_index/slice_index/image_index/ord/title/duration_ms/cover_key/start_offset/media_size/store_id/backup_state` | primary 是视频整片、图片、封面；backup 是长视频切片、短视频整文件、备用图，`BACKUP_COVERS=true` 时还包括封面备份；backup 不进入顶层 `segments` |
-| `inits` | `id`；`hash` 唯一 | `bytes BLOB/created_at` | backup 切片的 init 段按内容哈希共享，存原始字节；上传成功后 asset 清掉 `init_id/区间`，无引用后由 GC 删除 |
-| `jobs` | `id`；`(url, kind)` 唯一 | `kind/attempts/next_at/locked_until` | 任务队列，`kind=parse/backup/upload`；完成后删除 |
+| `favorites` | `id`；`url` 唯一 | `shard/note/tags/source_app/favorite_at/updated_at/media/media_state/failed_reason/resolved_at/slice_rule/upload_*` | 一条收藏一行；用户字段、内容状态、backup 上传状态 |
+| `sources` | `id`；`(url, etag, file_size)` 唯一 | `quality/created_at` | 源文件信息去重；无引用后 GC |
+| `variants` | `key` 主键；每个 `(favorite_id, video_index)` 最多一条 `active` | `video_index/variant_index/source_id/quality/height/active` | 保存每个视频的全部清晰度；换档只改 active |
+| `assets` | `key` 主键 | `favorite_id/source_id/init_id/role/kind/video_index/slice_index/image_index/ord/title/duration_ms/cover_key/start_offset/media_size/store_id/backup_state` | primary 是源站整片/图片/封面；backup 是存储副本 |
+| `inits` | `id`；`hash` 唯一 | `bytes BLOB/created_at` | 切片 init 按内容哈希共享；上传成功后清掉引用，无引用后 GC |
+| `jobs` | `id`；`(url, kind)` 唯一 | `kind/attempts/next_at/locked_until` | 任务队列：parse / backup / upload |
 
-逻辑关联（没有声明数据库外键）：
+逻辑关联没有数据库外键：
 
 - `favorites.id` → `assets.favorite_id` / `variants.favorite_id`
 - `sources.id` → `assets.source_id` / `variants.source_id`
 - `inits.id` → `assets.init_id`（可空，backup 上传成功后清空）
 - `jobs.url` → `favorites.url`
 
-索引：`favorites_order`、`assets_by_favorite/source/init/cleanup`、`variants_by_favorite/source`、
-`variants_one_active`（每个视频最多一条 active）、`jobs_once/jobs_ready`。
+`favorites` 不存段 key 列表；primary 顺序由 `assets.ord` 决定。`sources` 与 `inits` 去重；backup 切片上传成功后只保留 asset 行（约 0.2KB），并清掉 init/区间。真实切片每片 init 通常不同，`inits` 去重主要作用于重复解析与跨收藏复用。
 
-压缩口径：`favorites` 不存段 key 列表；primary 顺序由 `assets.ord` 决定；`sources` 与 `inits` 去重；
-backup 切片上传后只保留 asset 行（约 0.2KB）。同一测试夹具（1 视频 2 片 + 1 图 + 1 封面）实测：
-旧结构约 1.29KB，新结构约 0.69KB。
-
-注意：真实切片每片的 `init` 通常不同（`moov` 会按片重写），`inits` 去重主要作用于重复解析与跨收藏复用。
-
-### 分片部署（1 个控制库 + 9 个数据分片）
+### 分片
 
 - `DB`：控制库，只存 `favorites` / `jobs`
 - `DB_1..DB_9`：数据分片，只存 `assets` / `variants` / `sources` / `inits`
-- 分片键：归一化收藏 URL 的稳定哈希 `% SHARD_COUNT`，写入 `favorites.shard`
-- 媒体 key 带前缀 `s<shard>_<hash>`，代理按前缀直接选数据分片
-- `list` / `lookup` 只查控制库取收藏行；再按 `favorites.shard` 批量补内容
-- `jobs` 只在控制库，cron 仍然只有一个队列
-- 没有 `DB_1` 时自动退回单库（测试/本地 dev 默认如此）
+- 分片键：归一化 URL 的稳定哈希 `% SHARD_COUNT`，写入 `favorites.shard`
+- 媒体 key 前缀：`s<shard>_<hash>`
+- 列表/lookup 只查控制库，再按 `shard` 批量补内容
+- 没有 `DB_1` 时自动退回单库（本地测试默认）
 
-10 个库都执行同一份 `schema.sql`；数据分片里的 `favorites/jobs` 和控制库里的内容表保持空表。
+10 个库执行同一份 [schema.sql](src/store/schema.sql)；数据分片里的 `favorites/jobs` 和控制库里的内容表保持空表。
 
-## 部署（不在本地安装 Wrangler）
+### 3.1 WebSocket 控制面
 
-以下命令都在有 Wrangler 的环境执行（CI、Cloud Shell 或你自己的机器）：
+`GET /api/v1/ws`（https 对应 wss；配置了 `SYNC_TOKEN` 时要求 Bearer）连接到 Durable Object `LibraryHub`：
+
+- 客户端可发 `hello / list / lookup / resolve / ping`，请求带 `id`，响应同 `id`；
+- 服务端推送：
+  - `{ "t": "favorites", "favorites": [完整收藏行] }`
+  - `{ "t": "deleted", "urls": [...] }`
+- 每 20 条收藏 / 100 个 url 一帧；
+- WS 是增强，断开不影响 HTTP；App 重连后跑一次对账；
+- 上传仍走 HTTP `/sync`，媒体仍走 HTTP；WS 只承载控制面。
+
+DO 免费额度约 10 万请求/天；WS 入站消息按 20:1 计费，出站和协议 ping 不计费，使用 Hibernation API 空闲不烧时长。
+
+## 4. 配置
+
+配置来自 `wrangler.toml` 的 `[vars]` 与 `wrangler secret`，`src/config.js` 首次请求时解析并缓存。数字变量在 TOML 中写成字符串；空值/非法值回落默认。
+
+### 4.1 绑定与入口
+
+| 项 | 当前值 | 说明 |
+|---|---|---|
+| `main` | `src/entry.js` | default + `LibraryHub` + `MediaCache` |
+| `DB` | `favorites` | 控制库；执行 schema |
+| `DB_1..DB_9` | `favorites-1..9` | 数据分片；执行同一份 schema |
+| `SHARD_COUNT` | `9` | 无 `DB_1` 时自动单库 |
+| `compatibility_date` | `2025-09-01` | 运行时兼容日期 |
+| `observability.enabled` | `true` | Workers Logs |
+| cron 1 | `*/3 * * * *` | 解析/备份/上传 |
+| cron 2 | `41 4 * * *` | 回收无引用 `inits` / `sources` |
+
+### 4.2 路由与鉴权
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `BASE_PATH` | `/api/v1` | App 数据接口和媒体路径前缀 |
+| `ADMIN_HOST` | 空 | 管理台子域；非空时 `/admin/api/*` 只在该 Host 响应。生产必须设置 |
+| `SYNC_TOKEN`（secret） | 空 | 非空时数据接口要求 Bearer；`/health`、`/meta`、`/media` 免鉴权 |
+| `INGEST_PATH` | `/ingest/callback` | B 回调路径；完整路径 `${BASE_PATH}${INGEST_PATH}` |
+| `INGEST_SOURCE_APP` | `第三方` | 回调条目固定写这个来源 |
+
+`GET /health` 和 `GET /meta` 免鉴权；`/health` 报收藏/任务计数，`/meta` 报游标、媒体路径、缓存阈值、存储和调度等有效配置。
+
+### 4.3 解析与切片
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| 解析服务 | `src/policy/parser.js` 的 `parserConfig` | 地址/令牌/超时是模块内常量，不走 env |
+| `USER_AGENT` | Chrome 157 桌面版 | 探源与调用解析服务时的 UA |
+| `SLICE_SERVICE_URL` | 空 | 空 = 不启用切片；超过切片阈值的 backup 会失败，未超过仍整片。生产必须配置 |
+| `SLICE_TIMEOUT_MS` | `60000` | 调切片服务超时 |
+| `DEFAULT_SLICE_RULE` | 代码固定：18MiB / keyframe / auto / 20MB limit | 没有随请求带规则时的 backup 切片阈值 |
+| `MAX_SLICES_PER_FAVORITE` | `50` | 单条收藏所有视频合计最多切多少片；超出退回整文件 |
+| `TRANSFER_MAX_ATTEMPTS` | `3` | 解析失败重试次数 |
+| `TRANSFER_RETRY_MS` | `2000` | 解析重试退避基数 |
+
+`DEFAULT_SLICE_RULE` 只影响 backup 形态；App 在 `/sync`、`/resolve` 带的 `slice_rule` 按条落库，优先于默认值。规则只收 `{mode:"size",bytes}`，`bytes` 范围 64KiB–1GiB。
+
+### 4.4 媒体、缓存与密钥
+
+| 变量 / secret | 默认 | 作用 |
+|---|---|---|
+| `MEDIA_KEY_SECRET`（secret） | 空 | 媒体 key 的 HMAC 密钥；公网部署建议配置 |
+| `SOURCE_PROBE_MS` | `5000` | 源站 HEAD/Range 探活超时 |
+| `SOURCE_CHECK_TTL_MS` | `60000` | 探活结果缓存时长；0 = 每次都探 |
+| `PRIMARY_CACHE_MAX_BYTES` | `18874368` | primary 视频是否缓存的阈值；0 = 不缓存 primary 视频；backup 不受影响 |
+
+`wrangler.toml` 使用 per-entrypoint 缓存：默认入口 `enabled=false`，只有 `[exports.MediaCache.cache] enabled=true`；`cross_version_cache=true`，避免每次部署清空缓存。
+
+### 4.5 外部存储
+
+| 变量 / secret | 默认 | 作用 |
+|---|---|---|
+| `STORAGE_MEDIA_VIA_WORKER` | `true` | 所有 backup 上传地址走 Worker；false 时只有切片走 Worker，其余直传源站 |
+| `MEDIA_BASE_URL` | 空 | Worker 公网地址前缀，**必须含 `/api/v1` 且存储服务可访问** |
+| `STORAGE_UPLOAD_URL` | 空 | 外部存储上传接口 |
+| `STORAGE_TOKEN`（secret） | 空 | 非空时上传接口带 Bearer |
+| `STORAGE_GET_URL` | 空 | 下载接口；支持 `{id}` 或 `?id=<storeId>` |
+| `BACKUP_COVERS` | `false` | 是否额外保存视频封面 backup |
+| `STORAGE_BATCH_SIZE` | `10` | 单次上传最多几条；代码硬顶 10 |
+| `STORAGE_TIMEOUT_MS` | `300000` | 单次批量上传等「复制完成并返回 id」的超时 |
+
+### 4.6 任务队列
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `JOBS_PER_TICK` | `4` | 每轮 parse / backup 各最多领几条；0 = 关闭 |
+| `UPLOAD_JOBS_PER_TICK` | `2` | 每轮最多领几条 upload；0 = 关闭 |
+| `UPLOAD_ITEMS_PER_TICK` | `20` | 每条 upload 每轮最多处理几个 asset |
+| `UPLOAD_JOB_LOCK_MS` | `600000` | 上传任务锁；必须长于一次存储调用 |
+| `UPLOAD_MAX_ATTEMPTS` | `3` | 整条上传任务重试次数 |
+| `UPLOAD_RETRY_MS` | `2000` | 上传重试退避基数 |
+
+`STORAGE_TIMEOUT_MS`（5 分钟）< `UPLOAD_JOB_LOCK_MS`（10 分钟）< cron 单次墙钟（15 分钟）。
+
+### 4.7 固定值
+
+| 项 | 值 |
+|---|---|
+| 解析任务锁 | 90 秒 |
+| 请求体上限 | 4MiB |
+| `/favorites/lookup` 上限 | 200 个 url |
+| 单次上传硬顶 | 10 条 |
+| 调度器子请求预算 | 45 |
+| 媒体请求子请求预算 | 10 |
+| 媒体成功缓存头 | `public, max-age=31536000, immutable` |
+| 媒体错误缓存头 | `no-store` |
+| 孤儿回收 | 每天 04:41 |
+
+## 5. 管理台
+
+`pages/` 是独立 Vue 3 + Vite 管理台，不进入 App：
+
+- 构建到 `pages/dist`，由 Worker 的 `[assets]` 提供；
+- `[assets]` 使用 assets-first，`run_worker_first` 只匹配 `/admin/api/*`、`/api/*`、`/media/*`；静态资源不进入 Worker Cache；
+- `admin.example.com` 绑到同一 Worker，并套 Cloudflare Access；
+- `ADMIN_HOST=admin.example.com`；
+- 只读 API：`/admin/api/overview`、`/admin/api/favorites`、`/admin/api/jobs`；
+- 媒体详情“检查/预热”发 `HEAD` 读取 `cf-cache-status` / `age`；冷缓存可能触发完整对象填充；
+- 本地开发：`npm run dev:admin`；构建：`npm run build:admin`。
+
+管理台详细说明见 [pages/README.md](pages/README.md)。
+
+## 6. 部署（GitHub 直连，不需要本地 Wrangler）
+
+推荐用 Cloudflare Workers Builds 从 GitHub 部署。云端会执行 Build command 和 Deploy command，本地不需要安装 Wrangler。
+
+### 6.1 先建 Cloudflare 资源
+
+Worker 本身由 GitHub 部署，不需要本地 Wrangler。下面只是**一次性初始化**：可以在 Cloudflare Dashboard 创建 D1、执行 schema、设置 secrets；也可以临时用 CLI/CI 执行，不参与日常部署。
 
 ```bash
-# 1) 建 1 个控制库 + 9 个数据分片，把 id 填进 wrangler.toml
+# 一次性初始化；也可在 Dashboard 的 D1 页面逐个创建
 wrangler d1 create favorites
 wrangler d1 create favorites-1
 wrangler d1 create favorites-2
@@ -136,304 +299,177 @@ wrangler d1 create favorites-6
 wrangler d1 create favorites-7
 wrangler d1 create favorites-8
 wrangler d1 create favorites-9
+```
 
-# 2) 每个库执行同一份 schema（新模型不迁移旧数据；旧库请新建或清空后执行）
+把返回的 `database_id` 填进 [wrangler.toml](wrangler.toml) 的 `DB` 和 `DB_1..DB_9`。
+
+```bash
+# 每个库执行同一份 schema；也可以在 Dashboard 的 D1 console 逐个粘贴 schema.sql
 for db in favorites favorites-1 favorites-2 favorites-3 favorites-4 favorites-5 favorites-6 favorites-7 favorites-8 favorites-9; do
   wrangler d1 execute "$db" --remote --file=src/store/schema.sql
 done
+```
 
-# 3) secrets
+### 6.2 配置 secrets
+
+在 Dashboard 的 Worker → Settings → Variables & Secrets 添加；或在有 Wrangler 的一次性环境执行：
+
+```bash
 wrangler secret put SYNC_TOKEN
 wrangler secret put MEDIA_KEY_SECRET
 wrangler secret put STORAGE_TOKEN
-
-# 4) 在 wrangler.toml 里填：
-#    SLICE_SERVICE_URL
-#    MEDIA_BASE_URL      —— 部署后的 Worker 公网地址（含 /api/v1），存储服务要能访问
-#    STORAGE_UPLOAD_URL  —— 外部存储的上传接口
-#    解析服务地址/令牌/超时直接改 src/policy/parser.js 的 parserConfig
-
-# 5) 部署
-wrangler deploy
 ```
 
-部署后先看两个免鉴权接口：
+### 6.3 填写 vars
+
+至少确认：
+
+```toml
+ADMIN_HOST = "admin.example.com"
+MEDIA_BASE_URL = "https://api.example.com/api/v1"
+STORAGE_UPLOAD_URL = "https://<storage>/upload"
+STORAGE_GET_URL = "https://<storage>/get"
+SLICE_SERVICE_URL = "https://<slice-service>/..."
+```
+
+其他可选：
+
+```toml
+STORAGE_MEDIA_VIA_WORKER = "true"
+PRIMARY_CACHE_MAX_BYTES = "18874368"
+BACKUP_COVERS = "false"
+```
+
+解析服务地址/令牌/超时改 `src/policy/parser.js` 的 `parserConfig`，不走环境变量。
+
+### 6.4 Cloudflare 项目和域名
+
+在 Cloudflare Dashboard：
+
+1. 新建 Worker 项目并连接 GitHub 仓库。
+2. **Root directory**：`backend-in-worker`
+3. **Build command**：`npm run build:admin`
+4. **Deploy command**：`npm run deploy`（或 `npx wrangler deploy`）
+5. 给 Worker 绑定两个自定义域名：
+   - `api.example.com`：App 和媒体；
+   - `admin.example.com`：管理台。
+6. 在 Zero Trust / Access 给 `admin.example.com` 建应用，只允许自己的邮箱/身份。
+   具体路径：Zero Trust → Access → Applications → Add a self-hosted application；domain 填 `admin.example.com`，policy 用 email/OTP。
+7. `ADMIN_HOST` 填 `admin.example.com`。
+8. 存储服务必须能访问 `MEDIA_BASE_URL`。
+
+`pages/dist` 会由 Build command 生成，并作为静态 assets 随 Worker 一起部署。`backend-in-worker/package.json` 已声明 `wrangler ^4.107.0`；`pages/` 是独立的 package。
+
+### 6.5 部署后验证
 
 ```bash
-curl -s https://<worker>.workers.dev/api/v1/health
-curl -s https://<worker>.workers.dev/api/v1/meta
+curl -s https://api.example.com/api/v1/health
+curl -s https://api.example.com/api/v1/meta
 ```
 
-## 配置说明
+- 看 `meta.primary_cache_max_bytes`、`meta.media_internal_markers`、存储配置；
+- 新建一条收藏，确认 App 能拿到 `/media/c_...` 或 `/media/n_...`；
+- 查看存储日志：所有 backup 的 `media` 都应该指向 Worker 的 `c_` 地址；
+- 连续请求一个 backup 的 `c_` 地址，观察 `cf-cache-status`；
+- 打开 `https://admin.example.com`，确认 Access 生效、概览/收藏/jobs 有数据。
 
-运行时配置大部分来自 `wrangler.toml` 的 `[vars]` 与 `wrangler secret`；`src/config.js` 在首次请求时解析并缓存。
-解析器的地址、令牌与超时不再走 env，直接维护在 `src/policy/parser.js` 的 `parserConfig` 里；解析请求的参数/类型也由该模块自己决定。
-数字类变量在 TOML 里写成字符串（如 `"300000"`），留空或非法时回落到默认值。
-表里没有出现在 `wrangler.toml` 的变量，需要时直接加到 `[vars]` 即可覆盖默认值。
-`/meta` 会回显大部分生效值（`next_wait_ms`、`slice_rule`、上传批大小、调度节奏等）。
+### 6.6 回滚
 
-### 绑定、入口与定时器
+- 存储上传回退：`STORAGE_MEDIA_VIA_WORKER=false` 后重新部署；
+- 关闭缓存：把 `wrangler.toml` 的 `[exports.MediaCache.cache] enabled` 改为 `false` 后部署；
+- 管理台只读接口不需要额外回滚，删除 Access 应用即可阻止访问。
 
-| 项 | 当前值 | 说明 |
-|---|---|---|
-| D1 绑定 `DB` | `database_name = "favorites"` | **控制库（必需）**：favorites / jobs；先执行 `schema.sql` |
-| D1 绑定 `DB_1..DB_9` | `favorites-1..favorites-9` | 数据分片：assets / variants / sources / inits；每个库执行同一份 `schema.sql` |
-| `SHARD_COUNT` | `9` | 逻辑数据分片数；没有 `DB_1` 时自动退回单库 |
-| `main` | `src/index.js` | Worker 入口 |
-| `compatibility_date` | `2025-09-01` | 运行时兼容日期 |
-| `observability.enabled` | `true` | 打开 Workers Logs，便于看 `exceededCpu` |
-| cron 1 | `*/3 * * * *` | 每 3 分钟跑任务队列（解析 / 备份准备 / 上传） |
-| cron 2 | `41 4 * * *` | 每天回收无引用的 `inits` / `sources`（逐个数据分片） |
+## 7. 额度与调节
 
-免费版每个账号最多 5 个 cron，这里用了 2 个；其余三个留给别的 Worker。
+免费版主要额度：
 
-### 路由与鉴权
-
-| 变量 / secret | 默认 | 作用 |
-|---|---|---|
-| `BASE_PATH` | `/api/v1` | 所有数据接口与媒体地址的前缀，必须与 App 设置里的接口地址后缀一致 |
-| `SYNC_TOKEN`（secret） | 空 | 空 = 数据接口不校验；非空则要求 `Authorization: Bearer <token>`。`/health`、`/meta`、`/media` 永远免鉴权 |
-| `INGEST_PATH` | `/ingest/callback` | B 回调路径；完整路径是 `${BASE_PATH}${INGEST_PATH}`，免鉴权 |
-| `INGEST_SOURCE_APP` | `第三方` | 回调进来的条目的 `source_app`，载荷里带什么都不认 |
-
-### 客户端节奏
-
-| 变量 | 默认 | 作用 |
-|---|---|---|
-| `UPLOAD_WAIT_MS` | `5000` | `/sync`、`/resolve` 回执里的 `next_wait_ms` 与 `Retry-After` 基准；同时是 Worker 两次存储上传调用的最小间隔，也是存储服务 429 未给 `Retry-After` 时的退避值 |
-| `UPLOAD_WAIT_JITTER_MS` | `0` | 大于 0 时按请求序号在 `0/1/2` 倍之间抖动；0 = 固定值 |
-
-### 解析与切片
-
-| 变量 / secret | 默认 | 作用 |
-|---|---|---|
-| 解析服务 | 见 `policy/parser.js` 的 `parserConfig` | 地址、令牌、超时都是模块内常量，不走 env；空地址时每条解析直接失败 |
-| `USER_AGENT` | Chrome 157 桌面版 | 探源（HEAD / Range）与调用解析服务时带上的 `User-Agent`；留空用 `src/config.js` 里的默认值 |
-| `SLICE_SERVICE_URL` | 空 | 空 = 不启用切片；超过切片阈值的大视频会**解析失败**（不再退为整片），小视频仍整片。生产必须配置 |
-| `SLICE_TIMEOUT_MS` | `60000` | 调切片服务的超时 |
-| 默认切片规则（代码固定） | `{"mode":"size","bytes":18874368,"align":"keyframe","strategy":"auto","limit":20000000}` | 唯一默认值，**不再读 `SLICE_RULE` 环境变量**；也是「长视频」阈值。App 在请求里带 `slice_rule` 时只覆盖 `bytes`，其余字段保持这套默认 |
-| `MAX_SLICES_PER_FAVORITE` | `50` | **单条收藏所有视频合计**最多切多少片；超出预算的视频退回整片 |
-| `TRANSFER_MAX_ATTEMPTS` | `3` | 解析失败重试次数 |
-| `TRANSFER_RETRY_MS` | `2000` | 解析重试退避基数（第 n 次等 `n × 该值`） |
-
-`DEFAULT_SLICE_RULE` 只是默认值；App 在 `/sync`、`/resolve` 里带的规则会按条落库，优先级更高。规则只收按大小一种形状（`{mode:"size",bytes}`），切点固定关键帧；`bytes` 范围 64KiB–1GiB。视频选档不再设高度上限，按分辨率从高到低取第一个可达档。
-
-### 媒体、密钥与切片缓存
-
-| 变量 / secret | 默认 | 作用 |
-|---|---|---|
-| `MEDIA_KEY_SECRET`（secret） | 空 | 虚拟 key 的 HMAC 密钥；空则用确定性 SHA-256。公网部署建议配置 |
-| `SOURCE_PROBE_MS` | `5000` | 源站 HEAD/Range 探活超时 |
-| `SOURCE_CHECK_TTL_MS` | `60000` | 探活结果缓存时长；0 = 每次都探（联调用） |
-
-### 外部存储
-
-| 变量 / secret | 默认 | 作用 |
-|---|---|---|
-| `MEDIA_BASE_URL` | 空 | 切片上传时交给存储服务的 Worker 地址前缀，**必须包含 `/api/v1` 且公网可达**；只用于 backup 切片，短视频 backup/备用图/可选封面备份直传源地址 |
-| `STORAGE_UPLOAD_URL` | 空 | 上传接口；空时上传失败（收藏仍 `ready`，只是没有备份） |
-| `STORAGE_TOKEN`（secret） | 空 | 非空时上传接口带 Bearer |
-| `STORAGE_GET_URL` | 空 | 下载接口：支持 `{id}` 占位，否则追加 `?id=<storeId>`；backup 播放只读这里 |
-| `BACKUP_COVERS` | `false` | 是否额外保存视频封面 backup；开启后封面源失效时由代理回落，默认不保存 |
-| `STORAGE_BATCH_SIZE` | `10` | 单次上传最多几条；代码硬顶 10 |
-| `STORAGE_TIMEOUT_MS` | `300000`（5 分钟） | **单次批量上传调用**等存储「复制完成并返回 id」的超时；超时按整批失败退避 |
-
-### 任务队列与备份
-
-`jobs.kind` 共三类：
-
-- `parse`：解析链接，写 primary 与全部 variants；
-- `backup`：为每个视频/图片准备备用源；长视频切片、短视频整文件、图片单图；
-- `upload`：把 backup 资产上传到外部存储，全部成功后才把 primary 的 `backup_state` 置 `ready`。
-
-每日 GC 是独立 cron，不写 `jobs` 行。
-
-| 变量 | 默认 | 作用 |
-|---|---|---|
-| `JOBS_PER_TICK` | `4` | 每 3 分钟分别最多领几条 `parse` / `backup` 任务；0 = 关闭解析（联调用） |
-| `UPLOAD_JOBS_PER_TICK` | `2` | 每 3 分钟最多领几条 `upload` 任务；0 = 关闭上传 |
-| `UPLOAD_ITEMS_PER_TICK` | `20` | 每条上传任务每轮最多处理几个 asset；按 `STORAGE_BATCH_SIZE` 切批 |
-| `UPLOAD_JOB_LOCK_MS` | `600000`（10 分钟） | 上传任务锁；必须长于一次存储调用，否则下一轮会重复领 |
-| `UPLOAD_MAX_ATTEMPTS` | `3` | 整条上传任务的重试次数（真失败才计次，预算用尽不计） |
-| `UPLOAD_RETRY_MS` | `2000` | 上传重试退避基数 |
-
-三者关系：`STORAGE_TIMEOUT_MS`（5 分钟）< `UPLOAD_JOB_LOCK_MS`（10 分钟）< cron 单次墙钟（15 分钟）。
-
-### 固定值（不能通过 env 改）
-
-| 项 | 值 | 说明 |
-|---|---|---|
-| 解析任务锁 | 90 秒 | 防止两个 tick 同时解析同一条 |
-| 请求体上限 | 4MiB | 超出回 413 |
-| `/favorites/lookup` 上限 | 200 个 url | 超出回 400 |
-| 单次上传条数硬顶 | 10 | 即使把 `STORAGE_BATCH_SIZE` 配大也会被夹到 10 |
-| 调度器子请求预算 | 45 | 每轮留出余量给主请求；见 `src/budget.js` |
-| 媒体请求子请求预算 | 10 | primary 探活 + 回源；backup 直接读存储 |
-| 媒体成功响应缓存头 | `public, max-age=31536000, immutable` | 错误响应仍 `no-store` |
-| 孤儿回收 | 每天 04:41 | 由 `wrangler.toml` 的 cron 决定 |
-
-## 与 mock-server 的行为差异
-
-| 方面 | mock-server | Worker 版 |
-|---|---|---|
-| 元数据 | `data.json` 单文件 | D1 `favorites` / `assets` / `jobs` |
-| 媒体备份 | `store/` 本地文件 | 外部存储服务；只传 backup，primary 不进存储 |
-| 后台上传 | 进程内上传器 | 备份准备 + 上传两个任务；backup 全成功才 ready |
-| 后台任务 | 进程内单线程循环、`setInterval` | D1 任务队列 + 每 3 分钟 cron；写入后用 `waitUntil` 抢跑一次 |
-| 切片信息 | `setInterval` 清理 | backup 上传成功后立即清掉 init/区间，不做 TTL 扫描 |
-| 孤儿回收 | 不需要 | 每天 04:41 的 cron 回收无引用的 `inits` / `sources` |
-| 重启续跑 | 读 `jobs` 继续 | 任务在 D1，cron 自动继续 |
-
-协议面完全一致：响应字段、游标、状态机、`retry-after` / `next_wait_ms`、媒体相对地址与
-`Cache-Control: public, max-age=31536000, immutable` 都不变。
-
-## WebSocket 控制面
-
-除 HTTP 外，开了一条 `GET /api/v1/ws`（需 `Authorization: Bearer`，`https` 对应 `wss`）：
-
-- 连接进 Durable Object `LibraryHub`（SQLite 版，免费版可用；用它做多连接广播）。
-- App 可在同一连接上发 `hello / list / lookup / resolve / ping`，请求带 `id`，响应同 `id`。
-- 服务端在收藏变化时推送：
-  - `{ "t": "favorites", "favorites": [完整收藏行...] }`（解析完成、备注变更、ingest 新增）；
-  - `{ "t": "deleted", "urls": [...] }`。
-  每 20 条收藏 / 100 个 url 一帧。
-- 推送是增强：WS 断开或未配置 `LIB` 绑定都不影响 HTTP 接口；App 断线重连后跑一次对账补齐。
-- 上传仍走 `POST /sync`，媒体仍走 HTTP；WS 只承载控制面。
-- DO 免费额度：10 万请求/天、13,000 GB-s/天；WS 入站消息按 20:1 计费，出站与协议 ping 不计费，
-  连接用 Hibernation API，空闲不烧时长。
-
-## 免费版额度与配置调节（重点）
-
-### 哪些算额度，哪些不算
-
-| 项 | 免费额度 | 说明 |
-|---|---|---|
-| Worker 请求 | **100,000 / 天** | 所有 HTTP 请求 + **每次 cron 触发** + WebSocket 建立连接；**WS 消息不计 Worker 请求**（消息在 DO 侧按 20:1 计费） |
-| Worker CPU | **10 ms / 次** | 网络等待不计；流式转发大文件时，JS 拼流的开销会计入 |
-| 子请求 | **50 / 次调用** | `fetch`、D1、KV、R2 都算；`db.batch()` 只算 1 次 D1 查询；媒体请求约 3 个 |
-| D1 行读 | **5,000,000 / 天** | 清单页按返回行数、lookup 按命中的行、媒体按 1 行 |
-| D1 行写 | **100,000 / 天** | `INSERT/UPDATE/DELETE` 都算；**索引也会各写一行** |
-| D1 存储 | 单库 **500 MB** / 账号 **5 GB** | 只存元数据与 init，不存媒体正文 |
-| DO 请求 | **100,000 / 天** | WS 连接建立 + 入站消息（20:1 折算）+ alarm |
-| 外部存储 | 不占 Cloudflare 额度 | backup 切片回源 Worker 时算一次 Worker 请求；短视频 backup/备用图直传源站；封面默认不备份，`BACKUP_COVERS=true` 时额外一份 |
-| 客户端缓存 | 不占任何服务端额度 | 只有第一次真正落到 Worker |
-
-两个容易误解的点：
-
-- **Workers 缓存命中仍按请求计费**（只省 CPU 和上游取数）。所以边缘缓存/Cache Rule 不能降低 10 万/天的请求数；要降请求数只能靠客户端缓存或让媒体直连存储。
-- **cron 每次触发都是一次请求**。当前两条 cron 合计约 `480 + 1 = 481 次/天`（约 0.5%）。
-
-### 一条收藏的账
-
-设 `A = primary 段数`（视频 + 图片），`S = backup 切片数`，`B = backup 上传条数`（切片 + 短视频 + 备用图）：
-
-| 动作 | 额度 |
+| 项 | 免费额度 |
 |---|---|
-| 首次播放（按 primary 预取） | 约 **A 次 Worker 请求**；播放器按 Range 请求时会更多 |
-| 切到 backup | 每个备用项一次 Worker 请求（切片/整文件/图都读存储）；不切换就不产生 |
-| 备份上传 | backup 切片约 **S 次 Worker 请求**（存储回源合成地址），短视频/备用图直传源站；另有 `ceil(B / STORAGE_BATCH_SIZE)` 次存储 API 调用 |
-| D1 行写 | 约 `primary + variants + backup + 7` |
-| 对账 | 清单档读 `total` 行；请求数 ≈ `ceil(total / 清单页大小)`（App 侧 300/页） |
-| 解析 CPU | 随 variants 数量与探活次数增长；backup 切片在独立任务里做 |
+| Worker 请求 | 100,000 / 天 |
+| Worker CPU | 10 ms / 次 |
+| 子请求 | 50 / 次调用 |
+| D1 行读 | 5,000,000 / 天 |
+| D1 行写 | 100,000 / 天 |
+| D1 存储 | 500 MB / 库；5 GB / 账号 |
+| DO 请求 | 100,000 / 天 |
+| cron | 每条 cron 触发都算一次请求 |
 
-50 片 × 18MB 的例子：首播约 50 次请求、备份约 50 次请求、D1 行写约 160；一天 1000 条这样的收藏就把 10 万请求吃满。
+当前 cron 约 `480 + 1 = 481 次/天`。Workers Cache 命中仍计一次 Worker 请求，但不执行 Worker、不计 CPU；它主要省 D1、探活、存储/源站回源，不省每日请求额度。
 
-### 会影响额度的配置
+主要调节项：
 
-| 配置 | 默认 | 影响 | 怎么调 |
-|---|---|---|---|
-| `MAX_SLICES_PER_FAVORITE` | `50` | 直接决定 A、备份请求、D1 行写、解析 CPU | 请求/CPU 吃紧就降到 20–30；视频会被更早退回整片 |
-| App 的切片大小（`slice_rule.bytes`） | 18,874,368（18MiB） | 片越大 A 越少：18MB→36MB 约等于请求/行数减半 | 想省额度优先调大；代价是单次传输更大、seek 粒度更粗 |
-| 默认切片规则（代码固定） | 18,874,368 字节 | 只影响没有随请求带规则的入口（B 回调等） | 有 App 请求时以 App 的规则为准；要改只能改代码里的 `DEFAULT_SLICE_RULE` |
-| `UPLOAD_ITEMS_PER_TICK` | `20` | 每次 cron 最多处理多少 asset；**不改变每日 cron 次数** | 降下来更稳地守住 50 子请求/10ms；升上去只是缩短积压 |
-| `UPLOAD_JOBS_PER_TICK` / `JOBS_PER_TICK` | `2` / `4` | 同上，控制单次调用的工作量 | 大批量收藏、经常 1102 时调小 |
-| `STORAGE_BATCH_SIZE` | `10` | 存储 API 调用次数；**不会减少每个 asset 的回源请求** | 保持 10（接口上限） |
-| `STORAGE_TIMEOUT_MS` | `5 分钟` | 太短会判失败并重试 → 重复存储调用 + 重复回源请求 | 片大时不要低于单批复制时间；保持小于上传锁 |
-| `UPLOAD_JOB_LOCK_MS` | `10 分钟` | 太短会让下一轮 cron 重复领取同一任务 → 重复备份请求 | 必须大于一次存储调用耗时；更大片子调到 15 分钟 |
-| `UPLOAD_MAX_ATTEMPTS` / `UPLOAD_RETRY_MS` | `3` / `2s` | 每次重试都重复存储调用 + 回源；失败通常是源站挂了，重试收益低 | 额度优先可降到 2 次；别为了“成功”无限加 |
-| `TRANSFER_MAX_ATTEMPTS` / `TRANSFER_RETRY_MS` | `3` / `2s` | 每次重试重复解析服务 + 探活 + 切片 | 保持 3；解析服务不稳定时再加 |
-| `SOURCE_CHECK_TTL_MS` | `60s` | primary 源探活缓存；过期就多一个子请求 | 调到 5 分钟可减少子请求/源站压力；不影响 Worker 请求数 |
-| `UPLOAD_WAIT_MS` / `UPLOAD_WAIT_JITTER_MS` | `5000` / `0` | App 两条上传之间的节奏；同时是 Worker 调存储的间隔与 429 退避缺省值。不改变请求总数 | 只影响突发速率与限流退避，不影响每日额度 |
-| cron `*/3 * * * *` | 每 3 分钟 | 480 次请求/天 | 改成 `*/10` 省约 336/天；写操作后的 `waitUntil` 仍会抢跑，代价是重试最坏多等几分钟 |
-| cron `41 4 * * *` | 1 次/天 | 孤儿 init/source 回收 | 可降为每周一次，省得很少 |
+| 配置 | 影响 |
+|---|---|
+| `MAX_SLICES_PER_FAVORITE` | 降低会减少 backup 请求、D1 行写和解析 CPU |
+| `slice_rule.bytes` | 调大减少 backup 片数，代价是单次传输更大、seek 粒度更粗 |
+| `PRIMARY_CACHE_MAX_BYTES` | 只影响 primary 视频是否缓存，不影响 backup |
+| `UPLOAD_ITEMS_PER_TICK` / `JOBS_PER_TICK` | 降低可更稳地守住 50 子请求/10ms |
+| `STORAGE_BATCH_SIZE` | 只影响存储 API 调用次数，不减少每个 asset 的回源 |
+| `STORAGE_MEDIA_VIA_WORKER` | false 可减少整文件/图片/封面的 Worker 上传请求，但不再统一走 Worker |
+| cron 周期 | 拉长可省请求数，代价是任务延迟变长 |
 
-### 推荐档位
+App 本地缓存是省请求数最大的一层；Workers Cache 不是请求额度优化。
 
-| 目标 | backup 片大小 | `MAX_SLICES_PER_FAVORITE` | 每 tick | 探活 TTL | cron |
-|---|---|---|---|---|---|
-| **额度优先** | 32–64MB | 30 | 10 | 5 分钟 | `*/10 * * * *` |
-| 平衡 | 18–24MB | 40 | 20 | 2 分钟 | `*/5 * * * *` |
-| 体验优先 | 18MB | 50 | 20 | 60 秒 | `*/3 * * * *` |
+## 8. 本地联调
 
-### 不能只靠后端配置解决的部分
-
-- **客户端缓存/预取**：A 个对象只请求一次、重复播放零请求；这是省请求数最大的一项，且不受后端配置影响。
-- **媒体直连存储**：现在播放地址都要经过 Worker；302 只省 CPU，不省请求。要让媒体完全不占 Worker 请求，只能让 App 直接使用存储/CDN 的签名直链。
-- **备份放大**：逐片备份是 A 次回源请求；整源备份一次（或懒备份）能把备份请求从 A 降到 1，但会改变存储形态/回落方式。
-- **边缘缓存**：省 CPU 与上游，不省请求数（Workers 缓存命中仍计费）。
-
-### 观察口径
-
-- Cloudflare Dashboard 的 Workers Requests、D1 Row Metrics、DO Requests 是真实额度；
-  `/health` 只报收藏/任务数，**不是额度计数器**。
-- 先看 `/media`、`/sync`、cron 各占多少请求，再决定是调切片、降 cron，还是转向客户端缓存/存储直链。
-
-## 已知边界
-
-1. **backup 切片上传要求存储服务能访问 `MEDIA_BASE_URL`**：切片按临时合成地址回源 Worker；短视频 backup/备用图直连源站，不依赖它。
-   虚拟地址里的不可猜 key 就是凭据，媒体接口本身免鉴权（播放器/Coil 不带 header）。
-2. **删除还没接**：删收藏不会清远端 backup；主源失效时后台先尝试换档，换不了才让 App 切 backup。
-3. **后台不是实时**：解析/备份准备最多滞后一个 cron 周期（180 秒）；写入接口会 `waitUntil` 抢跑一次，
-   但免费版仍可能被 CPU 预算截断，没跑完的由 cron 接着跑。
-4. **D1 单库 500MB**：只存元数据与 backup 切片的临时 init（原始字节 BLOB），不存媒体正文。
-5. **backup 切片失败不再打垮 primary**：切片服务未配置、源站不支持 Range 或切片失败，只把该段 `backup_state` 记 `failed`，primary 仍 `ready`；
-   `MAX_SLICES_PER_FAVORITE` 超限退回整文件 backup。
-6. **没有文档之外的新字段**：协议里多出来的只有 `/meta` 的 `storage` / `scheduler` 说明项，
-   App 侧 `ignoreUnknownKeys` 会忽略。
-
-## 本地联调（不需要 Wrangler / D1 / 外部存储）
-
-用于还没确定存储服务时，在平板上把 primary/backup 走通：
+不需要 Wrangler/D1/外部存储：
 
 ```bash
 cd backend-in-worker
 npm run dev:local
 ```
 
-启动后：
+- Worker 监听 `0.0.0.0:8787`，App 填 `http://<电脑局域网 IP>:8787/api/v1`；
+- D1 由 `dev/local.sqlite` 代替；`SHARDS=2` 会创建数据分片；
+- 解析/切片/源站/存储 upload/get 都用本地桩；
+- 每 3 秒跑任务队列；
+- WS 中枢不可用，App 自动退回 HTTP；
+- 夹具视频 200KB；默认片大小通常不切片，测切片可用启动日志里的 64KB `curl`。
 
-- Worker 接口监听 `0.0.0.0:8787`，平板填 `http://<电脑局域网 IP>:8787/api/v1`
-- D1 由本地 SQLite 文件 `dev/local.sqlite` 代替；默认单库，`SHARDS=2` 会额外建 `dev/local-1.sqlite` 等数据分片
-- 删掉 `dev/local*.sqlite*` 重启即可重置
-- 解析/切片/源站、外部存储 upload/get 都用本地桩；每 3 秒跑一次任务队列
-- WS 中枢不可用，App 会自动退回 HTTP；真机 WS 要在真实 Worker 上测
-- 夹具视频只有 200KB；用默认片大小通常不会切片。测试 backup 切片可先跑启动日志里那条 64KB `curl` 建一条，再在 App 里打开
+管理台本地：
 
-Windows 平板要能访问 8787，先放行防火墙：
+```bash
+npm run dev:admin
+```
+
+Vite 代理 `/admin/api`、`/media` 到 8787。
+
+Windows 防火墙：
 
 ```powershell
 netsh advfirewall firewall add rule name="favkit-local-worker" dir=in action=allow protocol=TCP localport=8787 profile=private
 ```
 
-## 测试
-
-不依赖 Wrangler：`node:sqlite` 模拟 D1，本地桥接 + 桩存储模拟外部存储，真实 HTTP 桩站模拟源站/解析/切片。
+## 9. 测试
 
 ```bash
 cd backend-in-worker
 node --test --test-concurrency=1 test/*.test.mjs
 ```
 
-覆盖：协议主链路、primary/变体/换档、backup 准备与 WS、只读存储、上传策略、回调/鉴权、预算、WebSocket、双分片路由等；当前共 68 例（66 pass / 2 个大文件用例视环境跳过）。
+当前 **74 例，72 pass / 2 个大文件用例按环境跳过**。
 
-大文件用例单独跑（需要本机 nginx `:9200` 提供 `sample-200mb.mp4` / `sample-500mb.mp4`，
-以及切片服务 `:3000`；不可达时自动跳过）：
+大文件用例需要本机 nginx `:9200` 和切片服务 `:3000`：
 
 ```bash
 node --test test/large-file.test.mjs
 ```
 
-夹具是流式的：源站是 nginx，桩存储只保留 4MB 以内的字节供小夹具比对，
-大文件只做流式 SHA-256、不保留完整字节，所以 500MB 也不会把测试进程撑大。
-本机实测：200MB → 18 片、约 7s；500MB → 36 片、约 19s
-（回环链路，不含真实外部存储的复制时间）。
+## 10. 已知边界
+
+1. **默认所有 backup 上传依赖 `MEDIA_BASE_URL`**：切片合成、整文件/图片/封面代理都要存储服务能访问 Worker。设为 false 后仅切片依赖。
+2. **Workers Cache 无法在本地测试环境真实执行**：上线后必须用 `cf-cache-status` 验证。
+3. **缓存探测会填充缓存**：管理台“检查/预热”不是纯只读；冷 MISS 可能拉完整对象。
+4. **缓存按边缘位置**：一次 HIT 不代表所有地区命中；WAN/不同 PoP 可能独立 MISS。
+5. **删除远端 backup 仍未接**：删收藏不会清理外部存储文件。
+6. **后台不是实时**：解析/备份最多滞后一个 cron 周期；写入后的 `waitUntil` 可能被 CPU 预算截断。
+7. **D1 单库 500MB**：只存元数据与临时 init，不存媒体正文。
+8. **管理台只读**：重试、删除、清缓存等写操作还没接；`ADMIN_HOST` 为空时管理 API 不限制 Host，生产必须设置并配 Access。
+9. **管理台不显示 App 本地缓存**：App 本地缓存需要 App 自己上报或调试页查看。
+
+## 11. 相关文档
+
+- [同步后台接口说明](../docs/同步后台接口说明.md)
+- [Cloudflare 媒体缓存](../docs/Cloudflare媒体缓存配置.md)
+- [架构与性能验证](../docs/架构与性能验证.md)
+- [管理台开发说明](pages/README.md)

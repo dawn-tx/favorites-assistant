@@ -8,6 +8,7 @@ import { call, createFakeHub, createTestEnv, tick } from './support/harness.mjs'
 import { listen, startOrigin } from './support/origin.mjs';
 import { startBridge, closeServer as closeBridge } from './support/bridge.mjs';
 import { startStorage, closeServer as closeStorage } from './support/storage.mjs';
+import { renderSegments } from '../src/render.js';
 
 let origin;
 let originBase;
@@ -89,6 +90,40 @@ test('segments 只含 primary；每个 A 段带 backup 状态，不再有顶层�
   assert.equal(backupItems().length, 2, '夹具视频应切成 2 个 backup 片');
 });
 
+test('缓存标记：primary 视频/图片和所有 backup 都是 c_', async () => {
+  const video = videoSegment();
+  const image = videoRow.media.segments.find((segment) => segment.kind === 'image');
+  assert.match(video.url, /^\/media\/c_/);
+  assert.match(image.url, /^\/media\/c_/);
+  assert.ok(backupItems().every((item) => item.url.startsWith('/media/c_')));
+  assert.ok(image.backup.items.every((item) => item.url.startsWith('/media/c_')));
+
+  const res = await fetchMedia(video.url, {}, 'HEAD');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  assert.match(res.headers.get('access-control-expose-headers') ?? '', /cf-cache-status/);
+});
+
+test('primary 视频阈值只影响 primary，backup 始终缓存', () => {
+  const primary = {
+    kind: 'video', role: 'primary', key: 's0_primary', fileSize: 1000, videoIndex: 0,
+    title: '视频', durationMs: 1000, backupState: 'ready',
+  };
+  const backup = {
+    kind: 'video', role: 'backup', key: 's0_backup', videoIndex: 0, sliceIndex: 0, ord: 1,
+    title: '备用', durationMs: 1000, backupState: 'ready',
+  };
+  const variants = [{ active: true, key: 's0_variant', videoIndex: 0, fileSize: 1000, quality: '1080P' }];
+
+  const small = renderSegments([primary, backup], variants, 500);
+  assert.match(small[0].url, /^\/media\/n_/);
+  assert.match(small[0].backup.items[0].url, /^\/media\/c_/);
+
+  const large = renderSegments([primary, backup], variants, 2000);
+  assert.match(large[0].url, /^\/media\/c_/);
+  assert.match(large[0].backup.items[0].url, /^\/media\/c_/);
+});
+
 test('primary 整片代理：源站整文件，支持 Range/HEAD', async () => {
   const video = videoSegment();
   const res = await fetchMedia(video.url);
@@ -109,7 +144,9 @@ test('primary 整片代理：源站整文件，支持 Range/HEAD', async () => {
 
 test('full 代理忽略 Range：primary 成功固定 200 整段', async () => {
   const video = videoSegment();
-  const fullUrl = video.url.replace('/media/', '/media/full/');
+  const fullUrl = video.url.startsWith('/media/c_')
+    ? video.url.replace('/media/c_', '/media/full/')
+    : video.url.replace('/media/', '/media/full/');
   const res = await fetchMedia(fullUrl, { range: 'bytes=5-10' });
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('content-range'), null);
@@ -173,22 +210,22 @@ test('图片/封面仍走 primary 代理；备用图来自存储', async () => {
   assert.equal((await backupRes.arrayBuffer()).byteLength, origin.constants.IMAGE.length);
 });
 
-test('上传只传 backup：切片走 Worker 合成地址，备用图直传源地址', async () => {
+test('上传只传 backup：切片和备用图/封面都走 Worker 代理', async () => {
   assert.ok(storage.state.calls > 0);
   const all = storage.state.requests.flat();
   const videos = all.filter((item) => item.type === 'video');
   const images = all.filter((item) => item.type === 'image');
   assert.equal(videos.length, 2, '只应上传两个 backup 切片；primary 整片不上传');
   assert.equal(images.length, 2, '应上传备用图 + 视频封面 backup；primary 封面不上传');
-  assert.ok(videos.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/`)));
-  assert.ok(images.every((item) => item.media.startsWith(originBase)));
+  assert.ok(videos.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/c_`)));
+  assert.ok(images.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/c_`)));
   assert.ok(all.every((item) => item.favorite?.url === videoRow.url));
   assert.ok(all.every((item) => item.favorite?.summary === videoRow.media.summary));
 });
 
 test('同档源过期：重新解析更新 sourceUrl，仍用原 primary URL 播放', async () => {
   const video = videoSegment();
-  const key = /^\/media\/([A-Za-z0-9_-]+)/.exec(video.url)[1];
+  const key = /^\/media\/(?:[cn]_)?([A-Za-z0-9_-]+)/.exec(video.url)[1];
   const readSource = async () => (await env.DB.prepare(
     'SELECT s.url AS url FROM sources s JOIN variants v ON v.source_id = s.id WHERE v.key = ?',
   ).bind(key).first()).url;

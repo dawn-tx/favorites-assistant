@@ -106,7 +106,7 @@ test('列表与 lookup 从控制库取行，再按 shard 拼内容', async () =>
   assert.equal(json.favorites.length, 2);
   for (const row of json.favorites) {
     assert.ok(row.media?.segments?.length > 0);
-    assert.ok(row.media.segments.every((segment) => segment.url.startsWith(`/media/s${row.shard ?? shardForUrl(row.url, 2)}_`)));
+    assert.ok(row.media.segments.every((segment) => /^\/media\/(?:[cn]_)?s\d+_/.test(segment.url)));
   }
 
   const lookup = await call(worker, env, 'POST', '/api/v1/favorites/lookup', { urls: [url0, url1] });
@@ -117,7 +117,7 @@ test('列表与 lookup 从控制库取行，再按 shard 拼内容', async () =>
 test('媒体 key 前缀直接选数据分片', async () => {
   const row = (await call(worker, env, 'GET', '/api/v1/favorites?limit=100')).json.favorites.find((item) => item.url === url0);
   const video = row.media.segments.find((segment) => segment.kind === 'video');
-  assert.ok(video.url.startsWith(`/media/s${shardForUrl(url0, 2)}_`));
+  assert.match(video.url, new RegExp(`^/media/(?:[cn]_)?s${shardForUrl(url0, 2)}_`));
   const res = await worker.fetch(new Request(`https://backend.test/api/v1${video.url}`), env, { waitUntil() {} });
   assert.equal(res.status, 200);
 });

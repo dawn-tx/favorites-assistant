@@ -1,10 +1,11 @@
-import { mediaPath, segmentExt } from './keys.js';
+import { DEFAULT_PRIMARY_CACHE_MAX_BYTES } from './config.js';
+import { publicMediaPath, segmentExt } from './keys.js';
 
 /**
  * App 只拿 primary 段；每个视频的 variants 与 backup items 附在这条 primary 上。
- * backup 切片不再作为顶层 segments。
+ * 所有 backup 都是存储回源，全部进入缓存入口；只有 primary 视频按阈值决定。
  */
-export function renderSegments(assets, variants = []) {
+export function renderSegments(assets, variants = [], primaryCacheMaxBytes = DEFAULT_PRIMARY_CACHE_MAX_BYTES) {
   const primary = [];
   const backupByVideo = new Map();
   const backupByImage = new Map();
@@ -33,14 +34,19 @@ export function renderSegments(assets, variants = []) {
     const isVideo = asset.kind === 'video';
     const active = isVideo ? activeByVideo.get(asset.videoIndex) : null;
     const items = (isVideo ? backupByVideo.get(asset.videoIndex) : backupByImage.get(asset.imageIndex)) ?? [];
+    const primarySize = Number(active?.fileSize ?? asset.fileSize ?? 0);
+    const primaryCacheable = !isVideo || (primarySize > 0 && primarySize <= primaryCacheMaxBytes);
+    const primaryKey = active ? active.key : asset.key;
     return {
       index,
       kind: asset.kind,
       title: asset.title,
-      cover_url: asset.coverKey ? mediaPath(asset.coverKey, '.jpg') : '',
+      cover_url: asset.coverKey
+        ? publicMediaPath(asset.coverKey, '.jpg', true)
+        : '',
       url: isVideo
-        ? (active ? mediaPath(active.key, '.mp4') : mediaPath(asset.key, '.mp4'))
-        : mediaPath(asset.key, segmentExt(asset.kind)),
+        ? publicMediaPath(primaryKey, '.mp4', primaryCacheable)
+        : publicMediaPath(asset.key, segmentExt(asset.kind), true),
       duration_ms: asset.durationMs,
       quality: isVideo ? (active?.quality ?? '') : '',
       active_quality: isVideo ? (active?.quality ?? '') : '',
@@ -51,7 +57,8 @@ export function renderSegments(assets, variants = []) {
         items: items.map((item) => ({
           kind: item.kind,
           title: item.title,
-          url: mediaPath(item.key, segmentExt(item.kind)),
+          // 只要是 backup 就是存储回源，全部进缓存入口
+          url: publicMediaPath(item.key, segmentExt(item.kind), true),
           duration_ms: item.durationMs,
           quality: item.quality,
           video_index: item.videoIndex ?? null,
@@ -64,7 +71,7 @@ export function renderSegments(assets, variants = []) {
 }
 
 /** 对外形状：用户四列 + 内容 + 就绪状态。没有 id、rev、字段戳这些多人协作才需要的东西 */
-export function publicRow(row, assets = [], variants = []) {
+export function publicRow(row, assets = [], variants = [], primaryCacheMaxBytes = DEFAULT_PRIMARY_CACHE_MAX_BYTES) {
   return {
     url: row.url,
     note: row.note ?? '',
@@ -74,7 +81,7 @@ export function publicRow(row, assets = [], variants = []) {
     updated_at: row.updatedAt ?? 0,
     media_state: row.mediaState ?? 'pending',
     failed_reason: row.failedReason ?? '',
-    media: row.media ? { ...row.media, segments: renderSegments(assets, variants) } : null,
+    media: row.media ? { ...row.media, segments: renderSegments(assets, variants, primaryCacheMaxBytes) } : null,
   };
 }
 

@@ -14,6 +14,8 @@ export function jsonResponse(status, payload, headers = {}) {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
+      // Workers Cache 会按默认规则缓存没有 Cache-Control 的 200；数据接口必须显式 no-store
+      'cache-control': 'no-store',
       ...headers,
     },
   });

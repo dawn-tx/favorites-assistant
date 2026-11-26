@@ -67,7 +67,7 @@ async function backupAssets(env, url) {
   const favorite = await env.DB.prepare('SELECT id FROM favorites WHERE url = ?').bind(url).first();
   if (!favorite) return [];
   const { results } = await env.DB.prepare(
-    "SELECT kind, slice_index, store_id, init_id, start_offset, error FROM assets WHERE favorite_id = ? AND role = 'backup' ORDER BY ord",
+    "SELECT key, kind, slice_index, store_id, init_id, start_offset, error FROM assets WHERE favorite_id = ? AND role = 'backup' ORDER BY ord",
   ).bind(favorite.id).all();
   return results ?? [];
 }
@@ -111,23 +111,56 @@ test('批量上传：只传 backup，按 STORAGE_BATCH_SIZE 切批', async () =>
   }
 });
 
-test('阈值：不超过片大小时短视频只传一个整文件 backup', async () => {
+test('阈值：不超过切片阈值时只传一个整文件 backup', async () => {
   const env = await makeEnv();
   const url = 'https://example.com/whole';
   await sync(env, url, { mode: 'size', bytes: 400_000 });
   const { row } = await waitTerminal(env, url);
   const videos = row.media.segments.filter((segment) => segment.kind === 'video');
   assert.equal(videos.length, 1, 'primary 永远只有一条完整视频');
-  assert.equal(videos[0].backup.items.length, 1, '短视频 backup 只有一个整文件');
+  assert.equal(videos[0].backup.items.length, 1, '未超过切片阈值的 backup 只有一个整文件');
   const backupVideo = (await backupAssets(env, url)).find((asset) => asset.kind === 'video');
   assert.equal(backupVideo.slice_index, null);
   assert.ok(backupVideo.store_id.startsWith('st-'));
 });
 
-test('整片/备用图直传源地址：没配 MEDIA_BASE_URL 也能完成上传', async () => {
+test('默认整段/备用图也走 Worker 代理，不再直传源站', async () => {
+  storage.state.requests.length = 0;
+  const env = await makeEnv();
+  const url = 'https://example.com/worker-proxy-all';
+  await sync(env, url, { mode: 'size', bytes: 400_000 });
+  await waitTerminal(env, url);
+
+  const items = storage.state.requests.flat();
+  assert.ok(items.length >= 2, '整文件 backup 和备用图都应上传');
+  assert.ok(
+    items.every((item) => item.media.startsWith(`${env.MEDIA_BASE_URL}/media/`)),
+    `整段/图片应统一走 Worker：${items.map((item) => item.media).join(', ')}`,
+  );
+  const assets = await backupAssets(env, url);
+  assert.ok(assets.every((asset) => asset.store_id.startsWith('st-')));
+});
+
+test('整段 backup 也进缓存入口：/media/c_ HEAD 200', async () => {
+  const env = await makeEnv();
+  const url = 'https://example.com/whole-cache';
+  await sync(env, url, { mode: 'size', bytes: 400_000 });
+  await waitTerminal(env, url);
+  const whole = (await backupAssets(env, url)).find((asset) => asset.kind === 'video' && asset.slice_index == null);
+  assert.ok(whole?.key);
+  const response = await worker.fetch(
+    new Request(`https://backend.test/api/v1/media/c_${whole.key}.mp4`, { method: 'HEAD' }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(response.status, 200);
+});
+
+test('关闭 STORAGE_MEDIA_VIA_WORKER 后：整片/备用图恢复直传源地址', async () => {
   const env = createTestEnv({
     ...baseVars(),
     MEDIA_BASE_URL: '',
+    STORAGE_MEDIA_VIA_WORKER: 'false',
     STORAGE_UPLOAD_URL: `${storage.base}/upload`,
   });
   const url = 'https://example.com/direct-source';
@@ -182,7 +215,7 @@ test('没配 MEDIA_BASE_URL：切片 backup 失败，错误落到 backup asset �
   assert.ok(errors.results.some((item) => /MEDIA_BASE_URL/.test(item.error)));
 });
 
-test('长视频切片失败：primary 仍 ready，只把 backup 标 failed', async () => {
+test('切片 backup 失败：primary 仍 ready，只把 backup 标 failed', async () => {
   const env = await makeEnv({ SLICE_SERVICE_URL: 'http://127.0.0.1:1/slice' });
   const url = 'https://example.com/slice-fail';
   await sync(env, url);

@@ -3,8 +3,9 @@
 # 绑定：
 #   DB        —— D1：收藏、资产、任务元数据
 #
-# 媒体备份不放 Worker 侧：切片上传交给外部存储服务的是本服务的合成地址，整片/图片/封面直传源地址，
-# 拿回 id 写进 assets.store_id。下载/删除的适配层在 src/media/storage.js（当前是框架）。
+# 媒体备份不放 Worker 侧：默认所有 backup 上传都回源 Worker 的代理/合成地址，
+# 再由外部存储复制；切片由 Worker 合成 init + 区间，整段/图片/封面由 Worker 流式代理。
+# 拿回 id 写进 assets.store_id。下载/删除的适配层在 src/policy/storage-download.js。
 #
 # 首次部署后执行一次建表：
 #   wrangler d1 execute favorites --remote --file=src/store/schema.sql
@@ -13,11 +14,18 @@
 #   SYNC_TOKEN / MEDIA_KEY_SECRET / STORAGE_TOKEN
 
 name = "favorites-backend"
-main = "src/index.js"
+# 入口同时导出默认路由、DO 和开启 Workers Cache 的 MediaCache entrypoint
+main = "src/entry.js"
 compatibility_date = "2025-09-01"
 
 [observability]
 enabled = true
+
+# 前端由 pages/ 构建到 pages/dist，assets-first；API/媒体路径强制先跑 Worker。
+[assets]
+directory = "./pages/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/admin/api/*", "/api/*", "/media/*"]
 
 [triggers]
 # 每 3 分钟跑任务队列（解析/备份准备/上传），每天回收孤儿 init/source。
@@ -25,6 +33,9 @@ crons = ["*/3 * * * *", "41 4 * * *"]
 
 [vars]
 BASE_PATH = "/api/v1"
+# 管理台独立子域；本地可留空，生产建议填 admin.example.com。
+# 管理 API 只在这个 Host 上响应，Cloudflare Access 也应该挂在这个子域。
+ADMIN_HOST = ""
 INGEST_PATH = "/ingest/callback"
 INGEST_SOURCE_APP = "第三方"
 # 控制库存 favorites/jobs；内容分片 DB_1..DB_N 存 assets/variants/sources/inits
@@ -44,12 +55,37 @@ UPLOAD_JOB_LOCK_MS = "600000"
 # 外部存储服务（上传接口单次最多 10 条）
 # 默认不备份视频封面；设为 "true" 后每个视频额外上传一张封面备份。
 BACKUP_COVERS = "false"
-# 只有切片上传用这个 Worker 合成地址；短视频/备用图直接传源站地址。
+# 默认所有 backup 的上传地址都走 Worker；设 false 时短视频/备用图/封面直传源站，
+# 切片仍必须走 Worker 的合成地址。
+STORAGE_MEDIA_VIA_WORKER = "true"
+# primary 视频进入 Workers Cache 的阈值；backup 全部缓存，不受此值影响。
+# 0 = 不缓存 primary 视频。
+PRIMARY_CACHE_MAX_BYTES = "18874368"
+# 所有 backup 都走 Worker 时，这里必须公网可达；存储服务要从这里回源复制。
 MEDIA_BASE_URL = "https://REPLACE_WITH_YOUR_WORKER.workers.dev/api/v1"
 STORAGE_UPLOAD_URL = ""
 STORAGE_GET_URL = ""
 STORAGE_BATCH_SIZE = "10"
 STORAGE_TIMEOUT_MS = "300000"
+
+# Workers Cache：默认入口关闭，只有 MediaCache entrypoint 开启。
+# 可缓存媒体在 key 前加内部 c_ 标记，普通 Range 媒体加 n_；App 侧仍是 /media/<key>。
+# 所有 backup 缓存；primary 视频按 PRIMARY_CACHE_MAX_BYTES 阈值判断。
+[cache]
+enabled = false
+cross_version_cache = true
+
+[exports.default]
+type = "worker"
+
+  [exports.default.cache]
+  enabled = false
+
+[exports.MediaCache]
+type = "worker"
+
+  [exports.MediaCache.cache]
+  enabled = true
 
 [[d1_databases]]
 binding = "DB"

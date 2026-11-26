@@ -86,6 +86,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
+import coil.decode.DataSource
 import com.favkit.tablet.R
 import com.favkit.tablet.core.TabletScale
 import com.favkit.tablet.data.BackupItem
@@ -95,6 +97,8 @@ import com.favkit.tablet.data.MediaKind
 import com.favkit.tablet.data.MediaSegment
 import com.favkit.tablet.data.SourceMode
 import com.favkit.tablet.di.AppGraph
+import com.favkit.tablet.media.MediaOrigin
+import com.favkit.tablet.media.MediaOriginTracker
 import com.favkit.tablet.media.PlayerUiState
 import com.favkit.tablet.ui.components.PLAYBACK_SPEEDS
 import com.favkit.tablet.ui.components.ConfirmDialog
@@ -418,6 +422,8 @@ private fun FeedPage(
     }
     val activeKind = backupItem?.kind ?: current?.kind
     val activeQuality = backupItem?.quality ?: current?.displayQuality.orEmpty()
+    val activeUrl = backupItem?.url ?: current?.url.orEmpty()
+    val activeOrigin = activeUrl.takeIf { it.isNotBlank() }?.let { state.mediaOrigins[it] }
     // 底部段条按 A 段折叠；BACKUP 的片间切换走右侧竖向片条
     val stripItems = remember(favorite.id, favorite.segments) { buildStripItems(favorite.segments) }
     val stripIndex = currentStripIndex(stripItems, focus.segmentIndex)
@@ -528,6 +534,7 @@ private fun FeedPage(
                 FeedInfoBlock(
                     favorite = favorite,
                     focus = focus,
+                    origin = activeOrigin,
                     onOpenDetails = onOpenDetails,
                 )
                 if (isVideo) {
@@ -753,6 +760,7 @@ private fun SpeedColumn(
 private fun FeedInfoBlock(
     favorite: Favorite,
     focus: FocusUiState,
+    origin: MediaOrigin?,
     onOpenDetails: () -> Unit,
 ) {
     var expanded by remember(favorite.id) { mutableStateOf(false) }
@@ -785,6 +793,9 @@ private fun FeedInfoBlock(
                     color = Color(0xC7FFFFFF),
                 )
             }
+        }
+        if (origin != null) {
+            MediaOriginBadge(origin)
         }
         Text(
             text = currentTitle,
@@ -832,6 +843,39 @@ private fun FeedInfoBlock(
             modifier = Modifier
                 .padding(vertical = 6.dp)
                 .clickable(onClickLabel = "打开详情", onClick = onOpenDetails),
+        )
+    }
+}
+
+@Composable
+private fun MediaOriginBadge(origin: MediaOrigin) {
+    val label = when (origin) {
+        MediaOrigin.LOCAL -> "本地缓存"
+        MediaOrigin.EDGE -> "边缘命中"
+        MediaOrigin.ORIGIN -> "回源"
+    }
+    val tint = when (origin) {
+        MediaOrigin.LOCAL -> Color(0xFF6EE7B7)
+        MediaOrigin.EDGE -> Color(0xFF93C5FD)
+        MediaOrigin.ORIGIN -> Color(0xFFFCD34D)
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color(0x33000000))
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(5.dp)
+                .background(tint, CircleShape),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+            color = tint,
         )
     }
 }
@@ -992,6 +1036,15 @@ private fun ImageStage(
             model = segment.url,
             contentDescription = segment.title.ifBlank { "第 ${segment.index + 1} 张图片" },
             contentScale = ContentScale.Fit,
+            onState = { state ->
+                if (state is AsyncImagePainter.State.Success) {
+                    when (state.result.dataSource) {
+                        DataSource.MEMORY_CACHE, DataSource.DISK ->
+                            MediaOriginTracker.record(segment.url, MediaOrigin.LOCAL)
+                        else -> Unit
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {

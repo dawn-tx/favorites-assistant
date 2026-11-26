@@ -80,6 +80,8 @@ https://demo.local/mixed    视频 + 3 张图
 https://demo.local/images   纯图集 4 张
 ```
 
+> 以下 `mock-server` 是本地联调参考实现，仍保留旧的单档/切片模型；生产 Cloudflare Worker 的行为以 [backend-in-worker/README.md](backend-in-worker/README.md) 为准。
+
 - 协议是纯明文 JSON。数据接口：`POST /sync`（上传变更，回执通常还是 `pending`）、`GET /favorites`（分页取收藏）、`POST /favorites/lookup`（批量取内容）、`POST /resolve`（手动重解析）；媒体由免鉴权的 `GET /media/<key>.<ext>` 代理，源地址失效时自动回落存储备份。另有 `GET /health` / `GET /meta`。
   没有信封加密、没有 RSA 密钥，也**没有取解析结果的轮询接口** —— 解析是异步的：回执通常是 `pending`，内容靠对账与单条 `lookup` 取回。
   `GET /favorites` 按 `favorite_at` 倒序做 keyset 分页，App 侧本地表只是它的分页缓存。
@@ -94,7 +96,8 @@ https://demo.local/images   纯图集 4 张
 - **Cloudflare Worker 版**在 [backend-in-worker/](backend-in-worker/README.md)：同一套 HTTP 协议，元数据落 D1，
   媒体备份交给外部存储服务，解析/备份由 cron 驱动；另外提供 `/api/v1/ws` 控制面与变更推送（Durable Object 中枢）。
   D1 分 1 个控制库（favorites/jobs）+ 9 个数据分片（assets/variants/sources/inits），收藏按 URL 哈希路由。
-  部署、限额与参数以该目录的 README 为准；**哪些配置吃额度、怎么调，见其中的「免费版额度与配置调节」一节**。
+  媒体缓存：App 本地缓存 + `MediaCache` entrypoint（backup 全部缓存、primary 图片/封面缓存、primary 视频按 `PRIMARY_CACHE_MAX_BYTES` 判断）；独立 Vue 管理台在 `backend-in-worker/pages/`，配置与上传代理说明见 [Cloudflare媒体缓存配置](docs/Cloudflare媒体缓存配置.md)。
+  部署、限额与参数以 [backend-in-worker/README.md](backend-in-worker/README.md) 为准；其中「部署」和「额度与调节」是 Cloudflare 部署的唯一入口，缓存细节见 [Cloudflare媒体缓存配置](docs/Cloudflare媒体缓存配置.md)。
 - **真机连不上先看这三条**：
   1. Windows 防火墙默认拦 8787 入站，管理员 PowerShell 放行一次即可：
      `netsh advfirewall firewall add rule name="favkit-mock" dir=in action=allow protocol=TCP localport=8787 profile=private`
@@ -148,7 +151,7 @@ docs/                          使用说明、架构与性能验证、同步后�
 | 面板四段结构（只读链接 / 手写备注 / 横滚标签 + 内联新建标签 / 保存同步·关闭） | `FloatingPanelScreen` |
 | 手写笔直接书写 | `StylusNoteField`：AndroidView 承载真实 `EditText`，复用 Android 14+ 对可编辑文本框默认开启的手写笔直写；更早系统用手写输入法，无需额外权限 |
 | 上报 url+备注+标签+来源+时间戳 | `SyncApi` 明文 JSON `POST /sync`，一次一条；成功只认 `applied == 1`，对不上就留在队列并标红，绝不静默丢数据 |
-| 一条收藏链接 ≠ 一个视频 | 收藏只存用户数据；后台把链接解析成素材清单：primary 每个视频/图片一条，长视频的 backup 另存为切片组。解析成功内容即可播可看，备份随后异步完成：`media{ title, author, site, summary, segments[], failed_reason, resolved_at }`，`segments[]` 只放 primary，地址是后台的虚拟代理地址。没就绪时条目照样在墙上，显示「内容还在后台准备」；本地存进 `favorites` 的 `segmentsJson` 一列，不额外建表 |
+| 一条收藏链接 ≠ 一个视频 | 收藏只存用户数据；后台把链接解析成素材清单：primary 每个视频/图片一条，backup 超过切片阈值时另存为切片组。解析成功内容即可播可看，备份随后异步完成：`media{ title, author, site, summary, segments[], failed_reason, resolved_at }`，`segments[]` 只放 primary，地址是后台的虚拟代理地址。没就绪时条目照样在墙上，显示「内容还在后台准备」；本地存进 `favorites` 的 `segmentsJson` 一列，不额外建表 |
 | 同一条链接重复分享 | `FloatingSaveUseCase` 保存前先按链接原样查库（`FavoritesRepository.byUrl`，软删除过的不算，且排在建标签之前，免得留下孤儿标签）；命中返回 `SaveOutcome.Duplicate` → 不入库、不排队，面板用 `PanelStatus.NOTICE` 中性色提示已有收藏，草稿不动。刻意不做参数归一化：B 站 `?p=` 分 P 是不同内容 |
 | 新收藏先进本地队列，按节奏逐条上传 | `SyncGate` 是唯一出站闸门：上传与重建内容按 `next_wait_ms ?? 上传间隔（默认 3000ms）` 占时隙，读请求（清单、lookup）只串行不等待；`SyncWorker` 每次只取 1 条 |
 | 2 秒轻提示 + 自动收起 + 回到原 App | Toast `LENGTH_SHORT`，面板窗口关闭，不启动任何 Activity |
@@ -159,7 +162,7 @@ docs/                          使用说明、架构与性能验证、同步后�
 | 内置播放器倍速、拖动 | `PlayerStage` 只剩画面本体：一个 `AndroidView(PlayerView)`（`useController=false`）+ 一层只吃「轻点」的点击面 + 缓冲转圈，一律 `RESIZE_MODE_FIT` 完整显示、不裁切，横竖屏同一条路径 —— 原来「竖屏 `RESIZE_MODE_ZOOM` 裁满 / 横屏 Fit」与独立的 ⛶ 全屏层（`FullscreenLayer`）一起删了，画面没有第二种尺寸可切。控件全在遮罩层的控制层上：正中 ▶/⏸ 管播放暂停，底部播放条 = `Slider`（拖动只改指针、松手才 seek）+ 尾部「当前 / 总时长」+ 倍速（0.75x~2x 五档，点按钮在正上方升起一列档位，同层渲染不是弹窗）；图集段不给播放条与倍速，只留段号与文案。详情里那个「播放」一行（`PlayControls`）因此删除，只在 `player.error` 非空时补一句原因 |
 | 备注编辑、标签调整、批量删除 | `FocusOverlay` 详情（竖屏底部抽屉与横屏右侧抽屉是同一份 `FocusInfo`：备注、标签点一下即生效、缓存、删除）+ `VideoWall` 长按多选批量条 |
 | 服务端为准 + 本地镜像 | 后台是收藏的事实来源，Room 这张表是它的镜像。前台连 WebSocket 接收增删改推送；**每次进前台自动翻一遍清单档**（只带 url / 时间 / 状态，不带内容）做差集，补断线/后台期间漏掉的变化：缺的补、变的刷新、后台已经没有的活行删掉；冷启动发现空表自动取第一页、墙离底还有两屏静默补一页（`GET /favorites?limit=&cursor=` 走 keyset 游标），一次 50 条；每页同时带回 `total`（后台总数），**只有 `has_more` 为真时**才用那个数（墙头「已取回 50 / 1280 条」、顶栏「共 1280 · 已取回 50」）；页取全了本地就是镜像，改口只报本地条数 —— 总数只在翻页时刷新，删一条还拿它比就会说出「共 20 · 已取回 19」；写操作仍先落本地 + 排队上传，离线能翻本地已有的一切 |
-| 视频离线可播 | `SimpleCache` 边播边存 + 单条「缓存到本地」预取（可显示进度、随时取消，上限 128MB~2GB 五档）。**缓存到本地按 primary A 段预取**：长视频 primary 是一个完整文件，读完才标「已缓存」；backup 需要切过去时按需读存储，不参与这个标记。旧后台的 HLS `.m3u8` 仍只边播边存。条目本身、备注与标签在本地库里，离线照常翻。「清空视频缓存」把字节和 `favorites.locallyCached` 一起清掉 —— 卡片那个绿点和遮罩里「已缓存，离线可直接播放」读的就是这一列，只删字节会留下「明明清完了还说着已缓存」 |
+| 视频离线可播 | `SimpleCache` 边播边存 + 单条「缓存到本地」预取（可显示进度、随时取消，上限 128MB~2GB 五档）。**缓存到本地按 primary A 段预取**：primary 是一个完整文件，读完才标「已缓存」；backup 需要切过去时按需读存储，不参与这个标记。旧后台的 HLS `.m3u8` 仍只边播边存。条目本身、备注与标签在本地库里，离线照常翻。「清空视频缓存」把字节和 `favorites.locallyCached` 一起清掉 —— 卡片那个绿点和遮罩里「已缓存，离线可直接播放」读的就是这一列，只删字节会留下「明明清完了还说着已缓存」 |
 | 顶栏那颗按钮只做一件事、且不说歧义话 | 圆形「刷新」图标撤了——它一直被认为是在刷新墙列表。换成跟着当前该做什么写的**文字按钮**：有失败 →「重试上传 N」（红字），队列里还有 →「继续上传 N」，正在传 → 原地转圈，一切干净 → **不出现**。点它是把重试耗尽/被拒的任务重新排队并立刻跑一轮 `SyncWorker`，四种情况各有轻提示（离线 / 已重新排队 N 条 / 已推动继续上传 / 本地与后台一致）。要重新拉列表请用筛选抽屉里的「从后台加载」。状态胶囊三枚 `离线 / 待同步 N / 失败 N` 全部只数上传队列，失败那批已从待同步里减掉；解析失败不占任何全局计数，只是那条卡片上的一行字 |
 
 ## 六、已知边界（诚实说明）

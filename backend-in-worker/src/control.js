@@ -28,7 +28,7 @@ function groupVariants(variants) {
   return map;
 }
 
-async function rowsWithMedia(env, rows) {
+async function rowsWithMedia(env, rows, cfg) {
   if (rows.length === 0) return [];
   const byShard = new Map();
   for (const row of rows) {
@@ -48,7 +48,7 @@ async function rowsWithMedia(env, rows) {
   const variants = results.flatMap(([, foundVariants]) => foundVariants);
   const byFavorite = groupByFavorite(assets);
   const variantsByFavorite = groupVariants(variants);
-  return rows.map((row) => publicRow(row, byFavorite.get(row.id) ?? [], variantsByFavorite.get(row.id) ?? []));
+  return rows.map((row) => publicRow(row, byFavorite.get(row.id) ?? [], variantsByFavorite.get(row.id) ?? [], cfg.primaryCacheMaxBytes));
 }
 
 export async function listFavoritesPage(env, cfg, { fields, cursorRaw, limitRaw }) {
@@ -71,7 +71,7 @@ export async function listFavoritesPage(env, cfg, { fields, cursorRaw, limitRaw 
   if (min) {
     favorites = page.map(minRow);
   } else {
-    favorites = await rowsWithMedia(env, page);
+    favorites = await rowsWithMedia(env, page, cfg);
   }
   const last = page[page.length - 1];
   return {
@@ -95,7 +95,7 @@ export async function lookupFavorites(env, cfg, urls) {
     throw new HttpError(400, `一次最多查询 ${cfg.lookupMaxUrls} 个 url`);
   }
   const rows = await getFavoritesByUrls(metaDb(env), unique);
-  return rowsWithMedia(env, rows);
+  return rowsWithMedia(env, rows, cfg);
 }
 
 export async function resolveFavorites(env, cfg, urls, rawRule) {
@@ -122,7 +122,7 @@ export async function resolveFavorites(env, cfg, urls, rawRule) {
 
   const refreshed = rows.length > 0 ? await getFavoritesByUrls(meta, rows.map((row) => row.url)) : [];
   return {
-    favorites: await rowsWithMedia(env, refreshed),
+    favorites: await rowsWithMedia(env, refreshed, cfg),
     unknown_urls: unknownUrls,
   };
 }

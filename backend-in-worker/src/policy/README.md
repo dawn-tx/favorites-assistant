@@ -21,6 +21,6 @@
 - 换解析服务：改 `parser.js` 的 `parserConfig` 和请求形状，字段不兼容再改 `parser-normalize.js`。
 - 换存储服务：改 `storage-upload.js` / `storage-download.js`。
 - 改选档或切片策略：改 `selection.js` / `slicing.js`，但保持返回值。
-- 只想改媒体上传走 Worker 还是源站：改 `storage-upload.js` 的 `mediaUrl`。
+- 只想改媒体上传走 Worker 还是源站：用 `STORAGE_MEDIA_VIA_WORKER` 控制，默认 `true`；代码在 `storage-upload.js` 的 `mediaUrl`。
 
 `parse.js`、`runner.js`、`media/proxy.js` 只消费这些返回值，不负责理解外部服务字段。

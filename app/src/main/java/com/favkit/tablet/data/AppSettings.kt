@@ -28,7 +28,7 @@ data class SettingsSnapshot(
     val imageCacheLimitMb: Long,
     /** 上一条传完后，后台没给等待时间时用的间隔 */
     val uploadIntervalMs: Long,
-    /** 上传切片的片大小，同时也是“长视频”的判定阈值；只影响新收藏与手动「重新准备」 */
+    /** backup 上传的切片阈值；超过按切片，未超过按整文件。只影响新收藏与手动「重新准备」 */
     val sliceRuleBytes: Long,
     val deviceId: String,
 )
@@ -93,7 +93,7 @@ class AppSettings(context: Context) {
     suspend fun setUploadIntervalMs(value: Long) =
         update { this[Keys.UPLOAD_INTERVAL] = value.coerceIn(0L, MAX_UPLOAD_INTERVAL_MS) }
 
-    /** 片大小：同时作为“长视频”的判定阈值；设置页按 1–1024MB 输入 */
+    /** backup 切片阈值；设置页按 1–1024MB 输入 */
     suspend fun setSliceRuleBytes(value: Long) =
         update { this[Keys.SLICE_BYTES] = value.coerceIn(MIN_SLICE_BYTES, MAX_SLICE_BYTES) }
 

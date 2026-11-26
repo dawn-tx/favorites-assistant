@@ -11,6 +11,7 @@ captures/
 .cxx/
 node_modules/
 .temp/
+backend-in-worker/pages/dist/
 
 # mock 同步服务的本地数据，不要提交
 mock-server/data.json

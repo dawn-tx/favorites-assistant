@@ -3,11 +3,10 @@ package com.favkit.tablet.media
 import android.content.Context
 import android.net.Uri
 import androidx.media3.common.C
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
-import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.database.StandaloneDatabaseProvider
@@ -53,7 +52,10 @@ class MediaCache(context: Context, private val settings: AppSettings) {
 
     private var limitBytes = DEFAULT_LIMIT
     private var cache: SimpleCache = newCache(limitBytes)
-    private var cachedFactory: CacheDataSource.Factory = newFactory(cache)
+    private var cachedFactory: DataSource.Factory = newFactory(cache)
+
+    /** 最近一次实际加载来源；键是绝对媒体 URL */
+    val origins = MediaOriginTracker.origins
 
     /** 全局 429 冷却：期间新的视频播放/预取直接不发起请求，提示条显示剩余时间 */
     private val _throttleRemainingMs = MutableStateFlow(0L)
@@ -72,10 +74,8 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         StandaloneDatabaseProvider(appContext),
     )
 
-    private fun newFactory(target: SimpleCache): CacheDataSource.Factory = CacheDataSource.Factory()
-        .setCache(target)
-        .setUpstreamDataSourceFactory(DefaultDataSource.Factory(appContext, upstream))
-        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or CacheDataSource.FLAG_BLOCK_ON_CACHE)
+    private fun newFactory(target: SimpleCache): DataSource.Factory =
+        TrackingCacheDataSourceFactory(appContext, target, upstream)
 
     fun mediaSourceFactory(): MediaSource.Factory = DefaultMediaSourceFactory(cachedFactory)
         .setLoadErrorHandlingPolicy(Http429RetryPolicy(::blockThrottle))
@@ -129,6 +129,7 @@ class MediaCache(context: Context, private val settings: AppSettings) {
      */
     suspend fun evict(url: String) = withContext(Dispatchers.IO) {
         runCatching { cache.removeResource(url) }
+        MediaOriginTracker.forget(url)
     }
 
     /**
@@ -162,6 +163,7 @@ class MediaCache(context: Context, private val settings: AppSettings) {
         limitBytes = settings.current().cacheLimitMb * MB
         cache = newCache(limitBytes)
         cachedFactory = newFactory(cache)
+        MediaOriginTracker.clear()
     }
 
     /**

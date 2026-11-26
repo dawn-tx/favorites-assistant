@@ -6,6 +6,12 @@ import { handleListFavorites, handleLookup } from './handlers/favorites.js';
 import { handleResolve } from './handlers/resolve.js';
 import { handleIngest, handleHealth } from './handlers/ingest.js';
 import { handleMeta } from './handlers/meta.js';
+import {
+  adminHostAllowed,
+  handleAdminFavorites,
+  handleAdminJobs,
+  handleAdminOverview,
+} from './handlers/admin.js';
 import { runScheduled, runGc } from './scheduled/runner.js';
 import { LibraryHub } from './hub.js';
 
@@ -26,6 +32,13 @@ export default {
     const method = request.method;
 
     try {
+      if (path.startsWith('/admin/api/')) {
+        if (!adminHostAllowed(request, cfg)) return jsonResponse(404, { ok: false, error: 'not found' });
+        if (path === '/admin/api/overview' && method === 'GET') return await handleAdminOverview(request, env, cfg);
+        if (path === '/admin/api/favorites' && method === 'GET') return await handleAdminFavorites(request, env, cfg, url);
+        if (path === '/admin/api/jobs' && method === 'GET') return await handleAdminJobs(request, env, cfg, url);
+        return jsonResponse(404, { ok: false, error: 'not found' });
+      }
       if (path === `${cfg.basePath}/health` && method === 'GET') {
         return await handleHealth(env);
       }
@@ -40,6 +53,19 @@ export default {
         }
         const stub = env.LIB.get(env.LIB.idFromName('library'));
         return stub.fetch(request);
+      }
+      if (path.startsWith(`${cfg.basePath}/media/c_`) && (method === 'GET' || method === 'HEAD')) {
+        const relative = `/media/${path.slice(`${cfg.basePath}/media/c_`.length)}`;
+        const forwarded = new URL(request.url);
+        forwarded.pathname = `${cfg.basePath}${relative}`;
+        const target = new Request(forwarded, request);
+        // App 只看到 /media/<key>；c_ 是内部缓存标记，交给 MediaCache entrypoint
+        if (ctx?.exports?.MediaCache) return await ctx.exports.MediaCache.fetch(target);
+        return await handleMedia(request, env, cfg, relative, true);
+      }
+      if (path.startsWith(`${cfg.basePath}/media/n_`) && (method === 'GET' || method === 'HEAD')) {
+        const relative = `/media/${path.slice(`${cfg.basePath}/media/n_`.length)}`;
+        return await handleMedia(request, env, cfg, relative, false);
       }
       if (path.startsWith(`${cfg.basePath}/media/`) && (method === 'GET' || method === 'HEAD')) {
         return await handleMedia(request, env, cfg, path.slice(cfg.basePath.length));
